@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Voxel Sand GPU Demo</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="hud">
+        <div class="title">Voxel Sand (GPU)</div>
+        <div class="hint">FPS: click to lock · WASD/Space/Shift move · LMB add · RMB erase</div>
+      </header>
+      <canvas id="viewport" width="768" height="512"></canvas>
+      <div class="crosshair" aria-hidden="true"></div>
+      <div class="footer">
+        <span>WebGPU compute + ping-pong buffers</span>
+      </div>
+    </main>
+    <script type="module" src="main.js"></script>
+  </body>
+</html>
