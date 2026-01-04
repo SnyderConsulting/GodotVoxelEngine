@@ -8,9 +8,6 @@ config/name="VoxLand"
 run/main_scene="res://scenes/Main.tscn"
 config/features=PackedStringArray("4.2")
 
-[autoload]
-DebugAPI="res://scripts/debug_api.gd"
-
 [display]
 window/size/viewport_width=1280
 window/size/viewport_height=720

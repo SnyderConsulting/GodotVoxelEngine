@@ -3,3 +3,7 @@ dist/
 .DS_Store
 Thumbs.db
 *.log
+*.import
+godot/engine-bin/
+godot/project/.godot/
+godot/project/.import/

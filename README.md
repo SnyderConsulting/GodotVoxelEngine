@@ -1,41 +1,88 @@
-# Voxel Sand GPU Demo
+# VoxLand (Godot GPU Voxel Reset)
 
-Proof-of-concept 3D voxel sand simulation using WebGPU compute shaders and a ray-marched renderer.
+This project is a clean restart focused on a single GPU-resident voxel cube rendered in Godot via compute shaders, following the architecture outlined in `Voxel Physics Engine Deep Dive.md`.
 
-## Controls
+## Goal
 
-- Click canvas to lock pointer
-- WASD: move
-- Space: jump
-- Left Shift: sprint
-- Mouse: look
-- 1-8: select hotbar slot
-- LMB: use item
+- Render a 128x128x128 voxel cube entirely on the GPU.
+- Use a brickmap + indirection buffer for sparse storage (8x8x8 bricks).
+- Provide a 360-degree isometric-style view with orbit/zoom controls.
+- Keep simulation optional; the initial focus is on rendering and camera control.
+
+## Planned Architecture
+
+- **GPU-resident state**: voxel data stays in VRAM; CPU only uploads initial data and optional debug readbacks.
+- **Brickmap layout**:
+  - Indirection buffer maps brick coords to atlas indices.
+  - Atlas buffer stores voxel material/flags per brick.
+  - Occupancy buffer flags non-empty bricks to accelerate traversal.
+- **Compute shaders**:
+  - Occupancy pass (brick-level occupied flags).
+  - Raymarch pass (screen-space render into a texture).
+  - Optional sim passes later (active list + indirect args + ping-pong buffers).
+
+## Scene Overview
+
+- A minimal `Main.tscn` with:
+  - Camera orbit rig (mouse drag rotate, wheel zoom, optional pan).
+  - Renderer node that owns GPU buffers and dispatches compute shaders.
+  - Fullscreen texture output from the raymarch compute pass.
+
+## Controls (Target)
+
+- LMB drag: orbit camera
+- Mouse wheel: zoom
+- Shift + LMB drag: pan (optional)
+- F1: toggle debug overlay (occupancy/normal pass)
+
+## Development Notes
+
+- Voxel size: 128x128x128.
+- Brick size: 8 (2^3), for 16x16x16 bricks.
+- Start with a simple voxel fill pattern (solid cube core or checker layers).
+
+## Project Layout
+
+- `godot/engine-src`: Godot engine source (custom automation changes).
+- `godot/engine-bin`: Rebuilt editor binaries.
+- `godot/project`: Fresh Godot project scaffold (currently minimal scene).
 
 ## Run
 
-This needs a local server for WebGPU.
+Launch the custom editor and open the project:
 
-```bash
-python -m http.server
+```powershell
+godot\engine-bin\Godot_v4.5.1-stable_win64.exe --path godot\project
 ```
 
-Open `http://localhost:8000/`.
+## Engine Automation (Custom Build)
 
-## Current State
+This repo includes a custom Godot editor build with a TCP JSON automation server.
 
-Working:
-- 3D GPU sand simulation + ray-marched rendering
-- FPS-style movement with 16-voxel player height
-- Hotbar UI with selectable items
-- Vacuum target sphere (fixed position) with pull behavior and inventory counting
+- Binary: `godot/engine-bin/Godot_v4.5.1-stable_win64.exe` (rebuilt from `godot/engine-src`)
+- Start with automation enabled:
 
-Not Working / Known Issues:
-- Vacuum pull behavior is inconsistent: some voxels jitter near the vacuum target instead of reliably disappearing
-- Vacuum feels unstable under sustained use and needs deterministic resolution near the sink
+```powershell
+godot\engine-bin\Godot_v4.5.1-stable_win64.exe --automation 127.0.0.1:24680 --automation-token yourtoken --path godot\project res://scenes/Main.tscn --disable-crash-handler
+```
 
-## TODO
+### Automation Protocol (JSON lines)
 
-- Procedural world spawn system
-- Player collision against voxel solids
-- Stabilize vacuum sink behavior
+Each request/response is a single JSON line. Token auth is required if provided.
+
+Supported methods:
+- `auth`, `ping`
+- `get_node`, `list_children`
+- `call`, `get`, `set`
+- `action_press`, `action_release`
+- `screenshot`, `get_fps`, `quit`
+
+Example (PowerShell client):
+```powershell
+godot\automation_client.ps1 -ServerHost 127.0.0.1 -Port 24680 -Token yourtoken -Method ping
+godot\automation_client.ps1 -ServerHost 127.0.0.1 -Port 24680 -Token yourtoken -Method screenshot -ParamsJson '{\"path\":\"user://snap.png\"}'
+```
+
+---
+
+See `Voxel Physics Engine Deep Dive.md` for the full architectural background.
