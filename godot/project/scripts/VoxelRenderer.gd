@@ -183,7 +183,7 @@ func _process(_delta: float) -> void:
         basis.y.x, basis.y.y, basis.y.z, 0.0,
         -basis.z.x, -basis.z.y, -basis.z.z, 0.0,
         float(width), float(height), tan_half_fov, aspect,
-        voxel_size, max_distance, 0.0, 0.0,
+        voxel_size, max_distance, 0.8, 0.25,
         brick_grid, brick_grid, brick_grid, float(chunk_size)
     ])
     var bytes := params.to_byte_array()

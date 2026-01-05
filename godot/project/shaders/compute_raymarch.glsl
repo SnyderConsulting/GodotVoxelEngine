@@ -11,7 +11,7 @@ layout(set = 0, binding = 1, std140) uniform Params {
     vec4 cam_up;
     vec4 cam_forward;
     vec4 screen;      // xy = screen size, z = tan_half_fov, w = aspect
-    vec4 misc;        // x = voxel_size, y = max_dist
+    vec4 misc;        // x = voxel_size, y = max_dist, z = shadow_strength, w = reflection_strength
     vec4 brick_info;  // xyz = brick grid dims, w = brick size
 } u;
 layout(set = 0, binding = 2, std430) readonly buffer Indirection {
@@ -215,8 +215,75 @@ void main() {
                         float d = sdf_truncated_octahedron(lp) * a;
                         if (d < 0.0) {
                             vec3 n = estimate_normal(lp);
-                            float diff = max(dot(n, normalize(vec3(-0.6, -1.0, -0.4))), 0.0);
-                            color = vec3(0.9, 0.7, 0.4) * (0.2 + diff);
+                            vec3 hit_pos = ro + rd * t_cell;
+                            vec3 light_dir = normalize(u.cam_pos.xyz - hit_pos);
+                            float diff = max(dot(n, light_dir), 0.0);
+
+                            // Soft shadow ray
+                            float shadow = 1.0;
+                            float t_shadow = 0.02;
+                            for (int s = 0; s < 24; s++) {
+                                vec3 sp = hit_pos + light_dir * t_shadow;
+                                vec3 s_local = (sp - grid_min) / u.misc.x;
+                                ivec3 s_cell = nearest_bcc(s_local);
+                                if (!in_bounds(s_cell)) {
+                                    break;
+                                }
+                                if (bcc_parity(s_cell)) {
+                                    ivec3 s_brick = s_cell / brick_size;
+                                    if (occ.data[idx_brick(s_brick)] != 0u) {
+                                        uint s_val = atlas.data[atlas_index_for_cell(s_cell)];
+                                        if (s_val != 0u) {
+                                            vec3 s_center = u.origin.xyz + vec3(s_cell) * u.misc.x;
+                                            vec3 s_lp = (sp - s_center) / u.misc.x;
+                                            float sd = sdf_truncated_octahedron(s_lp) * u.misc.x;
+                                            if (sd < 0.0) {
+                                                shadow = 0.0;
+                                                break;
+                                            }
+                                            shadow = min(shadow, 10.0 * sd / t_shadow);
+                                        }
+                                    }
+                                }
+                                t_shadow += 0.06;
+                            }
+                            shadow = mix(1.0, shadow, clamp(u.misc.z, 0.0, 1.0));
+
+                            // Reflection ray (single bounce)
+                            float reflection = 0.0;
+                            vec3 refl_dir = reflect(rd, n);
+                            float t_refl = 0.05;
+                            for (int r = 0; r < 16; r++) {
+                                vec3 rp = hit_pos + refl_dir * t_refl;
+                                vec3 r_local = (rp - grid_min) / u.misc.x;
+                                ivec3 r_cell = nearest_bcc(r_local);
+                                if (!in_bounds(r_cell)) {
+                                    break;
+                                }
+                                if (bcc_parity(r_cell)) {
+                                    ivec3 r_brick = r_cell / brick_size;
+                                    if (occ.data[idx_brick(r_brick)] != 0u) {
+                                        uint r_val = atlas.data[atlas_index_for_cell(r_cell)];
+                                        if (r_val != 0u) {
+                                            vec3 r_center = u.origin.xyz + vec3(r_cell) * u.misc.x;
+                                            vec3 r_lp = (rp - r_center) / u.misc.x;
+                                            float rdv = sdf_truncated_octahedron(r_lp) * u.misc.x;
+                                            if (rdv < 0.0) {
+                                                reflection = u.misc.w;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                                t_refl += 0.08;
+                            }
+
+                            vec3 view_dir = normalize(-rd);
+                            vec3 half_dir = normalize(light_dir + view_dir);
+                            float spec = pow(max(dot(n, half_dir), 0.0), 32.0);
+
+                            vec3 base = vec3(0.9, 0.7, 0.4);
+                            color = base * (0.12 + diff * shadow) + base * reflection + vec3(1.0) * spec * 0.25;
                             hit = true;
                             break;
                         }
