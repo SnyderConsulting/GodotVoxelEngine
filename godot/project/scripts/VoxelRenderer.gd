@@ -1,6 +1,7 @@
 extends Node
 
 @export var quad_path: NodePath
+@export var camera_path: NodePath
 @export var width := 512
 @export var height := 512
 
@@ -11,6 +12,7 @@ var _texture_rid: RID
 var _ubo_rid: RID
 var _uniform_set_rid: RID
 var _display_texture: Texture2D
+var _camera: Camera3D
 
 func _ready() -> void:
     _rd = RenderingServer.create_local_rendering_device()
@@ -55,7 +57,7 @@ func _ready() -> void:
         push_error("Failed to create compute texture.")
         return
 
-    _ubo_rid = _rd.uniform_buffer_create(16)
+    _ubo_rid = _rd.uniform_buffer_create(80)
     if !_ubo_rid.is_valid():
         push_error("Failed to create uniform buffer.")
         return
@@ -79,6 +81,10 @@ func _ready() -> void:
     if quad == null:
         push_error("VoxelRenderer quad_path missing or invalid.")
         return
+    _camera = get_node_or_null(camera_path) as Camera3D
+    if _camera == null:
+        push_error("VoxelRenderer camera_path missing or invalid.")
+        return
 
     var mat := quad.material_override as ShaderMaterial
     if mat == null:
@@ -96,7 +102,16 @@ func _process(_delta: float) -> void:
     if !_pipeline_rid.is_valid() or !_uniform_set_rid.is_valid():
         return
 
-    var params := PackedFloat32Array([Time.get_ticks_msec() / 1000.0, float(width), float(height), 0.0])
+    var basis := _camera.global_transform.basis
+    var pos := _camera.global_transform.origin
+    var fov := deg_to_rad(_camera.fov)
+    var params := PackedFloat32Array([
+        pos.x, pos.y, pos.z, 0.0,
+        basis.x.x, basis.x.y, basis.x.z, 0.0,
+        basis.y.x, basis.y.y, basis.y.z, 0.0,
+        -basis.z.x, -basis.z.y, -basis.z.z, 0.0,
+        Time.get_ticks_msec() / 1000.0, float(width), float(height), fov
+    ])
     var bytes := params.to_byte_array()
     _rd.buffer_update(_ubo_rid, 0, bytes.size(), bytes)
 
