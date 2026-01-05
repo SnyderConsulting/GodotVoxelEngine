@@ -24,49 +24,67 @@ layout(set = 0, binding = 4, std430) readonly buffer Occupancy {
     uint data[];
 } occ;
 
-const float ICO_RADIUS = 0.55;
-
-float sdf_icosahedron(vec3 p, float r) {
-    const float phi = 1.61803398875;
-    const float a = 1.0;
-    const float b = 1.0 / phi;
-    const float c = phi;
-    vec3 n[20] = vec3[20](
-        normalize(vec3( a,  a,  a)),
-        normalize(vec3( a,  a, -a)),
-        normalize(vec3( a, -a,  a)),
-        normalize(vec3( a, -a, -a)),
-        normalize(vec3(-a,  a,  a)),
-        normalize(vec3(-a,  a, -a)),
-        normalize(vec3(-a, -a,  a)),
-        normalize(vec3(-a, -a, -a)),
-        normalize(vec3( 0.0,  b,  c)),
-        normalize(vec3( 0.0,  b, -c)),
-        normalize(vec3( 0.0, -b,  c)),
-        normalize(vec3( 0.0, -b, -c)),
-        normalize(vec3( b,  c, 0.0)),
-        normalize(vec3( b, -c, 0.0)),
-        normalize(vec3(-b,  c, 0.0)),
-        normalize(vec3(-b, -c, 0.0)),
-        normalize(vec3( c, 0.0,  b)),
-        normalize(vec3( c, 0.0, -b)),
-        normalize(vec3(-c, 0.0,  b)),
-        normalize(vec3(-c, 0.0, -b))
-    );
-
-    float d = -1e9;
-    for (int i = 0; i < 20; i++) {
-        d = max(d, dot(p, n[i]));
-    }
-    return d - r;
+float sdf_truncated_octahedron(vec3 p) {
+    const float inv_sqrt3 = 0.57735026919;
+    const float scale = 2.0;
+    vec3 q = abs(p) * scale;
+    float d1 = max(q.x, max(q.y, q.z)) - 2.0;
+    float d2 = (q.x + q.y + q.z - 3.0) * inv_sqrt3;
+    return max(d1, d2) / scale;
 }
 
-vec3 estimate_normal(vec3 p, float r) {
+vec3 estimate_normal(vec3 p) {
     float e = 0.001;
-    float dx = sdf_icosahedron(p + vec3(e, 0.0, 0.0), r) - sdf_icosahedron(p - vec3(e, 0.0, 0.0), r);
-    float dy = sdf_icosahedron(p + vec3(0.0, e, 0.0), r) - sdf_icosahedron(p - vec3(0.0, e, 0.0), r);
-    float dz = sdf_icosahedron(p + vec3(0.0, 0.0, e), r) - sdf_icosahedron(p - vec3(0.0, 0.0, e), r);
+    float dx = sdf_truncated_octahedron(p + vec3(e, 0.0, 0.0)) - sdf_truncated_octahedron(p - vec3(e, 0.0, 0.0));
+    float dy = sdf_truncated_octahedron(p + vec3(0.0, e, 0.0)) - sdf_truncated_octahedron(p - vec3(0.0, e, 0.0));
+    float dz = sdf_truncated_octahedron(p + vec3(0.0, 0.0, e)) - sdf_truncated_octahedron(p - vec3(0.0, 0.0, e));
     return normalize(vec3(dx, dy, dz));
+}
+
+void clip_plane(vec3 n, float d, vec3 rc, vec3 rd, inout float tmin, inout float tmax, inout bool valid) {
+    float denom = dot(n, rd);
+    float numer = d - dot(n, rc);
+    if (abs(denom) < 1e-6) {
+        if (numer < 0.0) {
+            valid = false;
+        }
+        return;
+    }
+    float tplane = numer / denom;
+    if (denom < 0.0) {
+        tmin = max(tmin, tplane);
+    } else {
+        tmax = min(tmax, tplane);
+    }
+    if (tmin > tmax) {
+        valid = false;
+    }
+}
+
+bool bcc_parity(ivec3 cell) {
+    return ((cell.x & 1) == (cell.y & 1)) && ((cell.y & 1) == (cell.z & 1));
+}
+
+ivec3 nearest_bcc(vec3 p) {
+    ivec3 base = ivec3(floor(p));
+    ivec3 best = base;
+    float best_dist = 1e9;
+    for (int dz = 0; dz <= 1; dz++) {
+        for (int dy = 0; dy <= 1; dy++) {
+            for (int dx = 0; dx <= 1; dx++) {
+                ivec3 cand = base + ivec3(dx, dy, dz);
+                if (!bcc_parity(cand)) {
+                    continue;
+                }
+                float dist = length(p - vec3(cand));
+                if (dist < best_dist) {
+                    best_dist = dist;
+                    best = cand;
+                }
+            }
+        }
+    }
+    return best;
 }
 
 uint idx_brick(ivec3 b) {
@@ -137,91 +155,84 @@ void main() {
     }
 
     float t = max(t_enter, 0.0);
-    vec3 pos = ro + rd * t;
-    vec3 local = (pos - grid_min) / u.misc.x;
     ivec3 grid_size = ivec3(int(u.grid_info.x), int(u.grid_info.y), int(u.grid_info.z));
-    ivec3 cell = ivec3(floor(local));
-    cell = clamp(cell, ivec3(0), grid_size - ivec3(1));
-
-    ivec3 step_dir = ivec3(sign(rd));
-    vec3 next_boundary = vec3(
-        grid_min.x + (float(cell.x + (step_dir.x > 0 ? 1 : 0)) * u.misc.x),
-        grid_min.y + (float(cell.y + (step_dir.y > 0 ? 1 : 0)) * u.misc.x),
-        grid_min.z + (float(cell.z + (step_dir.z > 0 ? 1 : 0)) * u.misc.x)
-    );
-    vec3 t_max = vec3(
-        (abs(rd.x) < 1e-6) ? 1e9 : (next_boundary.x - ro.x) / rd.x,
-        (abs(rd.y) < 1e-6) ? 1e9 : (next_boundary.y - ro.y) / rd.y,
-        (abs(rd.z) < 1e-6) ? 1e9 : (next_boundary.z - ro.z) / rd.z
-    );
-    vec3 t_delta = vec3(
-        (abs(rd.x) < 1e-6) ? 1e9 : (u.misc.x / abs(rd.x)),
-        (abs(rd.y) < 1e-6) ? 1e9 : (u.misc.x / abs(rd.y)),
-        (abs(rd.z) < 1e-6) ? 1e9 : (u.misc.x / abs(rd.z))
+    vec3 signs[8] = vec3[8](
+        vec3( 1.0,  1.0,  1.0),
+        vec3( 1.0,  1.0, -1.0),
+        vec3( 1.0, -1.0,  1.0),
+        vec3( 1.0, -1.0, -1.0),
+        vec3(-1.0,  1.0,  1.0),
+        vec3(-1.0,  1.0, -1.0),
+        vec3(-1.0, -1.0,  1.0),
+        vec3(-1.0, -1.0, -1.0)
     );
 
     for (int i = 0; i < 2048; i++) {
-        if (!in_bounds(cell) || t > t_exit || t > u.misc.y) {
+        if (t > t_exit || t > u.misc.y) {
             break;
         }
 
-        if (((cell.x + cell.y + cell.z) & 1) == 0) {
-            ivec3 brick = cell / brick_size;
-            uint occ_val = occ.data[idx_brick(brick)];
-            if (occ_val != 0u) {
-                uint cell_val = atlas.data[atlas_index_for_cell(cell)];
-                if (cell_val != 0u) {
-                    float t_cell_exit = min(t_max.x, min(t_max.y, t_max.z));
-                    float t_cell = max(t, t_enter);
-                    vec3 cell_center = (vec3(cell) + vec3(0.5)) * u.misc.x + u.origin.xyz;
-                    float max_step = u.misc.x * 0.1;
-                    float min_step = u.misc.x * 0.01;
+        vec3 pos = ro + rd * t;
+        vec3 local = (pos - grid_min) / u.misc.x;
+        ivec3 cell = nearest_bcc(local);
+        if (!in_bounds(cell)) {
+            t += 0.01;
+            continue;
+        }
+
+        ivec3 brick = cell / brick_size;
+        uint occ_val = occ.data[idx_brick(brick)];
+        if (occ_val != 0u) {
+            uint cell_val = atlas.data[atlas_index_for_cell(cell)];
+            if (cell_val != 0u) {
+                vec3 cell_center = u.origin.xyz + vec3(cell) * u.misc.x;
+                vec3 rc = ro - cell_center;
+                float a = u.misc.x;
+                float t_cell_min = -1e9;
+                float t_cell_max = 1e9;
+                bool valid = true;
+
+                clip_plane(vec3( 1.0,  0.0,  0.0), a, rc, rd, t_cell_min, t_cell_max, valid);
+                clip_plane(vec3(-1.0,  0.0,  0.0), a, rc, rd, t_cell_min, t_cell_max, valid);
+                clip_plane(vec3( 0.0,  1.0,  0.0), a, rc, rd, t_cell_min, t_cell_max, valid);
+                clip_plane(vec3( 0.0, -1.0,  0.0), a, rc, rd, t_cell_min, t_cell_max, valid);
+                clip_plane(vec3( 0.0,  0.0,  1.0), a, rc, rd, t_cell_min, t_cell_max, valid);
+                clip_plane(vec3( 0.0,  0.0, -1.0), a, rc, rd, t_cell_min, t_cell_max, valid);
+                for (int s = 0; s < 8; s++) {
+                    clip_plane(signs[s], 1.5 * a, rc, rd, t_cell_min, t_cell_max, valid);
+                }
+
+                if (valid) {
+                    float t_cell = max(t, t_cell_min);
+                    float max_step = a * 0.1;
+                    float min_step = a * 0.01;
                     for (int j = 0; j < 128; j++) {
-                        if (t_cell > t_cell_exit) {
+                        if (t_cell > t_cell_max) {
                             break;
                         }
                         vec3 p = ro + rd * t_cell;
-                        vec3 lp = (p - cell_center) / u.misc.x;
-                        float d = sdf_icosahedron(lp, 0.48);
+                        vec3 lp = (p - cell_center) / a;
+                        float d = sdf_truncated_octahedron(lp) * a;
                         if (d < 0.0) {
-                            vec3 n = estimate_normal(lp, 0.48);
+                            vec3 n = estimate_normal(lp);
                             float diff = max(dot(n, normalize(vec3(-0.6, -1.0, -0.4))), 0.0);
                             color = vec3(0.9, 0.7, 0.4) * (0.2 + diff);
                             hit = true;
                             break;
                         }
-                        float sdf_step = d * u.misc.x;
-                        sdf_step = clamp(sdf_step, min_step, max_step);
+                        float sdf_step = clamp(d, min_step, max_step);
                         t_cell += sdf_step;
                     }
                     if (hit) {
                         break;
                     }
+                    t = t_cell_max + 0.0005;
+                    continue;
                 }
             }
         }
 
-        if (t_max.x < t_max.y) {
-            if (t_max.x < t_max.z) {
-                t = t_max.x;
-                t_max.x += t_delta.x;
-                cell.x += step_dir.x;
-            } else {
-                t = t_max.z;
-                t_max.z += t_delta.z;
-                cell.z += step_dir.z;
-            }
-        } else {
-            if (t_max.y < t_max.z) {
-                t = t_max.y;
-                t_max.y += t_delta.y;
-                cell.y += step_dir.y;
-            } else {
-                t = t_max.z;
-                t_max.z += t_delta.z;
-                cell.z += step_dir.z;
-            }
-        }
+        t += 0.01;
     }
 
     imageStore(dest, gid, vec4(color, 1.0));

@@ -220,12 +220,16 @@ func _upload_brickmap_data() -> void:
     for i in range(atlas.size()):
         atlas[i] = 0
 
-    var local_center := int(chunk_size / 2)
-    if ((local_center * 3) % 2) != 0:
-        local_center = min(local_center + 1, chunk_size - 1)
     var base_offset := brick_index * chunk_size * chunk_size * chunk_size
-    var local_index := base_offset + local_center + local_center * chunk_size + local_center * chunk_size * chunk_size
-    atlas[local_index] = 1
+    var min_cell: int = int(max(0, int(chunk_size / 2) - 2))
+    var max_cell: int = int(min(chunk_size - 1, int(chunk_size / 2) + 2))
+    for z in range(min_cell, max_cell + 1):
+        for y in range(min_cell, max_cell + 1):
+            for x in range(min_cell, max_cell + 1):
+                if !((x & 1) == (y & 1) and (y & 1) == (z & 1)):
+                    continue
+                var local_index: int = base_offset + x + y * chunk_size + z * chunk_size * chunk_size
+                atlas[local_index] = 1
 
     var ind_bytes := indirection.to_byte_array()
     _rd.buffer_update(_indirection_rid, 0, ind_bytes.size(), ind_bytes)
