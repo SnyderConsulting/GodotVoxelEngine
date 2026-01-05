@@ -22,11 +22,16 @@ var _display_texture: Texture2D
 var _display_material: ShaderMaterial
 var _camera: Camera3D
 var _render_ready := false
+var _use_global_rd := false
 
 func _ready() -> void:
-    _rd = RenderingServer.create_local_rendering_device()
+    _rd = RenderingServer.get_rendering_device()
+    _use_global_rd = _rd != null
     if _rd == null:
         push_error("RenderingDevice unavailable.")
+        return
+    if !_use_global_rd:
+        push_error("Pure GPU path requires the global RenderingDevice.")
         return
 
     var quad := get_node_or_null(quad_path) as MeshInstance3D
@@ -76,7 +81,7 @@ func _init_render_resources() -> void:
     fmt.height = height
     fmt.depth = 1
     fmt.format = RenderingDevice.DATA_FORMAT_R8G8B8A8_UNORM
-    fmt.usage_bits = RenderingDevice.TEXTURE_USAGE_STORAGE_BIT | RenderingDevice.TEXTURE_USAGE_CAN_COPY_FROM_BIT
+    fmt.usage_bits = RenderingDevice.TEXTURE_USAGE_STORAGE_BIT | RenderingDevice.TEXTURE_USAGE_SAMPLING_BIT
 
     var view := RDTextureView.new()
     _texture_rid = _rd.texture_create(fmt, view, [])
@@ -144,8 +149,10 @@ func _init_render_resources() -> void:
         push_error("Failed to create uniform set.")
         return
 
-    var image := Image.create(width, height, false, Image.FORMAT_RGBA8)
-    _display_texture = ImageTexture.create_from_image(image)
+    _display_texture = _create_display_texture()
+    if _display_texture == null:
+        push_error("Failed to create GPU display texture.")
+        return
     _display_material.set_shader_parameter("compute_tex", _display_texture)
     _render_ready = true
 
@@ -191,13 +198,6 @@ func _dispatch_compute(bytes: PackedByteArray) -> void:
     _rd.compute_list_dispatch(list, groups_x, groups_y, 1)
     _rd.compute_list_end()
     _rd.submit()
-    _rd.sync()
-
-    var data := _rd.texture_get_data(_texture_rid, 0)
-    var image := Image.create_from_data(width, height, false, Image.FORMAT_RGBA8, data)
-    var tex := _display_texture as ImageTexture
-    if tex != null:
-        tex.update(image)
 
 func _upload_brickmap_data() -> void:
     var brick_grid := chunk_grid
@@ -237,6 +237,18 @@ func _upload_brickmap_data() -> void:
     _rd.buffer_update(_atlas_rid, 0, atlas_bytes.size(), atlas_bytes)
     var occ_bytes := occupancy.to_byte_array()
     _rd.buffer_update(_occupancy_rid, 0, occ_bytes.size(), occ_bytes)
+
+func _create_display_texture() -> Texture2D:
+    if _use_global_rd and ClassDB.class_exists("Texture2DRD"):
+        var rd_tex := ClassDB.instantiate("Texture2DRD") as Object
+        if rd_tex != null:
+            var props: Array = rd_tex.get_property_list()
+            for prop in props:
+                var prop_info := prop as Dictionary
+                if prop_info.get("name", "") == "texture_rd_rid":
+                    rd_tex.set("texture_rd_rid", _texture_rid)
+                    return rd_tex as Texture2D
+    return null
 
 func _exit_tree() -> void:
     if _rd == null:
