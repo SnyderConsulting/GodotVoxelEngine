@@ -2,55 +2,20 @@ shader_type spatial;
 render_mode unshaded, cull_disabled, depth_draw_never;
 
 uniform bool debug_flat = false;
-uniform float max_dist = 6.0;
+uniform float max_dist = 20.0;
 uniform int max_steps = 128;
 uniform float surf_eps = 0.002;
-uniform float box_size = 0.5;
-uniform vec3 sphere_center = vec3(0.0, 0.3, 0.0);
-uniform float sphere_radius = 0.35;
-uniform float ground_height = -0.5;
 uniform vec3 light_dir = vec3(-0.6, -1.0, -0.4);
 uniform vec3 light_color = vec3(1.0, 1.0, 1.0);
 uniform float ambient = 0.2;
-uniform vec3 box_color = vec3(0.70, 0.70, 0.95);
-uniform vec3 sphere_color = vec3(0.55, 0.95, 0.95);
-uniform vec3 ground_color = vec3(0.55, 0.95, 0.55);
 uniform vec3 voxel_color = vec3(0.95, 0.70, 0.40);
-uniform bool voxels_enabled = true;
-uniform vec3 voxel_center = vec3(0.0, 0.0, -0.2);
-uniform float voxel_scale = 0.6;
+uniform vec3 voxel_center = vec3(0.0, 0.0, 0.0);
+uniform float voxel_scale = 1.2;
+uniform bool voxels_solid = false;
 
 const int VOX_RES = 16;
 
 varying vec3 v_local_pos;
-
-float sdf_box(vec3 p, vec3 b) {
-    vec3 d = abs(p) - b;
-    return length(max(d, 0.0)) + min(max(d.x, max(d.y, d.z)), 0.0);
-}
-
-float sdf_sphere(vec3 p, float r) {
-    return length(p) - r;
-}
-
-float sdf_ground(vec3 p, float height) {
-    return p.y - height;
-}
-
-float sdf_scene(vec3 p, vec3 b) {
-    float ground = sdf_ground(p, ground_height);
-    float sphere = sdf_sphere(p - sphere_center, sphere_radius);
-    float box = sdf_box(p, b);
-    return min(ground, min(sphere, box));
-}
-
-vec3 estimate_normal(vec3 p, vec3 b) {
-    float e = 0.001;
-    float dx = sdf_scene(p + vec3(e, 0.0, 0.0), b) - sdf_scene(p - vec3(e, 0.0, 0.0), b);
-    float dy = sdf_scene(p + vec3(0.0, e, 0.0), b) - sdf_scene(p - vec3(0.0, e, 0.0), b);
-    float dz = sdf_scene(p + vec3(0.0, 0.0, e), b) - sdf_scene(p - vec3(0.0, 0.0, e), b);
-    return normalize(vec3(dx, dy, dz));
-}
 
 bool voxel_occ(ivec3 cell) {
     vec3 center = (vec3(cell) + vec3(0.5)) / float(VOX_RES) - vec3(0.5);
@@ -58,13 +23,22 @@ bool voxel_occ(ivec3 cell) {
 }
 
 float sdf_voxels(vec3 p) {
-    vec3 local = (p - voxel_center) / voxel_scale + vec3(0.5);
-    if (any(lessThan(local, vec3(0.0))) || any(greaterThan(local, vec3(1.0)))) {
-        return 1e6;
+    if (voxels_solid) {
+        return length(p - voxel_center) - (0.35 * voxel_scale);
     }
 
+    vec3 local = (p - voxel_center) / voxel_scale;
+    vec3 aabb_min = vec3(-0.5);
+    vec3 aabb_max = vec3(0.5);
+    vec3 d = max(max(aabb_min - local, local - aabb_max), vec3(0.0));
+    float outside_dist = length(d) * voxel_scale;
+    if (outside_dist > 0.0) {
+        return outside_dist;
+    }
+
+    vec3 local01 = local + vec3(0.5);
     float cell_size = 1.0 / float(VOX_RES);
-    vec3 gv = local * float(VOX_RES);
+    vec3 gv = local01 * float(VOX_RES);
     ivec3 base = ivec3(floor(gv));
     float min_d = 1e6;
 
@@ -96,6 +70,14 @@ float sdf_voxels(vec3 p) {
     return min_d;
 }
 
+vec3 estimate_normal(vec3 p) {
+    float e = 0.001;
+    float dx = sdf_voxels(p + vec3(e, 0.0, 0.0)) - sdf_voxels(p - vec3(e, 0.0, 0.0));
+    float dy = sdf_voxels(p + vec3(0.0, e, 0.0)) - sdf_voxels(p - vec3(0.0, e, 0.0));
+    float dz = sdf_voxels(p + vec3(0.0, 0.0, e)) - sdf_voxels(p - vec3(0.0, 0.0, e));
+    return normalize(vec3(dx, dy, dz));
+}
+
 void vertex() {
     v_local_pos = VERTEX;
 }
@@ -107,7 +89,6 @@ void fragment() {
         vec3 cam_world = (INV_VIEW_MATRIX * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
         vec3 ro = (inverse(MODEL_MATRIX) * vec4(cam_world, 1.0)).xyz;
         vec3 rd = normalize(v_local_pos - ro);
-        vec3 b = vec3(box_size);
 
         float t = 0.0;
         bool hit = false;
@@ -115,10 +96,7 @@ void fragment() {
 
         for (int i = 0; i < max_steps; i++) {
             p = ro + rd * t;
-            float d = sdf_scene(p, b);
-            if (voxels_enabled) {
-                d = min(d, sdf_voxels(p));
-            }
+            float d = sdf_voxels(p);
             if (d < surf_eps) {
                 hit = true;
                 break;
@@ -133,26 +111,8 @@ void fragment() {
             discard;
         }
 
-        float d_ground = sdf_ground(p, ground_height);
-        float d_sphere = sdf_sphere(p - sphere_center, sphere_radius);
-        float d_box = sdf_box(p, b);
-        float d_voxels = voxels_enabled ? sdf_voxels(p) : 1e6;
-        vec3 base_color = box_color;
-        float min_d = d_box;
-        if (d_sphere < min_d) {
-            min_d = d_sphere;
-            base_color = sphere_color;
-        }
-        if (d_ground < min_d) {
-            min_d = d_ground;
-            base_color = ground_color;
-        }
-        if (d_voxels < min_d) {
-            min_d = d_voxels;
-            base_color = voxel_color;
-        }
-
-        vec3 n = estimate_normal(p, b);
+        vec3 base_color = voxel_color;
+        vec3 n = estimate_normal(p);
         vec3 l = normalize(-light_dir);
         float ndotl = max(dot(n, l), 0.0);
         vec3 shade = base_color * (ambient + ndotl * light_color);
