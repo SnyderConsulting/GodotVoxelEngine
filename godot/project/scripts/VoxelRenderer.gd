@@ -11,6 +11,7 @@ extends Node
 @export var fill_radius_ratio := 0.35
 @export var fill_mode := 0
 @export var noise_threshold := 0.55
+@export var voxel_data_path := "res://data/voxels.json"
 
 var _rd: RenderingDevice
 var _shader_rid: RID
@@ -210,7 +211,7 @@ func _upload_brickmap_data() -> void:
     indirection.resize(brick_count)
     occupancy.resize(brick_count)
     for i in range(brick_count):
-        indirection[i] = i + 1
+        indirection[i] = 0
         occupancy[i] = 0
 
     var atlas := PackedInt32Array()
@@ -222,35 +223,60 @@ func _upload_brickmap_data() -> void:
     var center := Vector3((grid_extent - 1) * 0.5, (grid_extent - 1) * 0.5, (grid_extent - 1) * 0.5)
     var fill_radius := float(grid_extent) * fill_radius_ratio
     var fill_radius_sq := fill_radius * fill_radius
-    for bz in range(brick_grid):
-        for by in range(brick_grid):
-            for bx in range(brick_grid):
-                var brick_index := bx + by * brick_grid + bz * brick_grid * brick_grid
-                var base_offset := brick_index * chunk_size * chunk_size * chunk_size
-                var any := false
-                for lz in range(chunk_size):
-                    var gz := bz * chunk_size + lz
-                    for ly in range(chunk_size):
-                        var gy := by * chunk_size + ly
-                        for lx in range(chunk_size):
-                            var gx := bx * chunk_size + lx
-                            if !((gx & 1) == (gy & 1) and (gy & 1) == (gz & 1)):
-                                continue
-                            var delta := Vector3(gx, gy, gz) - center
-                            if delta.length_squared() > fill_radius_sq:
-                                continue
-                            if fill_mode == 1:
-                                var h := int((gx * 73856093) ^ (gy * 19349663) ^ (gz * 83492791))
-                                var n := float((h & 1023)) / 1023.0
-                                if n < noise_threshold:
+    var points := _load_voxel_points(grid_extent)
+    if points.size() > 0:
+        for point in points:
+            var p := point as Vector3
+            var gx := int(p.x)
+            var gy := int(p.y)
+            var gz := int(p.z)
+            if gx < 0 or gy < 0 or gz < 0 or gx >= grid_extent or gy >= grid_extent or gz >= grid_extent:
+                continue
+            if !((gx & 1) == (gy & 1) and (gy & 1) == (gz & 1)):
+                continue
+            var bx := gx / chunk_size
+            var by := gy / chunk_size
+            var bz := gz / chunk_size
+            var lx := gx - bx * chunk_size
+            var ly := gy - by * chunk_size
+            var lz := gz - bz * chunk_size
+            var brick_index := bx + by * brick_grid + bz * brick_grid * brick_grid
+            var base_offset := brick_index * chunk_size * chunk_size * chunk_size
+            var local_index := base_offset + lx + ly * chunk_size + lz * chunk_size * chunk_size
+            atlas[local_index] = 1
+            occupancy[brick_index] = 1
+            indirection[brick_index] = brick_index + 1
+    else:
+        for bz in range(brick_grid):
+            for by in range(brick_grid):
+                for bx in range(brick_grid):
+                    var brick_index := bx + by * brick_grid + bz * brick_grid * brick_grid
+                    var base_offset := brick_index * chunk_size * chunk_size * chunk_size
+                    var any := false
+                    for lz in range(chunk_size):
+                        var gz := bz * chunk_size + lz
+                        for ly in range(chunk_size):
+                            var gy := by * chunk_size + ly
+                            for lx in range(chunk_size):
+                                var gx := bx * chunk_size + lx
+                                if !((gx & 1) == (gy & 1) and (gy & 1) == (gz & 1)):
                                     continue
-                            var local_index := base_offset + lx + ly * chunk_size + lz * chunk_size * chunk_size
-                            atlas[local_index] = 1
-                            any = true
-                if any:
-                    occupancy[brick_index] = 1
-                else:
-                    indirection[brick_index] = 0
+                                var delta := Vector3(gx, gy, gz) - center
+                                if delta.length_squared() > fill_radius_sq:
+                                    continue
+                                if fill_mode == 1:
+                                    var h := int((gx * 73856093) ^ (gy * 19349663) ^ (gz * 83492791))
+                                    var n := float((h & 1023)) / 1023.0
+                                    if n < noise_threshold:
+                                        continue
+                                var local_index := base_offset + lx + ly * chunk_size + lz * chunk_size * chunk_size
+                                atlas[local_index] = 1
+                                any = true
+                    if any:
+                        occupancy[brick_index] = 1
+                        indirection[brick_index] = brick_index + 1
+                    else:
+                        indirection[brick_index] = 0
 
     var ind_bytes := indirection.to_byte_array()
     _rd.buffer_update(_indirection_rid, 0, ind_bytes.size(), ind_bytes)
@@ -258,6 +284,30 @@ func _upload_brickmap_data() -> void:
     _rd.buffer_update(_atlas_rid, 0, atlas_bytes.size(), atlas_bytes)
     var occ_bytes := occupancy.to_byte_array()
     _rd.buffer_update(_occupancy_rid, 0, occ_bytes.size(), occ_bytes)
+
+func _load_voxel_points(grid_extent: int) -> Array:
+    if voxel_data_path.is_empty():
+        return []
+    if !FileAccess.file_exists(voxel_data_path):
+        return []
+    var text := FileAccess.get_file_as_string(voxel_data_path)
+    if text.is_empty():
+        return []
+    var data: Variant = JSON.parse_string(text)
+    if typeof(data) != TYPE_DICTIONARY:
+        return []
+    var voxels: Array = data.get("voxels", [])
+    if typeof(voxels) != TYPE_ARRAY:
+        return []
+    var points: Array = []
+    for entry in voxels:
+        var arr := entry as Array
+        if arr == null:
+            continue
+        if arr.size() < 3:
+            continue
+        points.append(Vector3(float(arr[0]), float(arr[1]), float(arr[2])))
+    return points
 
 func _create_display_texture() -> Texture2D:
     if _use_global_rd and ClassDB.class_exists("Texture2DRD"):
