@@ -5,9 +5,12 @@ extends Node
 @export var width := 512
 @export var height := 512
 @export var chunk_size := 8
-@export var chunk_grid := 1
+@export var chunk_grid := 3
 @export var lattice_spacing := 1.0
 @export var max_distance := 200.0
+@export var fill_radius_ratio := 0.35
+@export var fill_mode := 0
+@export var noise_threshold := 0.55
 
 var _rd: RenderingDevice
 var _shader_rid: RID
@@ -207,29 +210,47 @@ func _upload_brickmap_data() -> void:
     indirection.resize(brick_count)
     occupancy.resize(brick_count)
     for i in range(brick_count):
-        indirection[i] = 0
+        indirection[i] = i + 1
         occupancy[i] = 0
-
-    var center_brick := int(brick_grid / 2)
-    var brick_index := center_brick + center_brick * brick_grid + center_brick * brick_grid * brick_grid
-    indirection[brick_index] = brick_index + 1
-    occupancy[brick_index] = 1
 
     var atlas := PackedInt32Array()
     atlas.resize(brick_count * chunk_size * chunk_size * chunk_size)
     for i in range(atlas.size()):
         atlas[i] = 0
 
-    var base_offset := brick_index * chunk_size * chunk_size * chunk_size
-    var min_cell: int = int(max(0, int(chunk_size / 2) - 2))
-    var max_cell: int = int(min(chunk_size - 1, int(chunk_size / 2) + 2))
-    for z in range(min_cell, max_cell + 1):
-        for y in range(min_cell, max_cell + 1):
-            for x in range(min_cell, max_cell + 1):
-                if !((x & 1) == (y & 1) and (y & 1) == (z & 1)):
-                    continue
-                var local_index: int = base_offset + x + y * chunk_size + z * chunk_size * chunk_size
-                atlas[local_index] = 1
+    var grid_extent := brick_grid * chunk_size
+    var center := Vector3((grid_extent - 1) * 0.5, (grid_extent - 1) * 0.5, (grid_extent - 1) * 0.5)
+    var fill_radius := float(grid_extent) * fill_radius_ratio
+    var fill_radius_sq := fill_radius * fill_radius
+    for bz in range(brick_grid):
+        for by in range(brick_grid):
+            for bx in range(brick_grid):
+                var brick_index := bx + by * brick_grid + bz * brick_grid * brick_grid
+                var base_offset := brick_index * chunk_size * chunk_size * chunk_size
+                var any := false
+                for lz in range(chunk_size):
+                    var gz := bz * chunk_size + lz
+                    for ly in range(chunk_size):
+                        var gy := by * chunk_size + ly
+                        for lx in range(chunk_size):
+                            var gx := bx * chunk_size + lx
+                            if !((gx & 1) == (gy & 1) and (gy & 1) == (gz & 1)):
+                                continue
+                            var delta := Vector3(gx, gy, gz) - center
+                            if delta.length_squared() > fill_radius_sq:
+                                continue
+                            if fill_mode == 1:
+                                var h := int((gx * 73856093) ^ (gy * 19349663) ^ (gz * 83492791))
+                                var n := float((h & 1023)) / 1023.0
+                                if n < noise_threshold:
+                                    continue
+                            var local_index := base_offset + lx + ly * chunk_size + lz * chunk_size * chunk_size
+                            atlas[local_index] = 1
+                            any = true
+                if any:
+                    occupancy[brick_index] = 1
+                else:
+                    indirection[brick_index] = 0
 
     var ind_bytes := indirection.to_byte_array()
     _rd.buffer_update(_indirection_rid, 0, ind_bytes.size(), ind_bytes)

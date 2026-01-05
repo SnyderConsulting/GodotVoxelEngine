@@ -1,6 +1,6 @@
 extends Node3D
 
-@export var distance := 6.0
+@export var distance := 40.0
 @export var min_distance := 2.0
 @export var max_distance := 20.0
 @export var rotate_speed := 0.01
