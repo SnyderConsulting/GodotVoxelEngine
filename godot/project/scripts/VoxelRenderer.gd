@@ -24,14 +24,18 @@ var _ubo_rid: RID
 var _indirection_rid: RID
 var _atlas_rid: RID
 var _occupancy_rid: RID
+var _metrics_rid: RID
 var _uniform_set_rid: RID
 var _occupancy_uniform_set_rid: RID
 var _occupancy_bytes := 0
+var _metrics_bytes := 0
 var _display_texture: Texture2D
 var _display_material: ShaderMaterial
 var _camera: Camera3D
 var _render_ready := false
 var _use_global_rd := false
+var _metrics_frame := 0
+var _metrics_every := 30
 
 func _ready() -> void:
     _rd = RenderingServer.get_rendering_device()
@@ -134,9 +138,10 @@ func _init_render_resources() -> void:
     var brick_grid := chunk_grid
     var brick_count := brick_grid * brick_grid * brick_grid
     var indirection_bytes := brick_count * 4
-    var atlas_bytes := brick_count * chunk_size * chunk_size * chunk_size * 4
+    var atlas_bytes := brick_count * chunk_size * chunk_size * chunk_size * 4   
     var occupancy_bytes := brick_count * 4
     _occupancy_bytes = occupancy_bytes
+    _metrics_bytes = 16
 
     _indirection_rid = _rd.storage_buffer_create(indirection_bytes)
     if !_indirection_rid.is_valid():
@@ -149,6 +154,10 @@ func _init_render_resources() -> void:
     _occupancy_rid = _rd.storage_buffer_create(occupancy_bytes)
     if !_occupancy_rid.is_valid():
         push_error("Failed to create occupancy buffer.")
+        return
+    _metrics_rid = _rd.storage_buffer_create(_metrics_bytes)
+    if !_metrics_rid.is_valid():
+        push_error("Failed to create metrics buffer.")
         return
 
     _upload_brickmap_data()
@@ -177,9 +186,13 @@ func _init_render_resources() -> void:
     occupancy_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
     occupancy_uniform.binding = 4
     occupancy_uniform.add_id(_occupancy_rid)
+    var metrics_uniform := RDUniform.new()
+    metrics_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER  
+    metrics_uniform.binding = 5
+    metrics_uniform.add_id(_metrics_rid)
 
     _uniform_set_rid = _rd.uniform_set_create(
-        [img_uniform, ubo_uniform, indirection_uniform, atlas_uniform, occupancy_uniform],
+        [img_uniform, ubo_uniform, indirection_uniform, atlas_uniform, occupancy_uniform, metrics_uniform],
         _shader_rid,
         0
     )
@@ -203,12 +216,16 @@ func _init_render_resources() -> void:
     occ_atlas_uniform.add_id(_atlas_rid)
 
     var occ_out_uniform := RDUniform.new()
-    occ_out_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+    occ_out_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER  
     occ_out_uniform.binding = 3
     occ_out_uniform.add_id(_occupancy_rid)
+    var occ_metrics_uniform := RDUniform.new()
+    occ_metrics_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+    occ_metrics_uniform.binding = 4
+    occ_metrics_uniform.add_id(_metrics_rid)
 
     _occupancy_uniform_set_rid = _rd.uniform_set_create(
-        [occ_ubo_uniform, occ_indirection_uniform, occ_atlas_uniform, occ_out_uniform],
+        [occ_ubo_uniform, occ_indirection_uniform, occ_atlas_uniform, occ_out_uniform, occ_metrics_uniform],
         _occupancy_shader_rid,
         0
     )
@@ -252,20 +269,50 @@ func _process(_delta: float) -> void:
         debug_flag, 0.0, 0.0, 0.0
     ])
     var bytes := params.to_byte_array()
+    _reset_metrics()
     _dispatch_occupancy()
     _dispatch_compute(bytes)
+    _readback_metrics()
+
+func _reset_metrics() -> void:
+    if !_metrics_rid.is_valid():
+        return
+    _rd.buffer_clear(_metrics_rid, 0, _metrics_bytes)
 
 func _dispatch_occupancy() -> void:
     if !_occupancy_pipeline_rid.is_valid() or !_occupancy_uniform_set_rid.is_valid():
         return
     _rd.buffer_clear(_occupancy_rid, 0, _occupancy_bytes)
     var list := _rd.compute_list_begin()
-    _rd.compute_list_bind_compute_pipeline(list, _occupancy_pipeline_rid)
-    _rd.compute_list_bind_uniform_set(list, _occupancy_uniform_set_rid, 0)
+    _rd.compute_list_bind_compute_pipeline(list, _occupancy_pipeline_rid)       
+    _rd.compute_list_bind_uniform_set(list, _occupancy_uniform_set_rid, 0)      
     var brick_count := chunk_grid * chunk_grid * chunk_grid
     _rd.compute_list_dispatch(list, brick_count, 1, 1)
     _rd.compute_list_end()
-    _rd.submit()
+
+func _readback_metrics() -> void:
+    _metrics_frame += 1
+    if _metrics_frame % _metrics_every != 0:
+        return
+    if !_metrics_rid.is_valid():
+        return
+    RenderingServer.call_on_render_thread(Callable(self, "_readback_metrics_on_render_thread"))
+
+func _readback_metrics_on_render_thread() -> void:
+    if _rd == null or !_metrics_rid.is_valid():
+        return
+    var bytes := _rd.buffer_get_data(_metrics_rid)
+    var ints := bytes.to_int32_array()
+    if ints.size() < 4:
+        return
+    var ray_count := ints[0]
+    var hit_count := ints[1]
+    var step_count := ints[2]
+    var occupied_bricks := ints[3]
+    var avg_steps := 0.0
+    if ray_count > 0:
+        avg_steps = float(step_count) / float(ray_count)
+    print("GPU metrics | rays=%d hits=%d avg_steps=%.2f occupied_bricks=%d" % [ray_count, hit_count, avg_steps, occupied_bricks])
 
 func _dispatch_compute(bytes: PackedByteArray) -> void:
     if !_render_ready or !_pipeline_rid.is_valid() or !_uniform_set_rid.is_valid():
@@ -279,7 +326,6 @@ func _dispatch_compute(bytes: PackedByteArray) -> void:
     var groups_y := int(ceil(float(height) / 8.0))
     _rd.compute_list_dispatch(list, groups_x, groups_y, 1)
     _rd.compute_list_end()
-    _rd.submit()
 
 func _upload_brickmap_data() -> void:
     var brick_grid := chunk_grid
@@ -416,6 +462,8 @@ func _exit_tree() -> void:
         _rd.free_rid(_atlas_rid)
     if _occupancy_rid.is_valid():
         _rd.free_rid(_occupancy_rid)
+    if _metrics_rid.is_valid():
+        _rd.free_rid(_metrics_rid)
     if _pipeline_rid.is_valid():
         _rd.free_rid(_pipeline_rid)
     if _shader_rid.is_valid():

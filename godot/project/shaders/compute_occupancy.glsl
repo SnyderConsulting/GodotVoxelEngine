@@ -27,6 +27,10 @@ layout(set = 0, binding = 3, std430) writeonly buffer Occupancy {
     uint data[];
 } occ;
 
+layout(set = 0, binding = 4, std430) buffer Metrics {
+    uint data[];
+} metrics;
+
 uint idx_brick(ivec3 b) {
     return uint(b.x) + uint(b.y) * uint(u.brick_info.x)
         + uint(b.z) * uint(u.brick_info.x) * uint(u.brick_info.y);
@@ -54,4 +58,7 @@ void main() {
         }
     }
     occ.data[brick_index] = any;
+    if (any != 0u) {
+        atomicAdd(metrics.data[3], 1u);
+    }
 }

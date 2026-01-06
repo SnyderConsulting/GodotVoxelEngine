@@ -25,6 +25,10 @@ layout(set = 0, binding = 4, std430) readonly buffer Occupancy {
     uint data[];
 } occ;
 
+layout(set = 0, binding = 5, std430) buffer Metrics {
+    uint data[];
+} metrics;
+
 float sdf_truncated_octahedron(vec3 p) {
     const float inv_sqrt3 = 0.57735026919;
     const float scale = 2.0;
@@ -225,6 +229,8 @@ void main() {
 
     vec3 color = vec3(0.12);
     bool hit = false;
+    uint step_count = 0u;
+    atomicAdd(metrics.data[0], 1u);
     int brick_size = int(u.brick_info.w);
 
     vec3 grid_min = u.origin.xyz;
@@ -260,6 +266,7 @@ void main() {
     );
 
     for (int i = 0; i < 2048; i++) {
+        step_count++;
         if (t > t_exit || t > u.misc.y) {
             break;
         }
@@ -299,6 +306,7 @@ void main() {
                     float max_step = a * 0.1;
                     float min_step = a * 0.01;
                     for (int j = 0; j < 128; j++) {
+                        step_count++;
                         if (t_cell > t_cell_max) {
                             break;
                         }
@@ -377,6 +385,7 @@ void main() {
                             vec3 base = vec3(0.9, 0.7, 0.4);
                             color = base * (0.12 + diff * shadow) + base * reflection + vec3(1.0) * spec * 0.25;
                             hit = true;
+                            atomicAdd(metrics.data[1], 1u);
                             break;
                         }
                         float sdf_step = clamp(d, min_step, max_step);
@@ -394,5 +403,6 @@ void main() {
         t += 0.01;
     }
 
+    atomicAdd(metrics.data[2], step_count);
     imageStore(dest, gid, vec4(color, 1.0));
 }
