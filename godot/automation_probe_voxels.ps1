@@ -14,6 +14,8 @@ param(
   [int]$DebugLogEvery = 30,
   [int]$DebugProbeEvery = 30,
   [int]$MetricsEvery = 30,
+  [bool]$SimEnabled = $true,
+  [int]$SimEvery = 1,
   [switch]$RenderThreadPing
 )
 
@@ -63,6 +65,8 @@ try {
   Invoke-Automation -Method "set" -Params @{ path = $voxelPath; property = "debug_probe_enabled"; value = $true } | Out-Null
   Invoke-Automation -Method "set" -Params @{ path = $voxelPath; property = "debug_probe_every"; value = $DebugProbeEvery } | Out-Null
   Invoke-Automation -Method "set" -Params @{ path = $voxelPath; property = "metrics_every"; value = $MetricsEvery } | Out-Null
+  Invoke-Automation -Method "set" -Params @{ path = $voxelPath; property = "sim_enabled"; value = $SimEnabled } | Out-Null
+  Invoke-Automation -Method "set" -Params @{ path = $voxelPath; property = "sim_every"; value = $SimEvery } | Out-Null
   Invoke-Automation -Method "set" -Params @{ path = $voxelPath; property = "debug_render_thread_ping"; value = $RenderThreadPing.IsPresent } | Out-Null
 
   Invoke-Automation -Method "set" -Params @{ path = $voxelPath; property = "debug_probe_cell"; value = @($ProbeX, $ProbeY, $ProbeZ) } | Out-Null

@@ -20,22 +20,33 @@ extends Node
 @export var debug_probe_enabled: bool = false
 @export var debug_probe_cell: Vector3i = Vector3i(0, 0, 0)
 @export var debug_probe_every: int = 60
+@export var sim_enabled: bool = false
+@export var sim_every: int = 1
+@export var sim_clear_output: bool = true
 
 var _rd: RenderingDevice
 var _shader_rid: RID
 var _pipeline_rid: RID
 var _occupancy_shader_rid: RID
 var _occupancy_pipeline_rid: RID
+var _sim_shader_rid: RID
+var _sim_pipeline_rid: RID
 var _texture_rid: RID
 var _ubo_rid: RID
 var _indirection_rid: RID
-var _atlas_rid: RID
+var _atlas_a_rid: RID
+var _atlas_b_rid: RID
 var _occupancy_rid: RID
 var _metrics_rid: RID
-var _uniform_set_rid: RID
-var _occupancy_uniform_set_rid: RID
+var _uniform_set_a_rid: RID
+var _uniform_set_b_rid: RID
+var _occupancy_uniform_set_a_rid: RID
+var _occupancy_uniform_set_b_rid: RID
+var _sim_uniform_set_ab: RID
+var _sim_uniform_set_ba: RID
 var _occupancy_bytes := 0
 var _metrics_bytes := 0
+var _atlas_bytes := 0
 var _display_texture: Texture2D
 var _display_material: ShaderMaterial
 var _camera: Camera3D
@@ -44,6 +55,8 @@ var _use_global_rd := false
 var _metrics_frame := 0
 var _debug_frame := 0
 var _debug_probe_frame := 0
+var _sim_frame := 0
+var _atlas_use_a := true
 var _indirection_cpu: PackedInt32Array = PackedInt32Array()
 
 func _ready() -> void:
@@ -126,6 +139,26 @@ func _init_render_resources() -> void:
         push_error("Failed to create occupancy pipeline.")
         return
 
+    var sim_source_text := FileAccess.get_file_as_string("res://shaders/compute_sim.glsl")
+    if sim_source_text.is_empty():
+        push_error("Missing compute shader source: res://shaders/compute_sim.glsl")
+    else:
+        var sim_source := RDShaderSource.new()
+        sim_source.language = RenderingDevice.SHADER_LANGUAGE_GLSL
+        sim_source.set_stage_source(RenderingDevice.SHADER_STAGE_COMPUTE, sim_source_text)
+        var sim_spirv := _rd.shader_compile_spirv_from_source(sim_source)
+        var sim_error := sim_spirv.get_stage_compile_error(RenderingDevice.SHADER_STAGE_COMPUTE)
+        if sim_error != "":
+            push_error("Sim shader compile error: %s" % sim_error)
+        else:
+            _sim_shader_rid = _rd.shader_create_from_spirv(sim_spirv)
+            if !_sim_shader_rid.is_valid():
+                push_error("Failed to create sim shader.")
+            else:
+                _sim_pipeline_rid = _rd.compute_pipeline_create(_sim_shader_rid)
+                if !_sim_pipeline_rid.is_valid():
+                    push_error("Failed to create sim pipeline.")
+
     var fmt := RDTextureFormat.new()
     fmt.width = width
     fmt.height = height
@@ -147,7 +180,7 @@ func _init_render_resources() -> void:
     var brick_grid := chunk_grid
     var brick_count := brick_grid * brick_grid * brick_grid
     var indirection_bytes := brick_count * 4
-    var atlas_bytes := brick_count * chunk_size * chunk_size * chunk_size * 4   
+    _atlas_bytes = brick_count * chunk_size * chunk_size * chunk_size * 4
     var occupancy_bytes := brick_count * 4
     _occupancy_bytes = occupancy_bytes
     _metrics_bytes = 16
@@ -156,9 +189,13 @@ func _init_render_resources() -> void:
     if !_indirection_rid.is_valid():
         push_error("Failed to create indirection buffer.")
         return
-    _atlas_rid = _rd.storage_buffer_create(atlas_bytes)
-    if !_atlas_rid.is_valid():
-        push_error("Failed to create atlas buffer.")
+    _atlas_a_rid = _rd.storage_buffer_create(_atlas_bytes)
+    if !_atlas_a_rid.is_valid():
+        push_error("Failed to create atlas buffer A.")
+        return
+    _atlas_b_rid = _rd.storage_buffer_create(_atlas_bytes)
+    if !_atlas_b_rid.is_valid():
+        push_error("Failed to create atlas buffer B.")
         return
     _occupancy_rid = _rd.storage_buffer_create(occupancy_bytes)
     if !_occupancy_rid.is_valid():
@@ -186,27 +223,40 @@ func _init_render_resources() -> void:
     indirection_uniform.binding = 2
     indirection_uniform.add_id(_indirection_rid)
 
-    var atlas_uniform := RDUniform.new()
-    atlas_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
-    atlas_uniform.binding = 3
-    atlas_uniform.add_id(_atlas_rid)
+    var atlas_uniform_a := RDUniform.new()
+    atlas_uniform_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+    atlas_uniform_a.binding = 3
+    atlas_uniform_a.add_id(_atlas_a_rid)
+
+    var atlas_uniform_b := RDUniform.new()
+    atlas_uniform_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+    atlas_uniform_b.binding = 3
+    atlas_uniform_b.add_id(_atlas_b_rid)
 
     var occupancy_uniform := RDUniform.new()
     occupancy_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
     occupancy_uniform.binding = 4
     occupancy_uniform.add_id(_occupancy_rid)
     var metrics_uniform := RDUniform.new()
-    metrics_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER  
+    metrics_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
     metrics_uniform.binding = 5
     metrics_uniform.add_id(_metrics_rid)
 
-    _uniform_set_rid = _rd.uniform_set_create(
-        [img_uniform, ubo_uniform, indirection_uniform, atlas_uniform, occupancy_uniform, metrics_uniform],
+    _uniform_set_a_rid = _rd.uniform_set_create(
+        [img_uniform, ubo_uniform, indirection_uniform, atlas_uniform_a, occupancy_uniform, metrics_uniform],
         _shader_rid,
         0
     )
-    if !_uniform_set_rid.is_valid():
-        push_error("Failed to create uniform set.")
+    if !_uniform_set_a_rid.is_valid():
+        push_error("Failed to create uniform set A.")
+        return
+    _uniform_set_b_rid = _rd.uniform_set_create(
+        [img_uniform, ubo_uniform, indirection_uniform, atlas_uniform_b, occupancy_uniform, metrics_uniform],
+        _shader_rid,
+        0
+    )
+    if !_uniform_set_b_rid.is_valid():
+        push_error("Failed to create uniform set B.")
         return
 
     var occ_ubo_uniform := RDUniform.new()
@@ -219,13 +269,18 @@ func _init_render_resources() -> void:
     occ_indirection_uniform.binding = 1
     occ_indirection_uniform.add_id(_indirection_rid)
 
-    var occ_atlas_uniform := RDUniform.new()
-    occ_atlas_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
-    occ_atlas_uniform.binding = 2
-    occ_atlas_uniform.add_id(_atlas_rid)
+    var occ_atlas_uniform_a := RDUniform.new()
+    occ_atlas_uniform_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+    occ_atlas_uniform_a.binding = 2
+    occ_atlas_uniform_a.add_id(_atlas_a_rid)
+
+    var occ_atlas_uniform_b := RDUniform.new()
+    occ_atlas_uniform_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+    occ_atlas_uniform_b.binding = 2
+    occ_atlas_uniform_b.add_id(_atlas_b_rid)
 
     var occ_out_uniform := RDUniform.new()
-    occ_out_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER  
+    occ_out_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
     occ_out_uniform.binding = 3
     occ_out_uniform.add_id(_occupancy_rid)
     var occ_metrics_uniform := RDUniform.new()
@@ -233,14 +288,68 @@ func _init_render_resources() -> void:
     occ_metrics_uniform.binding = 4
     occ_metrics_uniform.add_id(_metrics_rid)
 
-    _occupancy_uniform_set_rid = _rd.uniform_set_create(
-        [occ_ubo_uniform, occ_indirection_uniform, occ_atlas_uniform, occ_out_uniform, occ_metrics_uniform],
+    _occupancy_uniform_set_a_rid = _rd.uniform_set_create(
+        [occ_ubo_uniform, occ_indirection_uniform, occ_atlas_uniform_a, occ_out_uniform, occ_metrics_uniform],
         _occupancy_shader_rid,
         0
     )
-    if !_occupancy_uniform_set_rid.is_valid():
-        push_error("Failed to create occupancy uniform set.")
+    if !_occupancy_uniform_set_a_rid.is_valid():
+        push_error("Failed to create occupancy uniform set A.")
         return
+    _occupancy_uniform_set_b_rid = _rd.uniform_set_create(
+        [occ_ubo_uniform, occ_indirection_uniform, occ_atlas_uniform_b, occ_out_uniform, occ_metrics_uniform],
+        _occupancy_shader_rid,
+        0
+    )
+    if !_occupancy_uniform_set_b_rid.is_valid():
+        push_error("Failed to create occupancy uniform set B.")
+        return
+
+    if _sim_shader_rid.is_valid():
+        var sim_ubo_uniform := RDUniform.new()
+        sim_ubo_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER
+        sim_ubo_uniform.binding = 0
+        sim_ubo_uniform.add_id(_ubo_rid)
+
+        var sim_indirection_uniform := RDUniform.new()
+        sim_indirection_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        sim_indirection_uniform.binding = 1
+        sim_indirection_uniform.add_id(_indirection_rid)
+
+        var sim_in_a := RDUniform.new()
+        sim_in_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        sim_in_a.binding = 2
+        sim_in_a.add_id(_atlas_a_rid)
+
+        var sim_out_b := RDUniform.new()
+        sim_out_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        sim_out_b.binding = 3
+        sim_out_b.add_id(_atlas_b_rid)
+
+        _sim_uniform_set_ab = _rd.uniform_set_create(
+            [sim_ubo_uniform, sim_indirection_uniform, sim_in_a, sim_out_b],
+            _sim_shader_rid,
+            0
+        )
+        if !_sim_uniform_set_ab.is_valid():
+            push_error("Failed to create sim uniform set AB.")
+        var sim_in_b := RDUniform.new()
+        sim_in_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        sim_in_b.binding = 2
+        sim_in_b.add_id(_atlas_b_rid)
+
+        var sim_out_a := RDUniform.new()
+        sim_out_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        sim_out_a.binding = 3
+        sim_out_a.add_id(_atlas_a_rid)
+
+        _sim_uniform_set_ba = _rd.uniform_set_create(
+            [sim_ubo_uniform, sim_indirection_uniform, sim_in_b, sim_out_a],
+            _sim_shader_rid,
+            0
+        )
+        if !_sim_uniform_set_ba.is_valid():
+            push_error("Failed to create sim uniform set BA.")
 
     _display_texture = _create_display_texture()
     if _display_texture == null:
@@ -252,7 +361,9 @@ func _init_render_resources() -> void:
 func _process(_delta: float) -> void:
     if _rd == null:
         return
-    if !_render_ready or !_pipeline_rid.is_valid() or !_uniform_set_rid.is_valid():
+    if !_render_ready or !_pipeline_rid.is_valid():
+        return
+    if !_uniform_set_a_rid.is_valid() or !_uniform_set_b_rid.is_valid():
         return
 
     _debug_frame += 1
@@ -265,10 +376,11 @@ func _process(_delta: float) -> void:
     var world_extent := grid_extent * lattice_spacing
     var voxel_size := lattice_spacing
     var brick_grid := float(chunk_grid)
+    var grid_extent_i := chunk_grid * chunk_size
     var debug_flag := 1.0 if debug_overlay else 0.0
     var params := PackedFloat32Array([
         grid_extent, grid_extent, grid_extent, 0.0,
-        -0.5 * world_extent, -0.5 * world_extent, -0.5 * world_extent, 0.0,     
+        -0.5 * world_extent, -0.5 * world_extent, -0.5 * world_extent, 0.0,
         pos.x, pos.y, pos.z, 0.0,
         basis.x.x, basis.x.y, basis.x.z, 0.0,
         basis.y.x, basis.y.y, basis.y.z, 0.0,
@@ -279,12 +391,45 @@ func _process(_delta: float) -> void:
         debug_flag, 0.0, 0.0, 0.0
     ])
     var bytes := params.to_byte_array()
+    _update_params(bytes)
     _debug_log_snapshot(pos, basis, world_extent)
+    _dispatch_sim(grid_extent_i)
     _reset_metrics()
     _dispatch_occupancy()
-    _dispatch_compute(bytes)
+    _dispatch_compute()
     _readback_metrics()
     _debug_request_probe()
+
+func _update_params(bytes: PackedByteArray) -> void:
+    if _rd == null or !_ubo_rid.is_valid():
+        return
+    _rd.buffer_update(_ubo_rid, 0, bytes.size(), bytes)
+
+func _dispatch_sim(grid_extent: int) -> void:
+    if !sim_enabled:
+        return
+    if !_sim_pipeline_rid.is_valid():
+        return
+    _sim_frame += 1
+    var every: int = sim_every
+    if every < 1:
+        every = 1
+    if _sim_frame % every != 0:
+        return
+    var use_a := _atlas_use_a
+    var uniform_set := _sim_uniform_set_ab if use_a else _sim_uniform_set_ba
+    if !uniform_set.is_valid():
+        return
+    var atlas_out := _atlas_b_rid if use_a else _atlas_a_rid
+    if sim_clear_output and _atlas_bytes > 0:
+        _rd.buffer_clear(atlas_out, 0, _atlas_bytes)
+    var list := _rd.compute_list_begin()
+    _rd.compute_list_bind_compute_pipeline(list, _sim_pipeline_rid)
+    _rd.compute_list_bind_uniform_set(list, uniform_set, 0)
+    var groups := int(ceil(float(grid_extent) / 4.0))
+    _rd.compute_list_dispatch(list, groups, groups, groups)
+    _rd.compute_list_end()
+    _atlas_use_a = !use_a
 
 func _reset_metrics() -> void:
     if !_metrics_rid.is_valid():
@@ -292,12 +437,15 @@ func _reset_metrics() -> void:
     _rd.buffer_clear(_metrics_rid, 0, _metrics_bytes)
 
 func _dispatch_occupancy() -> void:
-    if !_occupancy_pipeline_rid.is_valid() or !_occupancy_uniform_set_rid.is_valid():
+    if !_occupancy_pipeline_rid.is_valid():
+        return
+    var uniform_set := _occupancy_uniform_set_a_rid if _atlas_use_a else _occupancy_uniform_set_b_rid
+    if !uniform_set.is_valid():
         return
     _rd.buffer_clear(_occupancy_rid, 0, _occupancy_bytes)
     var list := _rd.compute_list_begin()
-    _rd.compute_list_bind_compute_pipeline(list, _occupancy_pipeline_rid)       
-    _rd.compute_list_bind_uniform_set(list, _occupancy_uniform_set_rid, 0)      
+    _rd.compute_list_bind_compute_pipeline(list, _occupancy_pipeline_rid)
+    _rd.compute_list_bind_uniform_set(list, uniform_set, 0)
     var brick_count := chunk_grid * chunk_grid * chunk_grid
     _rd.compute_list_dispatch(list, brick_count, 1, 1)
     _rd.compute_list_end()
@@ -330,14 +478,15 @@ func _readback_metrics_on_render_thread() -> void:
     var main_thread := Thread.is_main_thread()
     print("GPU metrics | rays=%d hits=%d avg_steps=%.2f occupied_bricks=%d main_thread=%s" % [ray_count, hit_count, avg_steps, occupied_bricks, str(main_thread)])
 
-func _dispatch_compute(bytes: PackedByteArray) -> void:
-    if !_render_ready or !_pipeline_rid.is_valid() or !_uniform_set_rid.is_valid():
+func _dispatch_compute() -> void:
+    if !_render_ready or !_pipeline_rid.is_valid():
         return
-    _rd.buffer_update(_ubo_rid, 0, bytes.size(), bytes)
-
+    var uniform_set := _uniform_set_a_rid if _atlas_use_a else _uniform_set_b_rid
+    if !uniform_set.is_valid():
+        return
     var list := _rd.compute_list_begin()
     _rd.compute_list_bind_compute_pipeline(list, _pipeline_rid)
-    _rd.compute_list_bind_uniform_set(list, _uniform_set_rid, 0)
+    _rd.compute_list_bind_uniform_set(list, uniform_set, 0)
     var groups_x := int(ceil(float(width) / 8.0))
     var groups_y := int(ceil(float(height) / 8.0))
     _rd.compute_list_dispatch(list, groups_x, groups_y, 1)
@@ -422,7 +571,11 @@ func _upload_brickmap_data() -> void:
     _rd.buffer_update(_indirection_rid, 0, ind_bytes.size(), ind_bytes)
     _indirection_cpu = indirection
     var atlas_bytes := atlas.to_byte_array()
-    _rd.buffer_update(_atlas_rid, 0, atlas_bytes.size(), atlas_bytes)
+    if _atlas_a_rid.is_valid():
+        _rd.buffer_update(_atlas_a_rid, 0, atlas_bytes.size(), atlas_bytes)
+    if _atlas_b_rid.is_valid():
+        _rd.buffer_update(_atlas_b_rid, 0, atlas_bytes.size(), atlas_bytes)
+    _atlas_use_a = true
     var occ_bytes := occupancy.to_byte_array()
     _rd.buffer_update(_occupancy_rid, 0, occ_bytes.size(), occ_bytes)
 
@@ -493,6 +646,9 @@ func _debug_render_thread_ping(frame_id: int) -> void:
 
 func _bcc_parity(cell: Vector3i) -> bool:
     return ((cell.x & 1) == (cell.y & 1)) and ((cell.y & 1) == (cell.z & 1))
+
+func _current_atlas_rid() -> RID:
+    return _atlas_a_rid if _atlas_use_a else _atlas_b_rid
 
 func set_debug_probe_cell_xyz(x: int, y: int, z: int) -> void:
     debug_probe_cell = Vector3i(x, y, z)
@@ -570,6 +726,7 @@ func _debug_request_probe() -> void:
         return
     var atlas_offset := atlas_index * 4
     var occ_offset := brick_index * 4
+    var atlas_rid := _current_atlas_rid()
     RenderingServer.call_on_render_thread(Callable(self, "_debug_probe_readback_on_render_thread").bind(
         _debug_frame,
         cell,
@@ -577,15 +734,16 @@ func _debug_request_probe() -> void:
         ind,
         atlas_index,
         atlas_offset,
-        occ_offset
+        occ_offset,
+        atlas_rid
     ))
 
-func _debug_probe_readback_on_render_thread(frame_id: int, cell: Vector3i, parity: bool, ind: int, atlas_index: int, atlas_offset: int, occ_offset: int) -> void:
+func _debug_probe_readback_on_render_thread(frame_id: int, cell: Vector3i, parity: bool, ind: int, atlas_index: int, atlas_offset: int, occ_offset: int, atlas_rid: RID) -> void:
     if _rd == null:
         return
-    if !_atlas_rid.is_valid():
+    if !atlas_rid.is_valid():
         return
-    var atlas_bytes := _rd.buffer_get_data(_atlas_rid, atlas_offset, 4)
+    var atlas_bytes := _rd.buffer_get_data(atlas_rid, atlas_offset, 4)
     var occ_bytes := PackedByteArray()
     if _occupancy_rid.is_valid():
         occ_bytes = _rd.buffer_get_data(_occupancy_rid, occ_offset, 4)
@@ -624,18 +782,28 @@ func _create_display_texture() -> Texture2D:
 func _exit_tree() -> void:
     if _rd == null:
         return
-    if _uniform_set_rid.is_valid():
-        _rd.free_rid(_uniform_set_rid)
-    if _occupancy_uniform_set_rid.is_valid():
-        _rd.free_rid(_occupancy_uniform_set_rid)
+    if _uniform_set_a_rid.is_valid():
+        _rd.free_rid(_uniform_set_a_rid)
+    if _uniform_set_b_rid.is_valid():
+        _rd.free_rid(_uniform_set_b_rid)
+    if _occupancy_uniform_set_a_rid.is_valid():
+        _rd.free_rid(_occupancy_uniform_set_a_rid)
+    if _occupancy_uniform_set_b_rid.is_valid():
+        _rd.free_rid(_occupancy_uniform_set_b_rid)
+    if _sim_uniform_set_ab.is_valid():
+        _rd.free_rid(_sim_uniform_set_ab)
+    if _sim_uniform_set_ba.is_valid():
+        _rd.free_rid(_sim_uniform_set_ba)
     if _ubo_rid.is_valid():
         _rd.free_rid(_ubo_rid)
     if _texture_rid.is_valid():
         _rd.free_rid(_texture_rid)
     if _indirection_rid.is_valid():
         _rd.free_rid(_indirection_rid)
-    if _atlas_rid.is_valid():
-        _rd.free_rid(_atlas_rid)
+    if _atlas_a_rid.is_valid():
+        _rd.free_rid(_atlas_a_rid)
+    if _atlas_b_rid.is_valid():
+        _rd.free_rid(_atlas_b_rid)
     if _occupancy_rid.is_valid():
         _rd.free_rid(_occupancy_rid)
     if _metrics_rid.is_valid():
@@ -648,3 +816,7 @@ func _exit_tree() -> void:
         _rd.free_rid(_occupancy_pipeline_rid)
     if _occupancy_shader_rid.is_valid():
         _rd.free_rid(_occupancy_shader_rid)
+    if _sim_pipeline_rid.is_valid():
+        _rd.free_rid(_sim_pipeline_rid)
+    if _sim_shader_rid.is_valid():
+        _rd.free_rid(_sim_shader_rid)
