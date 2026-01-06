@@ -21,7 +21,12 @@
 ## Minimal validation pattern
 - Add a debug uniform to force a flat color (to prove the shader is running).
 - Use engine logs to catch shader compile errors:
-  - `C:\Users\andre\AppData\Roaming\Godot\app_userdata\VoxLand\logs\godot.log`
+  - `C:\Users\andre\AppData\Roaming\Godot\app_userdata\VoxLand\logs\godot.log`  
+
+## Voxel raymarch traversal cap (missing pieces at some angles)
+- Symptom: voxels partially disappeared when the camera was rotated to certain yaw/pitch values.
+- Root cause: the empty-space march used a fixed `0.01` step with `2048` steps, so rays could only travel ~20.48 world units and never reached the voxel cluster on diagonals.
+- Fix: in `godot/project/shaders/compute_raymarch.glsl`, raise the loop to `MAX_STEPS = 4096` and compute an adaptive `empty_step = max(0.01 * voxel_size, (t_exit - t) / MAX_STEPS)` so the ray always spans the grid bounds.
 
 ## References
 - Raymarching intro tutorial: https://www.youtube.com/watch?v=68G3V5Yr8FY

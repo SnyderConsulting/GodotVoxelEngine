@@ -252,7 +252,10 @@ void main() {
         return;
     }
 
+    const int MAX_STEPS = 4096;
     float t = max(t_enter, 0.0);
+    float base_step = 0.01 * u.misc.x;
+    float empty_step = max(base_step, (t_exit - t) / float(MAX_STEPS));
     ivec3 grid_size = ivec3(int(u.grid_info.x), int(u.grid_info.y), int(u.grid_info.z));
     vec3 signs[8] = vec3[8](
         vec3( 1.0,  1.0,  1.0),
@@ -265,7 +268,7 @@ void main() {
         vec3(-1.0, -1.0, -1.0)
     );
 
-    for (int i = 0; i < 2048; i++) {
+    for (int i = 0; i < MAX_STEPS; i++) {
         step_count++;
         if (t > t_exit || t > u.misc.y) {
             break;
@@ -275,7 +278,7 @@ void main() {
         vec3 local = (pos - grid_min) / u.misc.x;
         ivec3 cell = nearest_bcc(local);
         if (!in_bounds(cell)) {
-            t += 0.01;
+            t += empty_step;
             continue;
         }
 
@@ -400,7 +403,7 @@ void main() {
             }
         }
 
-        t += 0.01;
+        t += empty_step;
     }
 
     atomicAdd(metrics.data[2], step_count);
