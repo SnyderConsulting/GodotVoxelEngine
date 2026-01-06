@@ -4,7 +4,7 @@ This project is a clean restart focused on a single GPU-resident voxel cube rend
 
 ## Goal
 
-- Render a 128x128x128 voxel cube entirely on the GPU.
+- Render a truncated-octahedron voxel lattice volume entirely on the GPU.
 - Use a brickmap + indirection buffer for sparse storage (8x8x8 bricks).
 - Provide a 360-degree isometric-style view with orbit/zoom controls.
 - Keep simulation optional; the initial focus is on rendering and camera control.
@@ -37,7 +37,7 @@ This project is a clean restart focused on a single GPU-resident voxel cube rend
 
 ## Development Notes
 
-- Voxel size: 128x128x128.
+- Voxel volume size: determined by `chunk_grid * chunk_size` (lattice cells).
 - Brick size: 8 (2^3), for 16x16x16 bricks.
 - Start with a simple voxel fill pattern (solid cube core or checker layers).
 
