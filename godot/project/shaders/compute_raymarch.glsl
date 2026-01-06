@@ -13,6 +13,7 @@ layout(set = 0, binding = 1, std140) uniform Params {
     vec4 screen;      // xy = screen size, z = tan_half_fov, w = aspect
     vec4 misc;        // x = voxel_size, y = max_dist, z = shadow_strength, w = reflection_strength
     vec4 brick_info;  // xyz = brick grid dims, w = brick size
+    vec4 debug_info;  // x = debug overlay toggle
 } u;
 layout(set = 0, binding = 2, std430) readonly buffer Indirection {
     uint data[];
@@ -124,6 +125,19 @@ void main() {
     vec2 uv = (vec2(gid) + vec2(0.5)) / vec2(width, height);
     vec2 ndc = uv * 2.0 - 1.0;
     ndc.y = -ndc.y;
+
+    if (u.debug_info.x > 0.5) {
+        int bricks_x = int(u.brick_info.x);
+        int bricks_y = int(u.brick_info.y);
+        int bricks_z = int(u.brick_info.z);
+        int bx = clamp(int(floor(uv.x * float(bricks_x))), 0, bricks_x - 1);
+        int by = clamp(int(floor(uv.y * float(bricks_y))), 0, bricks_y - 1);
+        int bz = bricks_z / 2;
+        uint occ_val = occ.data[idx_brick(ivec3(bx, by, bz))];
+        vec3 dbg = (occ_val != 0u) ? vec3(0.1, 0.8, 0.2) : vec3(0.15);
+        imageStore(dest, gid, vec4(dbg, 1.0));
+        return;
+    }
     vec3 ro = u.cam_pos.xyz;
     vec3 rd = normalize(
         u.cam_forward.xyz +

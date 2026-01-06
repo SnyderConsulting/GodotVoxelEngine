@@ -1,11 +1,11 @@
 # VoxLand (Godot GPU Voxel Reset)
 
-This project is a clean restart focused on a single GPU-resident voxel cube rendered in Godot via compute shaders, following the architecture outlined in `Voxel Physics Engine Deep Dive.md`.
+This project is a clean restart focused on a single GPU-resident voxel volume rendered in Godot via compute shaders, following the architecture outlined in `Voxel Physics Engine Deep Dive.md`.
 
 ## Goal
 
 - Render a truncated-octahedron voxel lattice volume entirely on the GPU.
-- Use a brickmap + indirection buffer for sparse storage (8x8x8 bricks).
+- Use a brickmap + indirection buffer for sparse storage (GPU tiling only).
 - Provide a 360-degree isometric-style view with orbit/zoom controls.
 - Keep simulation optional; the initial focus is on rendering and camera control.
 
@@ -38,7 +38,8 @@ This project is a clean restart focused on a single GPU-resident voxel cube rend
 ## Development Notes
 
 - Voxel volume size: determined by `chunk_grid * chunk_size` (lattice cells).
-- Brick size: 8 (2^3), for 16x16x16 bricks.
+- Brick size: 8 cells per brick (GPU tiling only, not spatial alignment).
+- Lattice: truncated-octahedron tessellation defines voxel adjacency and placement.
 - Start with a simple voxel fill pattern (solid cube core or checker layers).
 
 ## Project Layout

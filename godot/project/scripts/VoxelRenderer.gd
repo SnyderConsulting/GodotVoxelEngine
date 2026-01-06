@@ -12,16 +12,21 @@ extends Node
 @export var fill_mode := 0
 @export var noise_threshold := 0.55
 @export var voxel_data_path := "res://data/voxels.json"
+@export var debug_overlay := false
 
 var _rd: RenderingDevice
 var _shader_rid: RID
 var _pipeline_rid: RID
+var _occupancy_shader_rid: RID
+var _occupancy_pipeline_rid: RID
 var _texture_rid: RID
 var _ubo_rid: RID
 var _indirection_rid: RID
 var _atlas_rid: RID
 var _occupancy_rid: RID
 var _uniform_set_rid: RID
+var _occupancy_uniform_set_rid: RID
+var _occupancy_bytes := 0
 var _display_texture: Texture2D
 var _display_material: ShaderMaterial
 var _camera: Camera3D
@@ -55,6 +60,10 @@ func _ready() -> void:
 
     _init_render_resources()
 
+func _unhandled_input(event: InputEvent) -> void:
+    if event is InputEventKey and event.pressed and event.keycode == KEY_F1:
+        debug_overlay = !debug_overlay
+
 func _init_render_resources() -> void:
     var shader_source_text := FileAccess.get_file_as_string("res://shaders/compute_raymarch.glsl")
     if shader_source_text.is_empty():
@@ -80,6 +89,30 @@ func _init_render_resources() -> void:
         push_error("Failed to create compute pipeline.")
         return
 
+    var occ_source_text := FileAccess.get_file_as_string("res://shaders/compute_occupancy.glsl")
+    if occ_source_text.is_empty():
+        push_error("Missing compute shader source: res://shaders/compute_occupancy.glsl")
+        return
+
+    var occ_source := RDShaderSource.new()
+    occ_source.language = RenderingDevice.SHADER_LANGUAGE_GLSL
+    occ_source.set_stage_source(RenderingDevice.SHADER_STAGE_COMPUTE, occ_source_text)
+    var occ_spirv := _rd.shader_compile_spirv_from_source(occ_source)
+    var occ_error := occ_spirv.get_stage_compile_error(RenderingDevice.SHADER_STAGE_COMPUTE)
+    if occ_error != "":
+        push_error("Occupancy shader compile error: %s" % occ_error)
+        return
+
+    _occupancy_shader_rid = _rd.shader_create_from_spirv(occ_spirv)
+    if !_occupancy_shader_rid.is_valid():
+        push_error("Failed to create occupancy shader.")
+        return
+
+    _occupancy_pipeline_rid = _rd.compute_pipeline_create(_occupancy_shader_rid)
+    if !_occupancy_pipeline_rid.is_valid():
+        push_error("Failed to create occupancy pipeline.")
+        return
+
     var fmt := RDTextureFormat.new()
     fmt.width = width
     fmt.height = height
@@ -93,7 +126,7 @@ func _init_render_resources() -> void:
         push_error("Failed to create compute texture.")
         return
 
-    _ubo_rid = _rd.uniform_buffer_create(144)
+    _ubo_rid = _rd.uniform_buffer_create(160)
     if !_ubo_rid.is_valid():
         push_error("Failed to create uniform buffer.")
         return
@@ -103,6 +136,7 @@ func _init_render_resources() -> void:
     var indirection_bytes := brick_count * 4
     var atlas_bytes := brick_count * chunk_size * chunk_size * chunk_size * 4
     var occupancy_bytes := brick_count * 4
+    _occupancy_bytes = occupancy_bytes
 
     _indirection_rid = _rd.storage_buffer_create(indirection_bytes)
     if !_indirection_rid.is_valid():
@@ -153,6 +187,35 @@ func _init_render_resources() -> void:
         push_error("Failed to create uniform set.")
         return
 
+    var occ_ubo_uniform := RDUniform.new()
+    occ_ubo_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER
+    occ_ubo_uniform.binding = 0
+    occ_ubo_uniform.add_id(_ubo_rid)
+
+    var occ_indirection_uniform := RDUniform.new()
+    occ_indirection_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+    occ_indirection_uniform.binding = 1
+    occ_indirection_uniform.add_id(_indirection_rid)
+
+    var occ_atlas_uniform := RDUniform.new()
+    occ_atlas_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+    occ_atlas_uniform.binding = 2
+    occ_atlas_uniform.add_id(_atlas_rid)
+
+    var occ_out_uniform := RDUniform.new()
+    occ_out_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+    occ_out_uniform.binding = 3
+    occ_out_uniform.add_id(_occupancy_rid)
+
+    _occupancy_uniform_set_rid = _rd.uniform_set_create(
+        [occ_ubo_uniform, occ_indirection_uniform, occ_atlas_uniform, occ_out_uniform],
+        _occupancy_shader_rid,
+        0
+    )
+    if !_occupancy_uniform_set_rid.is_valid():
+        push_error("Failed to create occupancy uniform set.")
+        return
+
     _display_texture = _create_display_texture()
     if _display_texture == null:
         push_error("Failed to create GPU display texture.")
@@ -175,19 +238,34 @@ func _process(_delta: float) -> void:
     var world_extent := grid_extent * lattice_spacing
     var voxel_size := lattice_spacing
     var brick_grid := float(chunk_grid)
+    var debug_flag := 1.0 if debug_overlay else 0.0
     var params := PackedFloat32Array([
         grid_extent, grid_extent, grid_extent, 0.0,
-        -0.5 * world_extent, -0.5 * world_extent, -0.5 * world_extent, 0.0,
+        -0.5 * world_extent, -0.5 * world_extent, -0.5 * world_extent, 0.0,     
         pos.x, pos.y, pos.z, 0.0,
         basis.x.x, basis.x.y, basis.x.z, 0.0,
         basis.y.x, basis.y.y, basis.y.z, 0.0,
         -basis.z.x, -basis.z.y, -basis.z.z, 0.0,
         float(width), float(height), tan_half_fov, aspect,
         voxel_size, max_distance, 0.8, 0.25,
-        brick_grid, brick_grid, brick_grid, float(chunk_size)
+        brick_grid, brick_grid, brick_grid, float(chunk_size),
+        debug_flag, 0.0, 0.0, 0.0
     ])
     var bytes := params.to_byte_array()
+    _dispatch_occupancy()
     _dispatch_compute(bytes)
+
+func _dispatch_occupancy() -> void:
+    if !_occupancy_pipeline_rid.is_valid() or !_occupancy_uniform_set_rid.is_valid():
+        return
+    _rd.buffer_clear(_occupancy_rid, 0, _occupancy_bytes)
+    var list := _rd.compute_list_begin()
+    _rd.compute_list_bind_compute_pipeline(list, _occupancy_pipeline_rid)
+    _rd.compute_list_bind_uniform_set(list, _occupancy_uniform_set_rid, 0)
+    var brick_count := chunk_grid * chunk_grid * chunk_grid
+    _rd.compute_list_dispatch(list, brick_count, 1, 1)
+    _rd.compute_list_end()
+    _rd.submit()
 
 func _dispatch_compute(bytes: PackedByteArray) -> void:
     if !_render_ready or !_pipeline_rid.is_valid() or !_uniform_set_rid.is_valid():
@@ -326,6 +404,8 @@ func _exit_tree() -> void:
         return
     if _uniform_set_rid.is_valid():
         _rd.free_rid(_uniform_set_rid)
+    if _occupancy_uniform_set_rid.is_valid():
+        _rd.free_rid(_occupancy_uniform_set_rid)
     if _ubo_rid.is_valid():
         _rd.free_rid(_ubo_rid)
     if _texture_rid.is_valid():
@@ -340,3 +420,7 @@ func _exit_tree() -> void:
         _rd.free_rid(_pipeline_rid)
     if _shader_rid.is_valid():
         _rd.free_rid(_shader_rid)
+    if _occupancy_pipeline_rid.is_valid():
+        _rd.free_rid(_occupancy_pipeline_rid)
+    if _occupancy_shader_rid.is_valid():
+        _rd.free_rid(_occupancy_shader_rid)

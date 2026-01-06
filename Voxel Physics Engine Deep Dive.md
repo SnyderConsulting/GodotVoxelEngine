@@ -12,6 +12,10 @@ This report provides an exhaustive technical analysis of the implementation deta
 
 ## ---
 
+### Project-Specific Note: Lattice-Based Voxels (Truncated Octahedra)
+
+This project uses a truncated-octahedron lattice for voxel placement and adjacency. Any cubic "grid" sizes discussed below (e.g., indirection grids or brick dimensions) refer to GPU storage/tiling and do not imply cubic spatial voxels. The lattice mapping from cell coordinates to world space is a separate layer and is the authoritative source of spatial alignment and neighbor relationships.
+
 **2\. Computational Architecture: The GPU Simulation Pipeline**
 
 The foundational requirement of a granular physics engine is the ability to update millions of active elements (voxels) sixty times per second. This necessitates a move away from object-oriented programming paradigms typically found in engines like Unity or Unreal, towards data-oriented design (DOD) implemented via Compute Shaders.
@@ -89,7 +93,7 @@ For engines like *Teardown* and *Octo*, which require arbitrary, persistent dest
 
 The Brickmap strikes a balance between the compression of an octree and the speed of a flat grid.
 
-* **The Indirection Grid:** A coarse 3D texture (e.g., $128 \\times 128 \\times 128$) where each voxel represents a large region of space (a "chunk"). The value stored here is not material data, but an **index** or pointer.  
+* **The Indirection Grid:** A coarse 3D texture (e.g., $N \\times N \\times N$) where each entry represents a large region of space (a "chunk"). The value stored here is not material data, but an **index** or pointer. (In lattice-based projects, this grid is storage/tiling only.)
 * **The Brick Atlas:** A massive, linear 3D texture (e.g., $4096 \\times 4096 \\times 256$) allocated in VRAM. This atlas is subdivided into smaller "Bricks" (e.g., $32 \\times 32 \\times 32$ voxel blocks).22
 
 When a ray traverses the world, or a physics body queries a collision:
