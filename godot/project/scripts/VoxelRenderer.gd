@@ -2,17 +2,24 @@ extends Node
 
 @export var quad_path: NodePath
 @export var camera_path: NodePath
-@export var width := 512
-@export var height := 512
-@export var chunk_size := 8
-@export var chunk_grid := 3
-@export var lattice_spacing := 1.0
-@export var max_distance := 200.0
-@export var fill_radius_ratio := 0.35
-@export var fill_mode := 0
-@export var noise_threshold := 0.55
-@export var voxel_data_path := "res://data/voxels.json"
-@export var debug_overlay := false
+@export var width: int = 512
+@export var height: int = 512
+@export var chunk_size: int = 8
+@export var chunk_grid: int = 3
+@export var lattice_spacing: float = 1.0
+@export var max_distance: float = 200.0
+@export var fill_radius_ratio: float = 0.35
+@export var fill_mode: int = 0
+@export var noise_threshold: float = 0.55
+@export var voxel_data_path: String = "res://data/voxels.json"
+@export var debug_overlay: bool = false
+@export var metrics_every: int = 30
+@export var debug_logging: bool = false
+@export var debug_log_every: int = 60
+@export var debug_render_thread_ping: bool = false
+@export var debug_probe_enabled: bool = false
+@export var debug_probe_cell: Vector3i = Vector3i(0, 0, 0)
+@export var debug_probe_every: int = 60
 
 var _rd: RenderingDevice
 var _shader_rid: RID
@@ -35,7 +42,9 @@ var _camera: Camera3D
 var _render_ready := false
 var _use_global_rd := false
 var _metrics_frame := 0
-var _metrics_every := 30
+var _debug_frame := 0
+var _debug_probe_frame := 0
+var _indirection_cpu: PackedInt32Array = PackedInt32Array()
 
 func _ready() -> void:
     _rd = RenderingServer.get_rendering_device()
@@ -246,6 +255,7 @@ func _process(_delta: float) -> void:
     if !_render_ready or !_pipeline_rid.is_valid() or !_uniform_set_rid.is_valid():
         return
 
+    _debug_frame += 1
     var basis := _camera.global_transform.basis
     var pos := _camera.global_transform.origin
     var fov := deg_to_rad(_camera.fov)
@@ -269,10 +279,12 @@ func _process(_delta: float) -> void:
         debug_flag, 0.0, 0.0, 0.0
     ])
     var bytes := params.to_byte_array()
+    _debug_log_snapshot(pos, basis, world_extent)
     _reset_metrics()
     _dispatch_occupancy()
     _dispatch_compute(bytes)
     _readback_metrics()
+    _debug_request_probe()
 
 func _reset_metrics() -> void:
     if !_metrics_rid.is_valid():
@@ -292,7 +304,10 @@ func _dispatch_occupancy() -> void:
 
 func _readback_metrics() -> void:
     _metrics_frame += 1
-    if _metrics_frame % _metrics_every != 0:
+    var every: int = metrics_every
+    if every < 1:
+        every = 1
+    if _metrics_frame % every != 0:
         return
     if !_metrics_rid.is_valid():
         return
@@ -312,7 +327,8 @@ func _readback_metrics_on_render_thread() -> void:
     var avg_steps := 0.0
     if ray_count > 0:
         avg_steps = float(step_count) / float(ray_count)
-    print("GPU metrics | rays=%d hits=%d avg_steps=%.2f occupied_bricks=%d" % [ray_count, hit_count, avg_steps, occupied_bricks])
+    var main_thread := Thread.is_main_thread()
+    print("GPU metrics | rays=%d hits=%d avg_steps=%.2f occupied_bricks=%d main_thread=%s" % [ray_count, hit_count, avg_steps, occupied_bricks, str(main_thread)])
 
 func _dispatch_compute(bytes: PackedByteArray) -> void:
     if !_render_ready or !_pipeline_rid.is_valid() or !_uniform_set_rid.is_valid():
@@ -404,6 +420,7 @@ func _upload_brickmap_data() -> void:
 
     var ind_bytes := indirection.to_byte_array()
     _rd.buffer_update(_indirection_rid, 0, ind_bytes.size(), ind_bytes)
+    _indirection_cpu = indirection
     var atlas_bytes := atlas.to_byte_array()
     _rd.buffer_update(_atlas_rid, 0, atlas_bytes.size(), atlas_bytes)
     var occ_bytes := occupancy.to_byte_array()
@@ -430,8 +447,167 @@ func _load_voxel_points(grid_extent: int) -> Array:
             continue
         if arr.size() < 3:
             continue
-        points.append(Vector3(float(arr[0]), float(arr[1]), float(arr[2])))
+        points.append(Vector3(float(arr[0]), float(arr[1]), float(arr[2])))     
     return points
+
+func _debug_log_snapshot(pos: Vector3, basis: Basis, world_extent: float) -> void:
+    if !debug_logging:
+        return
+    var every: int = debug_log_every
+    if every < 1:
+        every = 1
+    if _debug_frame % every != 0:
+        return
+    var grid_min := Vector3(-0.5 * world_extent, -0.5 * world_extent, -0.5 * world_extent)
+    var grid_max := grid_min + Vector3.ONE * world_extent
+    var cam_inside := (
+        pos.x >= grid_min.x and pos.x <= grid_max.x
+        and pos.y >= grid_min.y and pos.y <= grid_max.y
+        and pos.z >= grid_min.z and pos.z <= grid_max.z
+    )
+    var forward := -basis.z
+    var main_thread := Thread.is_main_thread()
+    var pipeline_ok := _pipeline_rid.is_valid()
+    print("VoxelRenderer debug | frame=%d main_thread=%s cam_pos=%s cam_fwd=%s cam_inside=%s render_ready=%s pipeline=%s debug_overlay=%s probe=%s" % [
+        _debug_frame,
+        str(main_thread),
+        str(pos),
+        str(forward),
+        str(cam_inside),
+        str(_render_ready),
+        str(pipeline_ok),
+        str(debug_overlay),
+        str(debug_probe_enabled)
+    ])
+    if debug_render_thread_ping:
+        RenderingServer.call_on_render_thread(Callable(self, "_debug_render_thread_ping").bind(_debug_frame))
+
+func _debug_render_thread_ping(frame_id: int) -> void:
+    var main_thread := Thread.is_main_thread()
+    var rd_valid := _rd != null
+    print("VoxelRenderer render thread | frame=%d main_thread=%s rd_valid=%s" % [
+        frame_id,
+        str(main_thread),
+        str(rd_valid)
+    ])
+
+func _bcc_parity(cell: Vector3i) -> bool:
+    return ((cell.x & 1) == (cell.y & 1)) and ((cell.y & 1) == (cell.z & 1))
+
+func set_debug_probe_cell_xyz(x: int, y: int, z: int) -> void:
+    debug_probe_cell = Vector3i(x, y, z)
+
+func _debug_request_probe() -> void:
+    if !debug_probe_enabled:
+        return
+    var every: int = debug_probe_every
+    if every < 1:
+        every = 1
+    _debug_probe_frame += 1
+    if _debug_probe_frame % every != 0:
+        return
+    if _indirection_cpu.is_empty():
+        print("VoxelRenderer probe | frame=%d indirection_cpu=empty" % _debug_frame)
+        return
+    var grid_extent := chunk_grid * chunk_size
+    var cell := debug_probe_cell
+    var parity := _bcc_parity(cell)
+    var in_bounds := (
+        cell.x >= 0 and cell.y >= 0 and cell.z >= 0
+        and cell.x < grid_extent and cell.y < grid_extent and cell.z < grid_extent
+    )
+    if !in_bounds:
+        print("VoxelRenderer probe | frame=%d cell=%s out_of_bounds grid_extent=%d parity=%s" % [
+            _debug_frame,
+            str(cell),
+            grid_extent,
+            str(parity)
+        ])
+        return
+    var brick_size := chunk_size
+    var bx := int(cell.x / brick_size)
+    var by := int(cell.y / brick_size)
+    var bz := int(cell.z / brick_size)
+    if bx < 0 or by < 0 or bz < 0 or bx >= chunk_grid or by >= chunk_grid or bz >= chunk_grid:
+        print("VoxelRenderer probe | frame=%d cell=%s brick_out_of_bounds brick=%s" % [
+            _debug_frame,
+            str(cell),
+            str(Vector3i(bx, by, bz))
+        ])
+        return
+    var brick_index := bx + by * chunk_grid + bz * chunk_grid * chunk_grid
+    if brick_index < 0 or brick_index >= _indirection_cpu.size():
+        print("VoxelRenderer probe | frame=%d cell=%s brick_index_out_of_range=%d" % [
+            _debug_frame,
+            str(cell),
+            brick_index
+        ])
+        return
+    var ind := _indirection_cpu[brick_index]
+    if ind <= 0:
+        print("VoxelRenderer probe | frame=%d cell=%s parity=%s ind=%d brick_index=%d" % [
+            _debug_frame,
+            str(cell),
+            str(parity),
+            ind,
+            brick_index
+        ])
+        return
+    var lx := cell.x - bx * brick_size
+    var ly := cell.y - by * brick_size
+    var lz := cell.z - bz * brick_size
+    var local_index := lx + ly * brick_size + lz * brick_size * brick_size
+    var bricks_total := chunk_grid * chunk_grid * chunk_grid
+    var atlas_size := bricks_total * brick_size * brick_size * brick_size
+    var atlas_index := (ind - 1) * brick_size * brick_size * brick_size + local_index
+    if atlas_index < 0 or atlas_index >= atlas_size:
+        print("VoxelRenderer probe | frame=%d cell=%s atlas_index_out_of_range=%d size=%d" % [
+            _debug_frame,
+            str(cell),
+            atlas_index,
+            atlas_size
+        ])
+        return
+    var atlas_offset := atlas_index * 4
+    var occ_offset := brick_index * 4
+    RenderingServer.call_on_render_thread(Callable(self, "_debug_probe_readback_on_render_thread").bind(
+        _debug_frame,
+        cell,
+        parity,
+        ind,
+        atlas_index,
+        atlas_offset,
+        occ_offset
+    ))
+
+func _debug_probe_readback_on_render_thread(frame_id: int, cell: Vector3i, parity: bool, ind: int, atlas_index: int, atlas_offset: int, occ_offset: int) -> void:
+    if _rd == null:
+        return
+    if !_atlas_rid.is_valid():
+        return
+    var atlas_bytes := _rd.buffer_get_data(_atlas_rid, atlas_offset, 4)
+    var occ_bytes := PackedByteArray()
+    if _occupancy_rid.is_valid():
+        occ_bytes = _rd.buffer_get_data(_occupancy_rid, occ_offset, 4)
+    if atlas_bytes.size() < 4:
+        return
+    var atlas_vals := atlas_bytes.to_int32_array()
+    var atlas_val := atlas_vals[0] if atlas_vals.size() > 0 else 0
+    var occ_val := 0
+    if occ_bytes.size() >= 4:
+        var occ_vals := occ_bytes.to_int32_array()
+        occ_val = occ_vals[0] if occ_vals.size() > 0 else 0
+    var main_thread := Thread.is_main_thread()
+    print("VoxelRenderer probe | frame=%d cell=%s parity=%s ind=%d atlas_index=%d atlas_val=%d occ_val=%d main_thread=%s" % [
+        frame_id,
+        str(cell),
+        str(parity),
+        ind,
+        atlas_index,
+        atlas_val,
+        occ_val,
+        str(main_thread)
+    ])
 
 func _create_display_texture() -> Texture2D:
     if _use_global_rd and ClassDB.class_exists("Texture2DRD"):

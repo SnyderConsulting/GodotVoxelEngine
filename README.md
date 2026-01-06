@@ -53,18 +53,18 @@ This project is a clean restart focused on a single GPU-resident voxel volume re
 Launch the custom editor and open the project:
 
 ```powershell
-godot\engine-bin\Godot_v4.5.1-stable_win64.exe --path godot\project
+godot\run_editor_dev.ps1
 ```
 
 ## Engine Automation (Custom Build)
 
 This repo includes a custom Godot editor build with a TCP JSON automation server.
 
-- Binary: `godot/engine-bin/Godot_v4.5.1-stable_win64.exe` (rebuilt from `godot/engine-src`)
+- Binary: `godot/engine-bin/Godot_v4.5.1-automation-dev_win64.exe` (rebuilt from `godot/engine-src`)
 - Start with automation enabled:
 
 ```powershell
-godot\engine-bin\Godot_v4.5.1-stable_win64.exe --automation 127.0.0.1:24680 --automation-token yourtoken --path godot\project res://scenes/Main.tscn --disable-crash-handler
+godot\run_automation_dev.ps1 -AutomationToken yourtoken
 ```
 
 ### Automation Protocol (JSON lines)
@@ -82,6 +82,14 @@ Example (PowerShell client):
 ```powershell
 godot\automation_client.ps1 -ServerHost 127.0.0.1 -Port 24680 -Token yourtoken -Method ping
 godot\automation_client.ps1 -ServerHost 127.0.0.1 -Port 24680 -Token yourtoken -Method screenshot -ParamsJson '{\"path\":\"user://snap.png\"}'
+```
+
+### Automation Probes (Voxel Renderer)
+
+Use the probe runner to step the orbit rig and update the VoxelRenderer probe cell while logging:
+
+```powershell
+godot\automation_probe_voxels.ps1 -Token yourtoken -Steps 24 -ProbeStride 1 -SleepMs 200
 ```
 
 ---
