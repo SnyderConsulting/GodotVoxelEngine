@@ -23,10 +23,9 @@ This project is a clean restart focused on a single GPU-resident voxel volume re
 
 ## Scene Overview
 
-- A minimal `Main.tscn` with:
-  - Camera orbit rig (mouse drag rotate, wheel zoom, optional pan).
-  - Renderer node that owns GPU buffers and dispatches compute shaders.
-  - Fullscreen texture output from the raymarch compute pass.
+- `ProtoHub.tscn` is the launch menu for the current test scenes.
+- `TumblerTest.tscn` and `HourglassTest.tscn` each pair the orbit camera with
+  the voxel renderer and a fullscreen raymarch quad.
 
 ## Controls (Target)
 

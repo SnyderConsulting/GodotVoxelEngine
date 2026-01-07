@@ -35,8 +35,5 @@ text = "Tumbler: Rotate Gravity (Voxel Sand)"
 [node name="HourglassButton" type="Button" parent="Margin/VBox"]
 text = "Hourglass: Glass + Sand"
 
-[node name="MainButton" type="Button" parent="Margin/VBox"]
-text = "Back to Main Scene"
-
 [node name="Hint" type="Label" parent="Margin/VBox"]
 text = "Tip: Run a scene directly to skip this menu."
