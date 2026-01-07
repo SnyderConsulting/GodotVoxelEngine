@@ -8,11 +8,13 @@ extends Node
 @export var chunk_grid: int = 3
 @export var lattice_spacing: float = 1.0
 @export var max_distance: float = 200.0
+@export var auto_max_distance: bool = true
 @export var fill_radius_ratio: float = 0.35
 @export var fill_mode: int = 0
 @export var noise_threshold: float = 0.55
 @export var voxel_data_path: String = "res://data/voxels.json"
 @export var gravity_dir: Vector3 = Vector3(0, -1, 0)
+@export var world_rotation: Vector3 = Vector3.ZERO
 @export var light_enabled: bool = true
 @export var light_every: int = 1
 @export var metrics_every: int = 30
@@ -255,7 +257,7 @@ func _init_render_resources() -> void:
         push_error("Failed to create compute texture.")
         return
 
-    _ubo_rid = _rd.uniform_buffer_create(160)
+    _ubo_rid = _rd.uniform_buffer_create(208)
     if !_ubo_rid.is_valid():
         push_error("Failed to create uniform buffer.")
         return
@@ -654,18 +656,33 @@ func _process(_delta: float) -> void:
     var voxel_size := lattice_spacing
     var brick_grid := float(chunk_grid)
     var grid_extent_i := chunk_grid * chunk_size
-    var gravity := _normalized_gravity()
+    var world_basis := Basis.from_euler(world_rotation)
+    var inv_world_basis := world_basis.inverse()
+    var gravity_world := _normalized_gravity()
+    var gravity := inv_world_basis * gravity_world
+    var origin := Vector3(-0.5 * world_extent, -0.5 * world_extent, -0.5 * world_extent)
+    var effective_max_distance := max_distance
+    if auto_max_distance:
+        var world_center := origin + Vector3.ONE * (0.5 * world_extent)
+        var dist_to_center := pos.distance_to(world_center)
+        var diag_half := sqrt(3.0) * (world_extent * 0.5)
+        var required_max := dist_to_center + diag_half + voxel_size * 4.0
+        if required_max > effective_max_distance:
+            effective_max_distance = required_max
     var params := PackedFloat32Array([
         grid_extent, grid_extent, grid_extent, 0.0,
-        -0.5 * world_extent, -0.5 * world_extent, -0.5 * world_extent, 0.0,
+        origin.x, origin.y, origin.z, 0.0,
         pos.x, pos.y, pos.z, 0.0,
         basis.x.x, basis.x.y, basis.x.z, 0.0,
         basis.y.x, basis.y.y, basis.y.z, 0.0,
         -basis.z.x, -basis.z.y, -basis.z.z, 0.0,
         float(width), float(height), tan_half_fov, aspect,
-        voxel_size, max_distance, 0.8, 0.25,
+        voxel_size, effective_max_distance, 0.8, 0.25,
         brick_grid, brick_grid, brick_grid, float(chunk_size),
-        gravity.x, gravity.y, gravity.z, 0.0
+        gravity.x, gravity.y, gravity.z, 0.0,
+        world_basis.x.x, world_basis.x.y, world_basis.x.z, 0.0,
+        world_basis.y.x, world_basis.y.y, world_basis.y.z, 0.0,
+        world_basis.z.x, world_basis.z.y, world_basis.z.z, 0.0
     ])
     var bytes := params.to_byte_array()
     _update_params(bytes)

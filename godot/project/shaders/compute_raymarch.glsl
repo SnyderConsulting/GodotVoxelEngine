@@ -14,6 +14,9 @@ layout(set = 0, binding = 1, std140) uniform Params {
     vec4 misc;        // x = voxel_size, y = max_dist, z = shadow_strength, w = reflection_strength
     vec4 brick_info;  // xyz = brick grid dims, w = brick size
     vec4 debug_info;  // reserved
+    vec4 world_rot_x;
+    vec4 world_rot_y;
+    vec4 world_rot_z;
 } u;
 layout(set = 0, binding = 2, std430) readonly buffer Indirection {
     uint data[];
@@ -204,6 +207,14 @@ void main() {
         u.cam_up.xyz * (ndc.y * u.screen.z)
     );
 
+    vec3 grid_min = u.origin.xyz;
+    vec3 grid_max = grid_min + u.grid_info.xyz * u.misc.x;
+    mat3 world_rot = mat3(u.world_rot_x.xyz, u.world_rot_y.xyz, u.world_rot_z.xyz);
+    mat3 inv_world = transpose(world_rot);
+    vec3 world_center = (grid_min + grid_max) * 0.5;
+    ro = world_center + inv_world * (ro - world_center);
+    rd = normalize(inv_world * rd);
+
     vec3 color = vec3(0.12);
     vec3 overlay_color = vec3(0.0);
     float overlay_alpha = 0.0;
@@ -211,9 +222,6 @@ void main() {
     uint step_count = 0u;
     atomicAdd(metrics.data[0], 1u);
     int brick_size = int(u.brick_info.w);
-
-    vec3 grid_min = u.origin.xyz;
-    vec3 grid_max = grid_min + u.grid_info.xyz * u.misc.x;
 
     vec3 inv_dir = vec3(
         (abs(rd.x) < 1e-6) ? 1e9 : (1.0 / rd.x),
@@ -364,7 +372,7 @@ void main() {
                                     }
                                     vec3 n = estimate_normal(lp);
                                     vec3 hit_pos = ro + rd * t_voxel;
-                                    vec3 light_dir = normalize(u.cam_pos.xyz - hit_pos);
+                                    vec3 light_dir = normalize(ro - hit_pos);
                                     float diff = max(dot(n, light_dir), 0.0);   
 
                                     // Soft shadow ray

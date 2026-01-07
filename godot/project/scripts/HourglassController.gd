@@ -55,7 +55,7 @@ func _update_overlay() -> void:
         return
     _overlay.text = (
         "Hourglass Test\n"
-        + "Esc: hub | Orbit camera with mouse\n"
+        + "Use sliders for gravity/world rotation | Esc: hub\n"
         + "Glass: outline only, sand falls through neck."
     )
 

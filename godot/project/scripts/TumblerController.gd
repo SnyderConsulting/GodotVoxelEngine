@@ -3,8 +3,6 @@ extends Node
 @export var voxel_renderer_path: NodePath
 @export var overlay_path: NodePath
 @export var hub_scene: String = "res://scenes/ProtoHub.tscn"
-@export var rotation_speed: float = 0.9
-@export var roll_speed: float = 0.9
 @export var fill_height_ratio: float = 0.55
 @export var sand_density: float = 0.75
 @export var wall_thickness: int = 1
@@ -14,7 +12,6 @@ extends Node
 
 var _renderer: Node = null
 var _overlay: Label = null
-var _angles := Vector3.ZERO
 var _rng := RandomNumberGenerator.new()
 var _init_attempts: int = 0
 
@@ -31,7 +28,6 @@ func _initialize_scenario() -> void:
     if !_wait_for_renderer_ready():
         return
     _build_tumbler()
-    _apply_gravity()
     _update_overlay()
 
 func _wait_for_renderer_ready() -> bool:
@@ -46,49 +42,23 @@ func _wait_for_renderer_ready() -> bool:
         return false
     return true
 
-func _process(delta: float) -> void:
+func _process(_delta: float) -> void:
     if Input.is_action_just_pressed("ui_cancel"):
         get_tree().change_scene_to_file(hub_scene)
         return
-
-    var delta_angles := Vector3.ZERO
-    if Input.is_action_pressed("ui_left"):
-        delta_angles.y += rotation_speed * delta
-    if Input.is_action_pressed("ui_right"):
-        delta_angles.y -= rotation_speed * delta
-    if Input.is_action_pressed("ui_up"):
-        delta_angles.x += rotation_speed * delta
-    if Input.is_action_pressed("ui_down"):
-        delta_angles.x -= rotation_speed * delta
-    if Input.is_action_pressed("ui_page_up"):
-        delta_angles.z += roll_speed * delta
-    if Input.is_action_pressed("ui_page_down"):
-        delta_angles.z -= roll_speed * delta
-    var reset := Input.is_key_pressed(KEY_R)
-    if reset:
-        _angles = Vector3.ZERO
-        delta_angles = Vector3.ZERO
-    if delta_angles != Vector3.ZERO or reset:
-        _angles += delta_angles
-        _apply_gravity()
-        _update_overlay()
-
-func _apply_gravity() -> void:
-    var basis := Basis.from_euler(_angles)
-    var gravity := basis * Vector3.DOWN
-    _renderer.gravity_dir = gravity.normalized()
+    _update_overlay()
 
 func _update_overlay() -> void:
     if _overlay == null:
         return
-    var degrees := _angles * 180.0 / PI
     var gravity = _renderer.gravity_dir
+    var world_rot = _renderer.world_rotation * 180.0 / PI
     _overlay.text = (
         "Tumbler Test\n"
-        + "Arrows: pitch/yaw | PgUp/PgDn: roll | R: reset | Esc: hub\n"
-        + "Pitch/Yaw/Roll deg: (%.1f, %.1f, %.1f)\n"
+        + "Use the sliders for gravity and world rotation.\n"
+        + "World Rot deg: (%.1f, %.1f, %.1f)\n"
         + "Gravity: (%.2f, %.2f, %.2f)"
-    ) % [degrees.x, degrees.y, degrees.z, gravity.x, gravity.y, gravity.z]
+    ) % [world_rot.x, world_rot.y, world_rot.z, gravity.x, gravity.y, gravity.z]
 
 func _build_tumbler() -> void:
     var grid_extent: int = _renderer.chunk_grid * _renderer.chunk_size

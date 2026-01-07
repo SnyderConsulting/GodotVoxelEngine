@@ -12,6 +12,9 @@ layout(set = 0, binding = 0, std140) uniform Params {
     vec4 misc;
     vec4 brick_info;  // xyz = brick grid dims, w = brick size
     vec4 debug_info;
+    vec4 world_rot_x;
+    vec4 world_rot_y;
+    vec4 world_rot_z;
 } u;
 layout(set = 0, binding = 1, std430) readonly buffer Occupancy {
     uint data[];

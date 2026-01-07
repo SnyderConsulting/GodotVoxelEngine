@@ -16,6 +16,7 @@ var _panning := false
 @onready var _camera: Camera3D = $Camera3D
 
 func _ready() -> void:
+    _clamp_distance()
     _apply_transform()
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -24,10 +25,12 @@ func _unhandled_input(event: InputEvent) -> void:
             _dragging = event.pressed and not Input.is_key_pressed(KEY_SHIFT)
             _panning = event.pressed and Input.is_key_pressed(KEY_SHIFT)
         if event.button_index == MOUSE_BUTTON_WHEEL_UP and event.pressed:
-            distance = max(min_distance, distance - zoom_speed)
+            distance -= zoom_speed
+            _clamp_distance()
             _apply_transform()
         if event.button_index == MOUSE_BUTTON_WHEEL_DOWN and event.pressed:
-            distance = min(max_distance, distance + zoom_speed)
+            distance += zoom_speed
+            _clamp_distance()
             _apply_transform()
     elif event is InputEventMouseMotion:
         if _dragging:
@@ -42,7 +45,13 @@ func _unhandled_input(event: InputEvent) -> void:
             _apply_transform()
 
 func _apply_transform() -> void:
+    _clamp_distance()
     position = target
     rotation = Vector3(_pitch, _yaw, 0.0)
     _camera.position = Vector3(0.0, 0.0, distance)
     _camera.look_at(target, Vector3.UP)
+
+func _clamp_distance() -> void:
+    if max_distance < min_distance:
+        max_distance = min_distance
+    distance = clamp(distance, min_distance, max_distance)
