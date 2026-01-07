@@ -12,6 +12,7 @@ extends Node
 @export var fill_mode: int = 0
 @export var noise_threshold: float = 0.55
 @export var voxel_data_path: String = "res://data/voxels.json"
+@export var gravity_dir: Vector3 = Vector3(0, -1, 0)
 @export var light_enabled: bool = true
 @export var light_every: int = 1
 @export var metrics_every: int = 30
@@ -633,6 +634,9 @@ func _init_render_resources() -> void:
     _display_material.set_shader_parameter("compute_tex", _display_texture)
     _render_ready = true
 
+func is_render_ready() -> bool:
+    return _render_ready
+
 func _process(_delta: float) -> void:
     if _rd == null:
         return
@@ -650,6 +654,7 @@ func _process(_delta: float) -> void:
     var voxel_size := lattice_spacing
     var brick_grid := float(chunk_grid)
     var grid_extent_i := chunk_grid * chunk_size
+    var gravity := _normalized_gravity()
     var params := PackedFloat32Array([
         grid_extent, grid_extent, grid_extent, 0.0,
         -0.5 * world_extent, -0.5 * world_extent, -0.5 * world_extent, 0.0,
@@ -660,7 +665,7 @@ func _process(_delta: float) -> void:
         float(width), float(height), tan_half_fov, aspect,
         voxel_size, max_distance, 0.8, 0.25,
         brick_grid, brick_grid, brick_grid, float(chunk_size),
-        0.0, 0.0, 0.0, 0.0
+        gravity.x, gravity.y, gravity.z, 0.0
     ])
     var bytes := params.to_byte_array()
     _update_params(bytes)
@@ -679,6 +684,11 @@ func _update_params(bytes: PackedByteArray) -> void:
     if _rd == null or !_ubo_rid.is_valid():
         return
     _rd.buffer_update(_ubo_rid, 0, bytes.size(), bytes)
+
+func _normalized_gravity() -> Vector3:
+    if gravity_dir.length() < 0.001:
+        return Vector3(0, -1, 0)
+    return gravity_dir.normalized()
 
 func _prime_active_list() -> void:
     if _active_list_ready:
@@ -950,6 +960,68 @@ func _upload_brickmap_data() -> void:
     _atlas_use_a = true
     var occ_bytes := occupancy.to_byte_array()
     _rd.buffer_update(_occupancy_rid, 0, occ_bytes.size(), occ_bytes)
+
+func set_voxel_entries(entries: Array, allocate_all_bricks: bool = false) -> void:
+    if _rd == null:
+        return
+    _active_list_ready = false
+    var brick_grid := chunk_grid
+    var brick_count := brick_grid * brick_grid * brick_grid
+    var indirection := PackedInt32Array()
+    var occupancy := PackedInt32Array()
+    indirection.resize(brick_count)
+    occupancy.resize(brick_count)
+    for i in range(brick_count):
+        indirection[i] = (i + 1) if allocate_all_bricks else 0
+        occupancy[i] = 0
+
+    var atlas := PackedInt32Array()
+    atlas.resize(brick_count * chunk_size * chunk_size * chunk_size)
+    for i in range(atlas.size()):
+        atlas[i] = 0
+
+    var grid_extent := brick_grid * chunk_size
+    for entry in entries:
+        var pos = entry.get("pos", Vector3.ZERO)
+        var mat_id = int(entry.get("material", 1))
+        if mat_id <= 0:
+            continue
+        var gx := int(pos.x)
+        var gy := int(pos.y)
+        var gz := int(pos.z)
+        if gx < 0 or gy < 0 or gz < 0 or gx >= grid_extent or gy >= grid_extent or gz >= grid_extent:
+            continue
+        if !((gx & 1) == (gy & 1) and (gy & 1) == (gz & 1)):
+            continue
+        var bx := gx / chunk_size
+        var by := gy / chunk_size
+        var bz := gz / chunk_size
+        var lx := gx - bx * chunk_size
+        var ly := gy - by * chunk_size
+        var lz := gz - bz * chunk_size
+        var brick_index := bx + by * brick_grid + bz * brick_grid * brick_grid
+        var base_offset := brick_index * chunk_size * chunk_size * chunk_size
+        var local_index := base_offset + lx + ly * chunk_size + lz * chunk_size * chunk_size
+        atlas[local_index] = mat_id
+        occupancy[brick_index] = 1
+        if !allocate_all_bricks:
+            indirection[brick_index] = brick_index + 1
+
+    var ind_bytes := indirection.to_byte_array()
+    _rd.buffer_update(_indirection_rid, 0, ind_bytes.size(), ind_bytes)
+    _indirection_cpu = indirection
+    var atlas_bytes := atlas.to_byte_array()
+    if _atlas_a_rid.is_valid():
+        _rd.buffer_update(_atlas_a_rid, 0, atlas_bytes.size(), atlas_bytes)
+    if _atlas_b_rid.is_valid():
+        _rd.buffer_update(_atlas_b_rid, 0, atlas_bytes.size(), atlas_bytes)
+    _atlas_use_a = true
+    var occ_bytes := occupancy.to_byte_array()
+    _rd.buffer_update(_occupancy_rid, 0, occ_bytes.size(), occ_bytes)
+    if _light_a_rid.is_valid():
+        _rd.buffer_clear(_light_a_rid, 0, _atlas_bytes)
+    if _light_b_rid.is_valid():
+        _rd.buffer_clear(_light_b_rid, 0, _atlas_bytes)
 
 func _load_voxel_entries(grid_extent: int) -> Array:
     if voxel_data_path.is_empty():

@@ -32,6 +32,7 @@ layout(set = 0, binding = 4, std430) buffer LightOut {
 } light_out;
 
 const uint LIGHT_MAX = 15u;
+const uint GLASS_MATERIAL = 8u;
 
 uint idx_brick(ivec3 b) {
     return uint(b.x) + uint(b.y) * uint(u.brick_info.x)
@@ -81,7 +82,7 @@ void main() {
     }
 
     uint mat = atlas.data[idx];
-    bool solid = mat != 0u;
+    bool solid = mat != 0u && mat != GLASS_MATERIAL;
     uint emit = 0u;
     if (!solid && cell.y == int(u.grid_info.y) - 1) {
         emit = LIGHT_MAX;
@@ -119,7 +120,8 @@ void main() {
             if (!n_valid) {
                 continue;
             }
-            if (atlas.data[n_idx] != 0u) {
+            uint n_mat = atlas.data[n_idx];
+            if (n_mat != 0u && n_mat != GLASS_MATERIAL) {
                 continue;
             }
             uint n_light = light_in.data[n_idx];

@@ -31,6 +31,8 @@ layout(set = 0, binding = 4, std430) readonly buffer ActiveList {
     uint data[];
 } active_list;
 
+const uint GLASS_MATERIAL = 8u;
+
 uint idx_brick(ivec3 b) {
     return uint(b.x) + uint(b.y) * uint(u.brick_info.x)
         + uint(b.z) * uint(u.brick_info.x) * uint(u.brick_info.y);
@@ -111,26 +113,45 @@ void main() {
     if (material == 0u) {
         return;
     }
+    if (material == GLASS_MATERIAL) {
+        atomicCompSwap(atlas_out.data[self_idx], 0u, material);
+        return;
+    }
 
-    ivec3 down = ivec3(0, -2, 0);
-    ivec3 diag[4] = ivec3[4](
+    vec3 gravity = u.debug_info.xyz;
+    if (length(gravity) < 1e-3) {
+        gravity = vec3(0.0, -1.0, 0.0);
+    }
+    gravity = normalize(gravity);
+
+    const int NEIGHBOR_COUNT = 14;
+    const int CANDIDATE_MAX = 4;
+    ivec3 offsets[NEIGHBOR_COUNT] = ivec3[NEIGHBOR_COUNT](
+        ivec3(2, 0, 0),
+        ivec3(-2, 0, 0),
+        ivec3(0, 2, 0),
+        ivec3(0, -2, 0),
+        ivec3(0, 0, 2),
+        ivec3(0, 0, -2),
+        ivec3(1, 1, 1),
+        ivec3(1, 1, -1),
         ivec3(1, -1, 1),
         ivec3(1, -1, -1),
+        ivec3(-1, 1, 1),
+        ivec3(-1, 1, -1),
         ivec3(-1, -1, 1),
         ivec3(-1, -1, -1)
     );
-
-    ivec3 candidates[5];
-    candidates[0] = down;
-    uint h = hash_cell(cell);
-    uint base = h & 3u;
-    for (int i = 0; i < 4; i++) {
-        candidates[i + 1] = diag[int((base + uint(i)) & 3u)];
-    }
-
-    bool moved = false;
-    for (int i = 0; i < 5; i++) {
-        ivec3 target = cell + candidates[i];
+    ivec3 candidates[CANDIDATE_MAX];
+    float candidate_scores[CANDIDATE_MAX];
+    int candidate_count = 0;
+    for (int i = 0; i < NEIGHBOR_COUNT; i++) {
+        ivec3 offset = offsets[i];
+        float score = dot(vec3(offset), gravity);
+        if (score <= 0.0) {
+            continue;
+        }
+        ivec3 target = cell + offset;
         if (!in_bounds(target)) {
             continue;
         }
@@ -144,9 +165,39 @@ void main() {
         if (atlas_in.data[t_idx] != 0u) {
             continue;
         }
-        if (atomicCompSwap(atlas_out.data[t_idx], 0u, material) == 0u) {
-            moved = true;
-            break;
+        int insert = candidate_count;
+        if (candidate_count < CANDIDATE_MAX) {
+            candidate_count++;
+        } else if (score <= candidate_scores[candidate_count - 1]) {
+            continue;
+        } else {
+            insert = candidate_count - 1;
+        }
+        while (insert > 0 && score > candidate_scores[insert - 1]) {
+            if (insert < CANDIDATE_MAX) {
+                candidate_scores[insert] = candidate_scores[insert - 1];
+                candidates[insert] = candidates[insert - 1];
+            }
+            insert--;
+        }
+        candidate_scores[insert] = score;
+        candidates[insert] = offset;
+    }
+
+    bool moved = false;
+    if (candidate_count > 0) {
+        uint h = hash_cell(cell);
+        for (int i = 0; i < candidate_count; i++) {
+            int idx = int((uint(i) + h) % uint(candidate_count));
+            ivec3 target = cell + candidates[idx];
+            uint t_idx = atlas_index_for_cell(target);
+            if (t_idx == 0u) {
+                continue;
+            }
+            if (atomicCompSwap(atlas_out.data[t_idx], 0u, material) == 0u) {
+                moved = true;
+                break;
+            }
         }
     }
 

@@ -1,0 +1,42 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://scripts/ProtoHub.gd" id="1"]
+
+[node name="ProtoHub" type="Control"]
+anchor_right = 1.0
+anchor_bottom = 1.0
+script = ExtResource("1")
+
+[node name="Background" type="ColorRect" parent="."]
+anchor_right = 1.0
+anchor_bottom = 1.0
+color = Color(0.08, 0.08, 0.1, 1)
+
+[node name="Margin" type="MarginContainer" parent="."]
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 40.0
+offset_top = 40.0
+offset_right = -40.0
+offset_bottom = -40.0
+
+[node name="VBox" type="VBoxContainer" parent="Margin"]
+size_flags_horizontal = 3
+size_flags_vertical = 3
+theme_override_constants/separation = 12
+
+[node name="Title" type="Label" parent="Margin/VBox"]
+text = "VoxLand ProtoHub"
+theme_override_font_sizes/font_size = 28
+
+[node name="TumblerButton" type="Button" parent="Margin/VBox"]
+text = "Tumbler: Rotate Gravity (Voxel Sand)"
+
+[node name="HourglassButton" type="Button" parent="Margin/VBox"]
+text = "Hourglass: Glass + Sand"
+
+[node name="MainButton" type="Button" parent="Margin/VBox"]
+text = "Back to Main Scene"
+
+[node name="Hint" type="Label" parent="Margin/VBox"]
+text = "Tip: Run a scene directly to skip this menu."

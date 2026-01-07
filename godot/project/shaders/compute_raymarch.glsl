@@ -33,6 +33,8 @@ layout(set = 0, binding = 6, std430) readonly buffer Light {
     uint data[];
 } light_buf;
 
+const uint GLASS_MATERIAL = 8u;
+
 float sdf_truncated_octahedron(vec3 p) {
     const float inv_sqrt3 = 0.57735026919;
     const float scale = 2.0;
@@ -203,6 +205,8 @@ void main() {
     );
 
     vec3 color = vec3(0.12);
+    vec3 overlay_color = vec3(0.0);
+    float overlay_alpha = 0.0;
     bool hit = false;
     uint step_count = 0u;
     atomicAdd(metrics.data[0], 1u);
@@ -316,6 +320,7 @@ void main() {
                 if (cell_occ != 0u) {
                     uint cell_val = atlas.data[atlas_index_for_cell(cell)];
                     if (cell_val != 0u) {
+                        bool glass_cell = cell_val == GLASS_MATERIAL;
                         vec3 cell_center = u.origin.xyz + vec3(cell) * u.misc.x;
                         vec3 rc = ro - cell_center;
                         float a = u.misc.x;
@@ -337,6 +342,7 @@ void main() {
                             float t_voxel = max(t_cell, t_cell_min);
                             float max_step = a * 0.1;
                             float min_step = a * 0.01;
+                            bool glass_hit = false;
                             for (int j = 0; j < 128; j++) {
                                 step_count++;
                                 if (t_voxel > t_cell_max) {
@@ -344,12 +350,22 @@ void main() {
                                 }
                                 vec3 p = ro + rd * t_voxel;
                                 vec3 lp = (p - cell_center) / a;
-                                float d = sdf_truncated_octahedron(lp) * a;
+                                float d = sdf_truncated_octahedron(lp) * a;     
                                 if (d < 0.0) {
+                                    if (glass_cell) {
+                                        float edge = 1.0 - smoothstep(0.0, 0.02 * a, abs(d));
+                                        if (edge > 0.0) {
+                                            overlay_alpha = max(overlay_alpha, edge * 0.3);
+                                            overlay_color = vec3(0.05);
+                                        }
+                                        glass_hit = true;
+                                        t_voxel += max(abs(d), min_step);
+                                        continue;
+                                    }
                                     vec3 n = estimate_normal(lp);
                                     vec3 hit_pos = ro + rd * t_voxel;
                                     vec3 light_dir = normalize(u.cam_pos.xyz - hit_pos);
-                                    float diff = max(dot(n, light_dir), 0.0);
+                                    float diff = max(dot(n, light_dir), 0.0);   
 
                                     // Soft shadow ray
                                     float shadow = 1.0;
@@ -365,7 +381,7 @@ void main() {
                                             ivec3 s_brick = s_cell / brick_size;
                                             if (occ.data[idx_brick(s_brick)] != 0u) {
                                                 uint s_val = atlas.data[atlas_index_for_cell(s_cell)];
-                                                if (s_val != 0u) {
+                                                if (s_val != 0u && s_val != GLASS_MATERIAL) {
                                                     vec3 s_center = u.origin.xyz + vec3(s_cell) * u.misc.x;
                                                     vec3 s_lp = (sp - s_center) / u.misc.x;
                                                     float sd = sdf_truncated_octahedron(s_lp) * u.misc.x;
@@ -396,7 +412,7 @@ void main() {
                                             ivec3 r_brick = r_cell / brick_size;
                                             if (occ.data[idx_brick(r_brick)] != 0u) {
                                                 uint r_val = atlas.data[atlas_index_for_cell(r_cell)];
-                                                if (r_val != 0u) {
+                                                if (r_val != 0u && r_val != GLASS_MATERIAL) {
                                                     vec3 r_center = u.origin.xyz + vec3(r_cell) * u.misc.x;
                                                     vec3 r_lp = (rp - r_center) / u.misc.x;
                                                     float rdv = sdf_truncated_octahedron(r_lp) * u.misc.x;
@@ -424,8 +440,12 @@ void main() {
                                     atomicAdd(metrics.data[1], 1u);
                                     break;
                                 }
-                                float sdf_step = clamp(d, min_step, max_step);
+                                float sdf_step = clamp(d, min_step, max_step);  
                                 t_voxel += sdf_step;
+                            }
+                            if (glass_cell && glass_hit) {
+                                t_cell = t_cell_max + 0.0005;
+                                continue;
                             }
                             if (hit) {
                                 break;
@@ -467,5 +487,6 @@ void main() {
     }
 
     atomicAdd(metrics.data[2], step_count);
+    color = mix(color, overlay_color, clamp(overlay_alpha, 0.0, 1.0));
     imageStore(dest, gid, vec4(color, 1.0));
 }
