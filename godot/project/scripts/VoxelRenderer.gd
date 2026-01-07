@@ -12,7 +12,6 @@ extends Node
 @export var fill_mode: int = 0
 @export var noise_threshold: float = 0.55
 @export var voxel_data_path: String = "res://data/voxels.json"
-@export var debug_overlay: bool = false
 @export var metrics_every: int = 30
 @export var debug_logging: bool = false
 @export var debug_log_every: int = 60
@@ -85,10 +84,6 @@ func _ready() -> void:
         quad.material_override = _display_material
 
     _init_render_resources()
-
-func _unhandled_input(event: InputEvent) -> void:
-    if event is InputEventKey and event.pressed and event.keycode == KEY_F1:
-        debug_overlay = !debug_overlay
 
 func _init_render_resources() -> void:
     var shader_source_text := FileAccess.get_file_as_string("res://shaders/compute_raymarch.glsl")
@@ -377,7 +372,6 @@ func _process(_delta: float) -> void:
     var voxel_size := lattice_spacing
     var brick_grid := float(chunk_grid)
     var grid_extent_i := chunk_grid * chunk_size
-    var debug_flag := 1.0 if debug_overlay else 0.0
     var params := PackedFloat32Array([
         grid_extent, grid_extent, grid_extent, 0.0,
         -0.5 * world_extent, -0.5 * world_extent, -0.5 * world_extent, 0.0,
@@ -388,7 +382,7 @@ func _process(_delta: float) -> void:
         float(width), float(height), tan_half_fov, aspect,
         voxel_size, max_distance, 0.8, 0.25,
         brick_grid, brick_grid, brick_grid, float(chunk_size),
-        debug_flag, 0.0, 0.0, 0.0
+        0.0, 0.0, 0.0, 0.0
     ])
     var bytes := params.to_byte_array()
     _update_params(bytes)
@@ -630,7 +624,7 @@ func _debug_log_snapshot(pos: Vector3, basis: Basis, world_extent: float) -> voi
     var forward := -basis.z
     var main_thread := Thread.is_main_thread()
     var pipeline_ok := _pipeline_rid.is_valid()
-    print("VoxelRenderer debug | frame=%d main_thread=%s cam_pos=%s cam_fwd=%s cam_inside=%s render_ready=%s pipeline=%s debug_overlay=%s probe=%s" % [
+    print("VoxelRenderer debug | frame=%d main_thread=%s cam_pos=%s cam_fwd=%s cam_inside=%s render_ready=%s pipeline=%s probe=%s" % [
         _debug_frame,
         str(main_thread),
         str(pos),
@@ -638,7 +632,6 @@ func _debug_log_snapshot(pos: Vector3, basis: Basis, world_extent: float) -> voi
         str(cam_inside),
         str(_render_ready),
         str(pipeline_ok),
-        str(debug_overlay),
         str(debug_probe_enabled)
     ])
     if debug_render_thread_ping:

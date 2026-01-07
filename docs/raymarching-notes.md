@@ -28,5 +28,9 @@
 - Root cause: the empty-space march used a fixed `0.01` step with `2048` steps, so rays could only travel ~20.48 world units and never reached the voxel cluster on diagonals.
 - Fix: in `godot/project/shaders/compute_raymarch.glsl`, raise the loop to `MAX_STEPS = 4096` and compute an adaptive `empty_step = max(0.01 * voxel_size, (t_exit - t) / MAX_STEPS)` so the ray always spans the grid bounds.
 
+## Brickmap hierarchical traversal (chunk-skip DDA)
+- Added a brick-level DDA over the occupancy grid in `godot/project/shaders/compute_raymarch.glsl` to skip empty bricks and only do fine SDF marching inside occupied chunks.
+- Neighbor bricks are treated as active to avoid clipping truncated-octahedron voxels that straddle brick boundaries.
+
 ## References
 - Raymarching intro tutorial: https://www.youtube.com/watch?v=68G3V5Yr8FY

@@ -13,7 +13,7 @@ layout(set = 0, binding = 1, std140) uniform Params {
     vec4 screen;      // xy = screen size, z = tan_half_fov, w = aspect
     vec4 misc;        // x = voxel_size, y = max_dist, z = shadow_strength, w = reflection_strength
     vec4 brick_info;  // xyz = brick grid dims, w = brick size
-    vec4 debug_info;  // x = debug overlay toggle
+    vec4 debug_info;  // reserved
 } u;
 layout(set = 0, binding = 2, std430) readonly buffer Indirection {
     uint data[];
@@ -130,29 +130,6 @@ bool brick_in_bounds(ivec3 b) {
         && b.z < int(u.brick_info.z);
 }
 
-float segment_distance(vec2 p, vec2 a, vec2 b) {
-    vec2 ab = b - a;
-    float t = clamp(dot(p - a, ab) / max(dot(ab, ab), 1e-6), 0.0, 1.0);
-    vec2 q = a + t * ab;
-    return length(p - q);
-}
-
-bool project_to_uv(vec3 world_pos, out vec2 out_uv) {
-    vec3 rel = world_pos - u.cam_pos.xyz;
-    vec3 view = vec3(
-        dot(rel, u.cam_right.xyz),
-        dot(rel, u.cam_up.xyz),
-        dot(rel, u.cam_forward.xyz)
-    );
-    if (view.z <= 0.001) {
-        return false;
-    }
-    float ndc_x = (view.x / view.z) / (u.screen.w * u.screen.z);
-    float ndc_y = (view.y / view.z) / (u.screen.z);
-    out_uv = vec2(0.5 + 0.5 * ndc_x, 0.5 - 0.5 * ndc_y);
-    return true;
-}
-
 uint atlas_index_for_cell(ivec3 cell) {
     int brick_size = int(u.brick_info.w);
     ivec3 brick = cell / brick_size;
@@ -179,73 +156,6 @@ void main() {
     vec2 ndc = uv * 2.0 - 1.0;
     ndc.y = -ndc.y;
 
-    if (u.debug_info.x > 0.5) {
-        vec3 lattice_pos = vec3(
-            uv.x * u.grid_info.x,
-            uv.y * u.grid_info.y,
-            floor(u.grid_info.z * 0.5)
-        );
-        ivec3 cell = nearest_bcc(lattice_pos);
-        vec3 dbg = vec3(0.15);
-        if (in_bounds(cell)) {
-            vec3 center = vec3(cell);
-            float dist = length(lattice_pos - center);
-            float radius = 0.28;
-            uint cell_val = atlas.data[atlas_index_for_cell(cell)];
-            bool occupied = cell_val != 0u;
-            if (dist < radius) {
-                dbg = occupied ? vec3(0.1, 0.95, 0.25) : vec3(0.08, 0.25, 0.1);
-            }
-
-            ivec3 anchor = nearest_bcc(u.grid_info.xyz * 0.5);
-            if (in_bounds(anchor)) {
-                uint a_val = atlas.data[atlas_index_for_cell(anchor)];
-                if (a_val != 0u) {
-                    vec3 a_world = u.origin.xyz + vec3(anchor) * u.misc.x;
-                    vec2 a_uv;
-                    if (project_to_uv(a_world, a_uv)) {
-                        ivec3 offsets[14] = ivec3[14](
-                            ivec3(2, 0, 0),
-                            ivec3(-2, 0, 0),
-                            ivec3(0, 2, 0),
-                            ivec3(0, -2, 0),
-                            ivec3(0, 0, 2),
-                            ivec3(0, 0, -2),
-                            ivec3(1, 1, 1),
-                            ivec3(1, 1, -1),
-                            ivec3(1, -1, 1),
-                            ivec3(1, -1, -1),
-                            ivec3(-1, 1, 1),
-                            ivec3(-1, 1, -1),
-                            ivec3(-1, -1, 1),
-                            ivec3(-1, -1, -1)
-                        );
-                        for (int n = 0; n < 14; n++) {
-                            ivec3 neighbor = anchor + offsets[n];
-                            if (!in_bounds(neighbor)) {
-                                continue;
-                            }
-                            uint n_val = atlas.data[atlas_index_for_cell(neighbor)];
-                            if (n_val == 0u) {
-                                continue;
-                            }
-                            vec3 n_world = u.origin.xyz + vec3(neighbor) * u.misc.x;
-                            vec2 n_uv;
-                            if (!project_to_uv(n_world, n_uv)) {
-                                continue;
-                            }
-                            float dline = segment_distance(uv, a_uv, n_uv);
-                            if (dline < 0.006) {
-                                dbg = vec3(0.1, 0.6, 0.95);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        imageStore(dest, gid, vec4(dbg, 1.0));
-        return;
-    }
     vec3 ro = u.cam_pos.xyz;
     vec3 rd = normalize(
         u.cam_forward.xyz +
