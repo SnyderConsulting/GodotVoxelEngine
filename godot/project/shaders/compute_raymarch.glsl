@@ -29,6 +29,10 @@ layout(set = 0, binding = 5, std430) buffer Metrics {
     uint data[];
 } metrics;
 
+layout(set = 0, binding = 6, std430) readonly buffer Light {
+    uint data[];
+} light_buf;
+
 float sdf_truncated_octahedron(vec3 p) {
     const float inv_sqrt3 = 0.57735026919;
     const float scale = 2.0;
@@ -143,6 +147,41 @@ uint atlas_index_for_cell(ivec3 cell) {
         + uint(local.y) * uint(brick_size)
         + uint(local.z) * uint(brick_size * brick_size);
     return brick_index * uint(brick_size * brick_size * brick_size) + local_index;
+}
+
+uint light_at_cell(ivec3 cell) {
+    return light_buf.data[atlas_index_for_cell(cell)];
+}
+
+uint light_for_voxel(ivec3 cell) {
+    uint max_light = light_at_cell(cell);
+    ivec3 offsets[14] = ivec3[14](
+        ivec3(2, 0, 0),
+        ivec3(-2, 0, 0),
+        ivec3(0, 2, 0),
+        ivec3(0, -2, 0),
+        ivec3(0, 0, 2),
+        ivec3(0, 0, -2),
+        ivec3(1, 1, 1),
+        ivec3(1, 1, -1),
+        ivec3(1, -1, 1),
+        ivec3(1, -1, -1),
+        ivec3(-1, 1, 1),
+        ivec3(-1, 1, -1),
+        ivec3(-1, -1, 1),
+        ivec3(-1, -1, -1)
+    );
+    for (int n = 0; n < 14; n++) {
+        ivec3 neighbor = cell + offsets[n];
+        if (!in_bounds(neighbor)) {
+            continue;
+        }
+        uint n_light = light_at_cell(neighbor);
+        if (n_light > max_light) {
+            max_light = n_light;
+        }
+    }
+    return max_light;
 }
 
 void main() {
@@ -371,12 +410,16 @@ void main() {
                                         t_refl += 0.08;
                                     }
 
-                                    vec3 view_dir = normalize(-rd);
-                                    vec3 half_dir = normalize(light_dir + view_dir);
-                                    float spec = pow(max(dot(n, half_dir), 0.0), 32.0);
+                            vec3 view_dir = normalize(-rd);
+                            vec3 half_dir = normalize(light_dir + view_dir);
+                            float spec = pow(max(dot(n, half_dir), 0.0), 32.0);
 
-                                    vec3 base = material_color(cell_val);
-                                    color = base * (0.12 + diff * shadow) + base * reflection + vec3(1.0) * spec * 0.25;
+                            uint light_val = light_for_voxel(cell);
+                            float light_factor = float(light_val) / 15.0;
+                            float ambient = mix(0.06, 0.28, light_factor);
+                            float diffuse = diff * shadow * mix(0.2, 1.0, light_factor);
+                            vec3 base = material_color(cell_val);
+                            color = base * (ambient + diffuse) + base * reflection * light_factor + vec3(1.0) * spec * 0.25 * light_factor;
                                     hit = true;
                                     atomicAdd(metrics.data[1], 1u);
                                     break;

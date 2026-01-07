@@ -32,5 +32,9 @@
 - Added a brick-level DDA over the occupancy grid in `godot/project/shaders/compute_raymarch.glsl` to skip empty bricks and only do fine SDF marching inside occupied chunks.
 - Neighbor bricks are treated as active to avoid clipping truncated-octahedron voxels that straddle brick boundaries.
 
+## Simple flood-fill lighting
+- Added `godot/project/shaders/compute_light.glsl` to propagate Minecraft-style light through empty BCC cells (sunlight from the top layer).
+- Raymarching samples the light buffer (plus neighbor max) to modulate ambient and diffuse terms.
+
 ## References
 - Raymarching intro tutorial: https://www.youtube.com/watch?v=68G3V5Yr8FY

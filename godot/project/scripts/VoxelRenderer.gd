@@ -12,6 +12,8 @@ extends Node
 @export var fill_mode: int = 0
 @export var noise_threshold: float = 0.55
 @export var voxel_data_path: String = "res://data/voxels.json"
+@export var light_enabled: bool = true
+@export var light_every: int = 1
 @export var metrics_every: int = 30
 @export var debug_logging: bool = false
 @export var debug_log_every: int = 60
@@ -30,19 +32,29 @@ var _occupancy_shader_rid: RID
 var _occupancy_pipeline_rid: RID
 var _sim_shader_rid: RID
 var _sim_pipeline_rid: RID
+var _light_shader_rid: RID
+var _light_pipeline_rid: RID
 var _texture_rid: RID
 var _ubo_rid: RID
 var _indirection_rid: RID
 var _atlas_a_rid: RID
 var _atlas_b_rid: RID
+var _light_a_rid: RID
+var _light_b_rid: RID
 var _occupancy_rid: RID
 var _metrics_rid: RID
-var _uniform_set_a_rid: RID
-var _uniform_set_b_rid: RID
+var _uniform_set_a_light_a_rid: RID
+var _uniform_set_a_light_b_rid: RID
+var _uniform_set_b_light_a_rid: RID
+var _uniform_set_b_light_b_rid: RID
 var _occupancy_uniform_set_a_rid: RID
 var _occupancy_uniform_set_b_rid: RID
 var _sim_uniform_set_ab: RID
 var _sim_uniform_set_ba: RID
+var _light_uniform_set_a_ab: RID
+var _light_uniform_set_a_ba: RID
+var _light_uniform_set_b_ab: RID
+var _light_uniform_set_b_ba: RID
 var _occupancy_bytes := 0
 var _metrics_bytes := 0
 var _atlas_bytes := 0
@@ -56,6 +68,8 @@ var _debug_frame := 0
 var _debug_probe_frame := 0
 var _sim_frame := 0
 var _atlas_use_a := true
+var _light_use_a := true
+var _light_frame := 0
 var _indirection_cpu: PackedInt32Array = PackedInt32Array()
 
 func _ready() -> void:
@@ -154,6 +168,26 @@ func _init_render_resources() -> void:
                 if !_sim_pipeline_rid.is_valid():
                     push_error("Failed to create sim pipeline.")
 
+    var light_source_text := FileAccess.get_file_as_string("res://shaders/compute_light.glsl")
+    if light_source_text.is_empty():
+        push_error("Missing compute shader source: res://shaders/compute_light.glsl")
+    else:
+        var light_source := RDShaderSource.new()
+        light_source.language = RenderingDevice.SHADER_LANGUAGE_GLSL
+        light_source.set_stage_source(RenderingDevice.SHADER_STAGE_COMPUTE, light_source_text)
+        var light_spirv := _rd.shader_compile_spirv_from_source(light_source)
+        var light_error := light_spirv.get_stage_compile_error(RenderingDevice.SHADER_STAGE_COMPUTE)
+        if light_error != "":
+            push_error("Light shader compile error: %s" % light_error)
+        else:
+            _light_shader_rid = _rd.shader_create_from_spirv(light_spirv)
+            if !_light_shader_rid.is_valid():
+                push_error("Failed to create light shader.")
+            else:
+                _light_pipeline_rid = _rd.compute_pipeline_create(_light_shader_rid)
+                if !_light_pipeline_rid.is_valid():
+                    push_error("Failed to create light pipeline.")
+
     var fmt := RDTextureFormat.new()
     fmt.width = width
     fmt.height = height
@@ -192,6 +226,14 @@ func _init_render_resources() -> void:
     if !_atlas_b_rid.is_valid():
         push_error("Failed to create atlas buffer B.")
         return
+    _light_a_rid = _rd.storage_buffer_create(_atlas_bytes)
+    if !_light_a_rid.is_valid():
+        push_error("Failed to create light buffer A.")
+        return
+    _light_b_rid = _rd.storage_buffer_create(_atlas_bytes)
+    if !_light_b_rid.is_valid():
+        push_error("Failed to create light buffer B.")
+        return
     _occupancy_rid = _rd.storage_buffer_create(occupancy_bytes)
     if !_occupancy_rid.is_valid():
         push_error("Failed to create occupancy buffer.")
@@ -202,6 +244,10 @@ func _init_render_resources() -> void:
         return
 
     _upload_brickmap_data()
+    if _light_a_rid.is_valid():
+        _rd.buffer_clear(_light_a_rid, 0, _atlas_bytes)
+    if _light_b_rid.is_valid():
+        _rd.buffer_clear(_light_b_rid, 0, _atlas_bytes)
 
     var img_uniform := RDUniform.new()
     img_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
@@ -237,21 +283,47 @@ func _init_render_resources() -> void:
     metrics_uniform.binding = 5
     metrics_uniform.add_id(_metrics_rid)
 
-    _uniform_set_a_rid = _rd.uniform_set_create(
-        [img_uniform, ubo_uniform, indirection_uniform, atlas_uniform_a, occupancy_uniform, metrics_uniform],
+    var light_uniform_a := RDUniform.new()
+    light_uniform_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+    light_uniform_a.binding = 6
+    light_uniform_a.add_id(_light_a_rid)
+
+    var light_uniform_b := RDUniform.new()
+    light_uniform_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+    light_uniform_b.binding = 6
+    light_uniform_b.add_id(_light_b_rid)
+
+    _uniform_set_a_light_a_rid = _rd.uniform_set_create(
+        [img_uniform, ubo_uniform, indirection_uniform, atlas_uniform_a, occupancy_uniform, metrics_uniform, light_uniform_a],
         _shader_rid,
         0
     )
-    if !_uniform_set_a_rid.is_valid():
-        push_error("Failed to create uniform set A.")
+    if !_uniform_set_a_light_a_rid.is_valid():
+        push_error("Failed to create uniform set A (light A).")
         return
-    _uniform_set_b_rid = _rd.uniform_set_create(
-        [img_uniform, ubo_uniform, indirection_uniform, atlas_uniform_b, occupancy_uniform, metrics_uniform],
+    _uniform_set_a_light_b_rid = _rd.uniform_set_create(
+        [img_uniform, ubo_uniform, indirection_uniform, atlas_uniform_a, occupancy_uniform, metrics_uniform, light_uniform_b],
         _shader_rid,
         0
     )
-    if !_uniform_set_b_rid.is_valid():
-        push_error("Failed to create uniform set B.")
+    if !_uniform_set_a_light_b_rid.is_valid():
+        push_error("Failed to create uniform set A (light B).")
+        return
+    _uniform_set_b_light_a_rid = _rd.uniform_set_create(
+        [img_uniform, ubo_uniform, indirection_uniform, atlas_uniform_b, occupancy_uniform, metrics_uniform, light_uniform_a],
+        _shader_rid,
+        0
+    )
+    if !_uniform_set_b_light_a_rid.is_valid():
+        push_error("Failed to create uniform set B (light A).")
+        return
+    _uniform_set_b_light_b_rid = _rd.uniform_set_create(
+        [img_uniform, ubo_uniform, indirection_uniform, atlas_uniform_b, occupancy_uniform, metrics_uniform, light_uniform_b],
+        _shader_rid,
+        0
+    )
+    if !_uniform_set_b_light_b_rid.is_valid():
+        push_error("Failed to create uniform set B (light B).")
         return
 
     var occ_ubo_uniform := RDUniform.new()
@@ -299,6 +371,80 @@ func _init_render_resources() -> void:
     if !_occupancy_uniform_set_b_rid.is_valid():
         push_error("Failed to create occupancy uniform set B.")
         return
+
+    if _light_shader_rid.is_valid():
+        var light_ubo_uniform := RDUniform.new()
+        light_ubo_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER
+        light_ubo_uniform.binding = 0
+        light_ubo_uniform.add_id(_ubo_rid)
+
+        var light_indirection_uniform := RDUniform.new()
+        light_indirection_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        light_indirection_uniform.binding = 1
+        light_indirection_uniform.add_id(_indirection_rid)
+
+        var light_atlas_uniform_a := RDUniform.new()
+        light_atlas_uniform_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        light_atlas_uniform_a.binding = 2
+        light_atlas_uniform_a.add_id(_atlas_a_rid)
+
+        var light_atlas_uniform_b := RDUniform.new()
+        light_atlas_uniform_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        light_atlas_uniform_b.binding = 2
+        light_atlas_uniform_b.add_id(_atlas_b_rid)
+
+        var light_in_uniform_a := RDUniform.new()
+        light_in_uniform_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        light_in_uniform_a.binding = 3
+        light_in_uniform_a.add_id(_light_a_rid)
+
+        var light_in_uniform_b := RDUniform.new()
+        light_in_uniform_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        light_in_uniform_b.binding = 3
+        light_in_uniform_b.add_id(_light_b_rid)
+
+        var light_out_uniform_a := RDUniform.new()
+        light_out_uniform_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        light_out_uniform_a.binding = 4
+        light_out_uniform_a.add_id(_light_a_rid)
+
+        var light_out_uniform_b := RDUniform.new()
+        light_out_uniform_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        light_out_uniform_b.binding = 4
+        light_out_uniform_b.add_id(_light_b_rid)
+
+        _light_uniform_set_a_ab = _rd.uniform_set_create(
+            [light_ubo_uniform, light_indirection_uniform, light_atlas_uniform_a, light_in_uniform_a, light_out_uniform_b],
+            _light_shader_rid,
+            0
+        )
+        if !_light_uniform_set_a_ab.is_valid():
+            push_error("Failed to create light uniform set A AB.")
+            return
+        _light_uniform_set_a_ba = _rd.uniform_set_create(
+            [light_ubo_uniform, light_indirection_uniform, light_atlas_uniform_a, light_in_uniform_b, light_out_uniform_a],
+            _light_shader_rid,
+            0
+        )
+        if !_light_uniform_set_a_ba.is_valid():
+            push_error("Failed to create light uniform set A BA.")
+            return
+        _light_uniform_set_b_ab = _rd.uniform_set_create(
+            [light_ubo_uniform, light_indirection_uniform, light_atlas_uniform_b, light_in_uniform_a, light_out_uniform_b],
+            _light_shader_rid,
+            0
+        )
+        if !_light_uniform_set_b_ab.is_valid():
+            push_error("Failed to create light uniform set B AB.")
+            return
+        _light_uniform_set_b_ba = _rd.uniform_set_create(
+            [light_ubo_uniform, light_indirection_uniform, light_atlas_uniform_b, light_in_uniform_b, light_out_uniform_a],
+            _light_shader_rid,
+            0
+        )
+        if !_light_uniform_set_b_ba.is_valid():
+            push_error("Failed to create light uniform set B BA.")
+            return
 
     if _sim_shader_rid.is_valid():
         var sim_ubo_uniform := RDUniform.new()
@@ -358,8 +504,6 @@ func _process(_delta: float) -> void:
         return
     if !_render_ready or !_pipeline_rid.is_valid():
         return
-    if !_uniform_set_a_rid.is_valid() or !_uniform_set_b_rid.is_valid():
-        return
 
     _debug_frame += 1
     var basis := _camera.global_transform.basis
@@ -390,6 +534,7 @@ func _process(_delta: float) -> void:
     _dispatch_sim(grid_extent_i)
     _reset_metrics()
     _dispatch_occupancy()
+    _dispatch_light(grid_extent_i)
     _dispatch_compute()
     _readback_metrics()
     _debug_request_probe()
@@ -444,6 +589,38 @@ func _dispatch_occupancy() -> void:
     _rd.compute_list_dispatch(list, brick_count, 1, 1)
     _rd.compute_list_end()
 
+func _dispatch_light(grid_extent: int) -> void:
+    if !light_enabled:
+        return
+    if !_light_pipeline_rid.is_valid():
+        return
+    _light_frame += 1
+    var every: int = light_every
+    if every < 1:
+        every = 1
+    if _light_frame % every != 0:
+        return
+    var uniform_set := _current_light_uniform_set()
+    if !uniform_set.is_valid():
+        return
+    var list := _rd.compute_list_begin()
+    _rd.compute_list_bind_compute_pipeline(list, _light_pipeline_rid)
+    _rd.compute_list_bind_uniform_set(list, uniform_set, 0)
+    var groups := int(ceil(float(grid_extent) / 4.0))
+    _rd.compute_list_dispatch(list, groups, groups, groups)
+    _rd.compute_list_end()
+    _light_use_a = !_light_use_a
+
+func _current_raymarch_uniform_set() -> RID:
+    if _atlas_use_a:
+        return _uniform_set_a_light_a_rid if _light_use_a else _uniform_set_a_light_b_rid
+    return _uniform_set_b_light_a_rid if _light_use_a else _uniform_set_b_light_b_rid
+
+func _current_light_uniform_set() -> RID:
+    if _atlas_use_a:
+        return _light_uniform_set_a_ab if _light_use_a else _light_uniform_set_a_ba
+    return _light_uniform_set_b_ab if _light_use_a else _light_uniform_set_b_ba
+
 func _readback_metrics() -> void:
     _metrics_frame += 1
     var every: int = metrics_every
@@ -475,7 +652,7 @@ func _readback_metrics_on_render_thread() -> void:
 func _dispatch_compute() -> void:
     if !_render_ready or !_pipeline_rid.is_valid():
         return
-    var uniform_set := _uniform_set_a_rid if _atlas_use_a else _uniform_set_b_rid
+    var uniform_set := _current_raymarch_uniform_set()
     if !uniform_set.is_valid():
         return
     var list := _rd.compute_list_begin()
@@ -784,10 +961,14 @@ func _create_display_texture() -> Texture2D:
 func _exit_tree() -> void:
     if _rd == null:
         return
-    if _uniform_set_a_rid.is_valid():
-        _rd.free_rid(_uniform_set_a_rid)
-    if _uniform_set_b_rid.is_valid():
-        _rd.free_rid(_uniform_set_b_rid)
+    if _uniform_set_a_light_a_rid.is_valid():
+        _rd.free_rid(_uniform_set_a_light_a_rid)
+    if _uniform_set_a_light_b_rid.is_valid():
+        _rd.free_rid(_uniform_set_a_light_b_rid)
+    if _uniform_set_b_light_a_rid.is_valid():
+        _rd.free_rid(_uniform_set_b_light_a_rid)
+    if _uniform_set_b_light_b_rid.is_valid():
+        _rd.free_rid(_uniform_set_b_light_b_rid)
     if _occupancy_uniform_set_a_rid.is_valid():
         _rd.free_rid(_occupancy_uniform_set_a_rid)
     if _occupancy_uniform_set_b_rid.is_valid():
@@ -796,6 +977,14 @@ func _exit_tree() -> void:
         _rd.free_rid(_sim_uniform_set_ab)
     if _sim_uniform_set_ba.is_valid():
         _rd.free_rid(_sim_uniform_set_ba)
+    if _light_uniform_set_a_ab.is_valid():
+        _rd.free_rid(_light_uniform_set_a_ab)
+    if _light_uniform_set_a_ba.is_valid():
+        _rd.free_rid(_light_uniform_set_a_ba)
+    if _light_uniform_set_b_ab.is_valid():
+        _rd.free_rid(_light_uniform_set_b_ab)
+    if _light_uniform_set_b_ba.is_valid():
+        _rd.free_rid(_light_uniform_set_b_ba)
     if _ubo_rid.is_valid():
         _rd.free_rid(_ubo_rid)
     if _texture_rid.is_valid():
@@ -806,6 +995,10 @@ func _exit_tree() -> void:
         _rd.free_rid(_atlas_a_rid)
     if _atlas_b_rid.is_valid():
         _rd.free_rid(_atlas_b_rid)
+    if _light_a_rid.is_valid():
+        _rd.free_rid(_light_a_rid)
+    if _light_b_rid.is_valid():
+        _rd.free_rid(_light_b_rid)
     if _occupancy_rid.is_valid():
         _rd.free_rid(_occupancy_rid)
     if _metrics_rid.is_valid():
@@ -822,3 +1015,7 @@ func _exit_tree() -> void:
         _rd.free_rid(_sim_pipeline_rid)
     if _sim_shader_rid.is_valid():
         _rd.free_rid(_sim_shader_rid)
+    if _light_pipeline_rid.is_valid():
+        _rd.free_rid(_light_pipeline_rid)
+    if _light_shader_rid.is_valid():
+        _rd.free_rid(_light_shader_rid)
