@@ -74,7 +74,8 @@ void main() {
     if (self_idx == 0u) {
         return;
     }
-    if (atlas_in.data[self_idx] == 0u) {
+    uint material = atlas_in.data[self_idx];
+    if (material == 0u) {
         return;
     }
 
@@ -110,13 +111,13 @@ void main() {
         if (atlas_in.data[t_idx] != 0u) {
             continue;
         }
-        if (atomicCompSwap(atlas_out.data[t_idx], 0u, 1u) == 0u) {
+        if (atomicCompSwap(atlas_out.data[t_idx], 0u, material) == 0u) {
             moved = true;
             break;
         }
     }
 
     if (!moved) {
-        atomicCompSwap(atlas_out.data[self_idx], 0u, 1u);
+        atomicCompSwap(atlas_out.data[self_idx], 0u, material);
     }
 }

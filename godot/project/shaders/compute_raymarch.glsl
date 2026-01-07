@@ -46,6 +46,25 @@ vec3 estimate_normal(vec3 p) {
     return normalize(vec3(dx, dy, dz));
 }
 
+vec3 material_color(uint mat_id) {
+    const int palette_size = 8;
+    vec3 palette[palette_size] = vec3[palette_size](
+        vec3(0.90, 0.70, 0.40),
+        vec3(0.20, 0.60, 0.90),
+        vec3(0.90, 0.30, 0.30),
+        vec3(0.30, 0.90, 0.40),
+        vec3(0.85, 0.85, 0.20),
+        vec3(0.70, 0.40, 0.90),
+        vec3(0.40, 0.90, 0.90),
+        vec3(0.70, 0.70, 0.70)
+    );
+    if (mat_id == 0u) {
+        return vec3(0.0);
+    }
+    uint idx = (mat_id - 1u) % uint(palette_size);
+    return palette[int(idx)];
+}
+
 void clip_plane(vec3 n, float d, vec3 rc, vec3 rd, inout float tmin, inout float tmax, inout bool valid) {
     float denom = dot(n, rd);
     float numer = d - dot(n, rc);
@@ -102,6 +121,13 @@ bool in_bounds(ivec3 p) {
         && p.x < int(u.grid_info.x)
         && p.y < int(u.grid_info.y)
         && p.z < int(u.grid_info.z);
+}
+
+bool brick_in_bounds(ivec3 b) {
+    return b.x >= 0 && b.y >= 0 && b.z >= 0
+        && b.x < int(u.brick_info.x)
+        && b.y < int(u.brick_info.y)
+        && b.z < int(u.brick_info.z);
 }
 
 float segment_distance(vec2 p, vec2 a, vec2 b) {
@@ -253,10 +279,35 @@ void main() {
     }
 
     const int MAX_STEPS = 4096;
-    float t = max(t_enter, 0.0);
+    const int MAX_BRICK_STEPS = 2048;
     float base_step = 0.01 * u.misc.x;
-    float empty_step = max(base_step, (t_exit - t) / float(MAX_STEPS));
-    ivec3 grid_size = ivec3(int(u.grid_info.x), int(u.grid_info.y), int(u.grid_info.z));
+    float empty_step = max(base_step, (t_exit - max(t_enter, 0.0)) / float(MAX_STEPS));
+    vec3 ro_cell = (ro - grid_min) / u.misc.x;
+    vec3 rd_cell = rd / u.misc.x;
+    float t = max(t_enter, 0.0) + 1e-4;
+    vec3 pos_cell = ro_cell + rd_cell * t;
+    ivec3 brick_grid = ivec3(int(u.brick_info.x), int(u.brick_info.y), int(u.brick_info.z));
+    ivec3 brick = ivec3(floor(pos_cell / float(brick_size)));
+    ivec3 step = ivec3(
+        (rd_cell.x > 0.0) ? 1 : ((rd_cell.x < 0.0) ? -1 : 0),
+        (rd_cell.y > 0.0) ? 1 : ((rd_cell.y < 0.0) ? -1 : 0),
+        (rd_cell.z > 0.0) ? 1 : ((rd_cell.z < 0.0) ? -1 : 0)
+    );
+    vec3 next_boundary = vec3(
+        (step.x > 0) ? (float(brick.x + 1) * float(brick_size)) : (float(brick.x) * float(brick_size)),
+        (step.y > 0) ? (float(brick.y + 1) * float(brick_size)) : (float(brick.y) * float(brick_size)),
+        (step.z > 0) ? (float(brick.z + 1) * float(brick_size)) : (float(brick.z) * float(brick_size))
+    );
+    vec3 tMax = vec3(
+        (step.x != 0) ? (next_boundary.x - pos_cell.x) / rd_cell.x + t : 1e9,
+        (step.y != 0) ? (next_boundary.y - pos_cell.y) / rd_cell.y + t : 1e9,
+        (step.z != 0) ? (next_boundary.z - pos_cell.z) / rd_cell.z + t : 1e9
+    );
+    vec3 tDelta = vec3(
+        (step.x != 0) ? float(brick_size) / abs(rd_cell.x) : 1e9,
+        (step.y != 0) ? float(brick_size) / abs(rd_cell.y) : 1e9,
+        (step.z != 0) ? float(brick_size) / abs(rd_cell.z) : 1e9
+    );
     vec3 signs[8] = vec3[8](
         vec3( 1.0,  1.0,  1.0),
         vec3( 1.0,  1.0, -1.0),
@@ -268,142 +319,198 @@ void main() {
         vec3(-1.0, -1.0, -1.0)
     );
 
-    for (int i = 0; i < MAX_STEPS; i++) {
+    for (int b = 0; b < MAX_BRICK_STEPS; b++) {
         step_count++;
         if (t > t_exit || t > u.misc.y) {
             break;
         }
-
-        vec3 pos = ro + rd * t;
-        vec3 local = (pos - grid_min) / u.misc.x;
-        ivec3 cell = nearest_bcc(local);
-        if (!in_bounds(cell)) {
-            t += empty_step;
-            continue;
+        if (brick.x < 0 || brick.y < 0 || brick.z < 0 ||
+            brick.x >= brick_grid.x || brick.y >= brick_grid.y || brick.z >= brick_grid.z) {
+            break;
         }
-
-        ivec3 brick = cell / brick_size;
+        float t_brick_exit = min(tMax.x, min(tMax.y, tMax.z));
+        float t_brick_limit = min(t_brick_exit + 1.5 * u.misc.x, t_exit);
         uint occ_val = occ.data[idx_brick(brick)];
-        if (occ_val != 0u) {
-            uint cell_val = atlas.data[atlas_index_for_cell(cell)];
-            if (cell_val != 0u) {
-                vec3 cell_center = u.origin.xyz + vec3(cell) * u.misc.x;
-                vec3 rc = ro - cell_center;
-                float a = u.misc.x;
-                float t_cell_min = -1e9;
-                float t_cell_max = 1e9;
-                bool valid = true;
-
-                clip_plane(vec3( 1.0,  0.0,  0.0), a, rc, rd, t_cell_min, t_cell_max, valid);
-                clip_plane(vec3(-1.0,  0.0,  0.0), a, rc, rd, t_cell_min, t_cell_max, valid);
-                clip_plane(vec3( 0.0,  1.0,  0.0), a, rc, rd, t_cell_min, t_cell_max, valid);
-                clip_plane(vec3( 0.0, -1.0,  0.0), a, rc, rd, t_cell_min, t_cell_max, valid);
-                clip_plane(vec3( 0.0,  0.0,  1.0), a, rc, rd, t_cell_min, t_cell_max, valid);
-                clip_plane(vec3( 0.0,  0.0, -1.0), a, rc, rd, t_cell_min, t_cell_max, valid);
-                for (int s = 0; s < 8; s++) {
-                    clip_plane(signs[s], 1.5 * a, rc, rd, t_cell_min, t_cell_max, valid);
-                }
-
-                if (valid) {
-                    float t_cell = max(t, t_cell_min);
-                    float max_step = a * 0.1;
-                    float min_step = a * 0.01;
-                    for (int j = 0; j < 128; j++) {
-                        step_count++;
-                        if (t_cell > t_cell_max) {
+        bool brick_active = occ_val != 0u;
+        if (!brick_active) {
+            for (int dz = -1; dz <= 1 && !brick_active; dz++) {
+                for (int dy = -1; dy <= 1 && !brick_active; dy++) {
+                    for (int dx = -1; dx <= 1; dx++) {
+                        ivec3 nb = brick + ivec3(dx, dy, dz);
+                        if (!brick_in_bounds(nb)) {
+                            continue;
+                        }
+                        if (occ.data[idx_brick(nb)] != 0u) {
+                            brick_active = true;
                             break;
                         }
-                        vec3 p = ro + rd * t_cell;
-                        vec3 lp = (p - cell_center) / a;
-                        float d = sdf_truncated_octahedron(lp) * a;
-                        if (d < 0.0) {
-                            vec3 n = estimate_normal(lp);
-                            vec3 hit_pos = ro + rd * t_cell;
-                            vec3 light_dir = normalize(u.cam_pos.xyz - hit_pos);
-                            float diff = max(dot(n, light_dir), 0.0);
-
-                            // Soft shadow ray
-                            float shadow = 1.0;
-                            float t_shadow = 0.02;
-                            for (int s = 0; s < 24; s++) {
-                                vec3 sp = hit_pos + light_dir * t_shadow;
-                                vec3 s_local = (sp - grid_min) / u.misc.x;
-                                ivec3 s_cell = nearest_bcc(s_local);
-                                if (!in_bounds(s_cell)) {
-                                    break;
-                                }
-                                if (bcc_parity(s_cell)) {
-                                    ivec3 s_brick = s_cell / brick_size;
-                                    if (occ.data[idx_brick(s_brick)] != 0u) {
-                                        uint s_val = atlas.data[atlas_index_for_cell(s_cell)];
-                                        if (s_val != 0u) {
-                                            vec3 s_center = u.origin.xyz + vec3(s_cell) * u.misc.x;
-                                            vec3 s_lp = (sp - s_center) / u.misc.x;
-                                            float sd = sdf_truncated_octahedron(s_lp) * u.misc.x;
-                                            if (sd < 0.0) {
-                                                shadow = 0.0;
-                                                break;
-                                            }
-                                            shadow = min(shadow, 10.0 * sd / t_shadow);
-                                        }
-                                    }
-                                }
-                                t_shadow += 0.06;
-                            }
-                            shadow = mix(1.0, shadow, clamp(u.misc.z, 0.0, 1.0));
-
-                            // Reflection ray (single bounce)
-                            float reflection = 0.0;
-                            vec3 refl_dir = reflect(rd, n);
-                            float t_refl = 0.05;
-                            for (int r = 0; r < 16; r++) {
-                                vec3 rp = hit_pos + refl_dir * t_refl;
-                                vec3 r_local = (rp - grid_min) / u.misc.x;
-                                ivec3 r_cell = nearest_bcc(r_local);
-                                if (!in_bounds(r_cell)) {
-                                    break;
-                                }
-                                if (bcc_parity(r_cell)) {
-                                    ivec3 r_brick = r_cell / brick_size;
-                                    if (occ.data[idx_brick(r_brick)] != 0u) {
-                                        uint r_val = atlas.data[atlas_index_for_cell(r_cell)];
-                                        if (r_val != 0u) {
-                                            vec3 r_center = u.origin.xyz + vec3(r_cell) * u.misc.x;
-                                            vec3 r_lp = (rp - r_center) / u.misc.x;
-                                            float rdv = sdf_truncated_octahedron(r_lp) * u.misc.x;
-                                            if (rdv < 0.0) {
-                                                reflection = u.misc.w;
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
-                                t_refl += 0.08;
-                            }
-
-                            vec3 view_dir = normalize(-rd);
-                            vec3 half_dir = normalize(light_dir + view_dir);
-                            float spec = pow(max(dot(n, half_dir), 0.0), 32.0);
-
-                            vec3 base = vec3(0.9, 0.7, 0.4);
-                            color = base * (0.12 + diff * shadow) + base * reflection + vec3(1.0) * spec * 0.25;
-                            hit = true;
-                            atomicAdd(metrics.data[1], 1u);
-                            break;
-                        }
-                        float sdf_step = clamp(d, min_step, max_step);
-                        t_cell += sdf_step;
                     }
-                    if (hit) {
-                        break;
-                    }
-                    t = t_cell_max + 0.0005;
-                    continue;
                 }
             }
         }
+        if (brick_active) {
+            float t_cell = t;
+            for (int i = 0; i < MAX_STEPS; i++) {
+                step_count++;
+                if (t_cell > t_brick_limit || t_cell > u.misc.y) {
+                    break;
+                }
+                vec3 pos = ro + rd * t_cell;
+                vec3 local = (pos - grid_min) / u.misc.x;
+                ivec3 cell = nearest_bcc(local);
+                if (!in_bounds(cell)) {
+                    t_cell += empty_step;
+                    continue;
+                }
+                ivec3 cell_brick = cell / brick_size;
+                uint cell_occ = occ.data[idx_brick(cell_brick)];
+                if (cell_occ != 0u) {
+                    uint cell_val = atlas.data[atlas_index_for_cell(cell)];
+                    if (cell_val != 0u) {
+                        vec3 cell_center = u.origin.xyz + vec3(cell) * u.misc.x;
+                        vec3 rc = ro - cell_center;
+                        float a = u.misc.x;
+                        float t_cell_min = -1e9;
+                        float t_cell_max = 1e9;
+                        bool valid = true;
 
-        t += empty_step;
+                        clip_plane(vec3( 1.0,  0.0,  0.0), a, rc, rd, t_cell_min, t_cell_max, valid);
+                        clip_plane(vec3(-1.0,  0.0,  0.0), a, rc, rd, t_cell_min, t_cell_max, valid);
+                        clip_plane(vec3( 0.0,  1.0,  0.0), a, rc, rd, t_cell_min, t_cell_max, valid);
+                        clip_plane(vec3( 0.0, -1.0,  0.0), a, rc, rd, t_cell_min, t_cell_max, valid);
+                        clip_plane(vec3( 0.0,  0.0,  1.0), a, rc, rd, t_cell_min, t_cell_max, valid);
+                        clip_plane(vec3( 0.0,  0.0, -1.0), a, rc, rd, t_cell_min, t_cell_max, valid);
+                        for (int s = 0; s < 8; s++) {
+                            clip_plane(signs[s], 1.5 * a, rc, rd, t_cell_min, t_cell_max, valid);
+                        }
+
+                        if (valid) {
+                            float t_voxel = max(t_cell, t_cell_min);
+                            float max_step = a * 0.1;
+                            float min_step = a * 0.01;
+                            for (int j = 0; j < 128; j++) {
+                                step_count++;
+                                if (t_voxel > t_cell_max) {
+                                    break;
+                                }
+                                vec3 p = ro + rd * t_voxel;
+                                vec3 lp = (p - cell_center) / a;
+                                float d = sdf_truncated_octahedron(lp) * a;
+                                if (d < 0.0) {
+                                    vec3 n = estimate_normal(lp);
+                                    vec3 hit_pos = ro + rd * t_voxel;
+                                    vec3 light_dir = normalize(u.cam_pos.xyz - hit_pos);
+                                    float diff = max(dot(n, light_dir), 0.0);
+
+                                    // Soft shadow ray
+                                    float shadow = 1.0;
+                                    float t_shadow = 0.02;
+                                    for (int s = 0; s < 24; s++) {
+                                        vec3 sp = hit_pos + light_dir * t_shadow;
+                                        vec3 s_local = (sp - grid_min) / u.misc.x;
+                                        ivec3 s_cell = nearest_bcc(s_local);
+                                        if (!in_bounds(s_cell)) {
+                                            break;
+                                        }
+                                        if (bcc_parity(s_cell)) {
+                                            ivec3 s_brick = s_cell / brick_size;
+                                            if (occ.data[idx_brick(s_brick)] != 0u) {
+                                                uint s_val = atlas.data[atlas_index_for_cell(s_cell)];
+                                                if (s_val != 0u) {
+                                                    vec3 s_center = u.origin.xyz + vec3(s_cell) * u.misc.x;
+                                                    vec3 s_lp = (sp - s_center) / u.misc.x;
+                                                    float sd = sdf_truncated_octahedron(s_lp) * u.misc.x;
+                                                    if (sd < 0.0) {
+                                                        shadow = 0.0;
+                                                        break;
+                                                    }
+                                                    shadow = min(shadow, 10.0 * sd / t_shadow);
+                                                }
+                                            }
+                                        }
+                                        t_shadow += 0.06;
+                                    }
+                                    shadow = mix(1.0, shadow, clamp(u.misc.z, 0.0, 1.0));
+
+                                    // Reflection ray (single bounce)
+                                    float reflection = 0.0;
+                                    vec3 refl_dir = reflect(rd, n);
+                                    float t_refl = 0.05;
+                                    for (int r = 0; r < 16; r++) {
+                                        vec3 rp = hit_pos + refl_dir * t_refl;
+                                        vec3 r_local = (rp - grid_min) / u.misc.x;
+                                        ivec3 r_cell = nearest_bcc(r_local);
+                                        if (!in_bounds(r_cell)) {
+                                            break;
+                                        }
+                                        if (bcc_parity(r_cell)) {
+                                            ivec3 r_brick = r_cell / brick_size;
+                                            if (occ.data[idx_brick(r_brick)] != 0u) {
+                                                uint r_val = atlas.data[atlas_index_for_cell(r_cell)];
+                                                if (r_val != 0u) {
+                                                    vec3 r_center = u.origin.xyz + vec3(r_cell) * u.misc.x;
+                                                    vec3 r_lp = (rp - r_center) / u.misc.x;
+                                                    float rdv = sdf_truncated_octahedron(r_lp) * u.misc.x;
+                                                    if (rdv < 0.0) {
+                                                        reflection = u.misc.w;
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        t_refl += 0.08;
+                                    }
+
+                                    vec3 view_dir = normalize(-rd);
+                                    vec3 half_dir = normalize(light_dir + view_dir);
+                                    float spec = pow(max(dot(n, half_dir), 0.0), 32.0);
+
+                                    vec3 base = material_color(cell_val);
+                                    color = base * (0.12 + diff * shadow) + base * reflection + vec3(1.0) * spec * 0.25;
+                                    hit = true;
+                                    atomicAdd(metrics.data[1], 1u);
+                                    break;
+                                }
+                                float sdf_step = clamp(d, min_step, max_step);
+                                t_voxel += sdf_step;
+                            }
+                            if (hit) {
+                                break;
+                            }
+                            t_cell = t_cell_max + 0.0005;
+                            continue;
+                        }
+                    }
+                }
+                t_cell += empty_step;
+            }
+            if (hit) {
+                break;
+            }
+        }
+
+        if (tMax.x < tMax.y) {
+            if (tMax.x < tMax.z) {
+                brick.x += step.x;
+                t = tMax.x;
+                tMax.x += tDelta.x;
+            } else {
+                brick.z += step.z;
+                t = tMax.z;
+                tMax.z += tDelta.z;
+            }
+        } else {
+            if (tMax.y < tMax.z) {
+                brick.y += step.y;
+                t = tMax.y;
+                tMax.y += tDelta.y;
+            } else {
+                brick.z += step.z;
+                t = tMax.z;
+                tMax.z += tDelta.z;
+            }
+        }
+        t += 1e-4;
     }
 
     atomicAdd(metrics.data[2], step_count);

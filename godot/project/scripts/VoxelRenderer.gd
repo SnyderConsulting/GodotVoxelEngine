@@ -512,13 +512,16 @@ func _upload_brickmap_data() -> void:
     var center := Vector3((grid_extent - 1) * 0.5, (grid_extent - 1) * 0.5, (grid_extent - 1) * 0.5)
     var fill_radius := float(grid_extent) * fill_radius_ratio
     var fill_radius_sq := fill_radius * fill_radius
-    var points := _load_voxel_points(grid_extent)
-    if points.size() > 0:
-        for point in points:
-            var p := point as Vector3
-            var gx := int(p.x)
-            var gy := int(p.y)
-            var gz := int(p.z)
+    var entries := _load_voxel_entries(grid_extent)
+    if entries.size() > 0:
+        for entry in entries:
+            var pos = entry.get("pos", Vector3.ZERO)
+            var mat_id = int(entry.get("material", 1))
+            if mat_id <= 0:
+                continue
+            var gx := int(pos.x)
+            var gy := int(pos.y)
+            var gz := int(pos.z)
             if gx < 0 or gy < 0 or gz < 0 or gx >= grid_extent or gy >= grid_extent or gz >= grid_extent:
                 continue
             if !((gx & 1) == (gy & 1) and (gy & 1) == (gz & 1)):
@@ -532,7 +535,7 @@ func _upload_brickmap_data() -> void:
             var brick_index := bx + by * brick_grid + bz * brick_grid * brick_grid
             var base_offset := brick_index * chunk_size * chunk_size * chunk_size
             var local_index := base_offset + lx + ly * chunk_size + lz * chunk_size * chunk_size
-            atlas[local_index] = 1
+            atlas[local_index] = mat_id
             occupancy[brick_index] = 1
             indirection[brick_index] = brick_index + 1
     else:
@@ -579,7 +582,7 @@ func _upload_brickmap_data() -> void:
     var occ_bytes := occupancy.to_byte_array()
     _rd.buffer_update(_occupancy_rid, 0, occ_bytes.size(), occ_bytes)
 
-func _load_voxel_points(grid_extent: int) -> Array:
+func _load_voxel_entries(grid_extent: int) -> Array:
     if voxel_data_path.is_empty():
         return []
     if !FileAccess.file_exists(voxel_data_path):
@@ -593,15 +596,21 @@ func _load_voxel_points(grid_extent: int) -> Array:
     var voxels: Array = data.get("voxels", [])
     if typeof(voxels) != TYPE_ARRAY:
         return []
-    var points: Array = []
+    var entries: Array = []
     for entry in voxels:
         var arr := entry as Array
         if arr == null:
             continue
         if arr.size() < 3:
             continue
-        points.append(Vector3(float(arr[0]), float(arr[1]), float(arr[2])))     
-    return points
+        var mat_id := 1
+        if arr.size() >= 4:
+            mat_id = int(arr[3])
+        entries.append({
+            "pos": Vector3(float(arr[0]), float(arr[1]), float(arr[2])),
+            "material": mat_id
+        })
+    return entries
 
 func _debug_log_snapshot(pos: Vector3, basis: Basis, world_extent: float) -> void:
     if !debug_logging:
