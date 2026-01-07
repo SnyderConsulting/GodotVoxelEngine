@@ -34,6 +34,10 @@ var _sim_shader_rid: RID
 var _sim_pipeline_rid: RID
 var _light_shader_rid: RID
 var _light_pipeline_rid: RID
+var _active_list_shader_rid: RID
+var _active_list_pipeline_rid: RID
+var _active_dispatch_shader_rid: RID
+var _active_dispatch_pipeline_rid: RID
 var _texture_rid: RID
 var _ubo_rid: RID
 var _indirection_rid: RID
@@ -43,6 +47,9 @@ var _light_a_rid: RID
 var _light_b_rid: RID
 var _occupancy_rid: RID
 var _metrics_rid: RID
+var _active_list_rid: RID
+var _active_count_rid: RID
+var _sim_dispatch_rid: RID
 var _uniform_set_a_light_a_rid: RID
 var _uniform_set_a_light_b_rid: RID
 var _uniform_set_b_light_a_rid: RID
@@ -51,6 +58,8 @@ var _occupancy_uniform_set_a_rid: RID
 var _occupancy_uniform_set_b_rid: RID
 var _sim_uniform_set_ab: RID
 var _sim_uniform_set_ba: RID
+var _active_list_uniform_set_rid: RID
+var _active_dispatch_uniform_set_rid: RID
 var _light_uniform_set_a_ab: RID
 var _light_uniform_set_a_ba: RID
 var _light_uniform_set_b_ab: RID
@@ -58,6 +67,9 @@ var _light_uniform_set_b_ba: RID
 var _occupancy_bytes := 0
 var _metrics_bytes := 0
 var _atlas_bytes := 0
+var _active_list_bytes := 0
+var _active_count_bytes := 0
+var _sim_dispatch_bytes := 0
 var _display_texture: Texture2D
 var _display_material: ShaderMaterial
 var _camera: Camera3D
@@ -70,6 +82,7 @@ var _sim_frame := 0
 var _atlas_use_a := true
 var _light_use_a := true
 var _light_frame := 0
+var _active_list_ready := false
 var _indirection_cpu: PackedInt32Array = PackedInt32Array()
 
 func _ready() -> void:
@@ -188,6 +201,46 @@ func _init_render_resources() -> void:
                 if !_light_pipeline_rid.is_valid():
                     push_error("Failed to create light pipeline.")
 
+    var active_list_source_text := FileAccess.get_file_as_string("res://shaders/compute_active_list.glsl")
+    if active_list_source_text.is_empty():
+        push_error("Missing compute shader source: res://shaders/compute_active_list.glsl")
+    else:
+        var active_list_source := RDShaderSource.new()
+        active_list_source.language = RenderingDevice.SHADER_LANGUAGE_GLSL
+        active_list_source.set_stage_source(RenderingDevice.SHADER_STAGE_COMPUTE, active_list_source_text)
+        var active_list_spirv := _rd.shader_compile_spirv_from_source(active_list_source)
+        var active_list_error := active_list_spirv.get_stage_compile_error(RenderingDevice.SHADER_STAGE_COMPUTE)
+        if active_list_error != "":
+            push_error("Active list shader compile error: %s" % active_list_error)
+        else:
+            _active_list_shader_rid = _rd.shader_create_from_spirv(active_list_spirv)
+            if !_active_list_shader_rid.is_valid():
+                push_error("Failed to create active list shader.")
+            else:
+                _active_list_pipeline_rid = _rd.compute_pipeline_create(_active_list_shader_rid)
+                if !_active_list_pipeline_rid.is_valid():
+                    push_error("Failed to create active list pipeline.")
+
+    var active_dispatch_source_text := FileAccess.get_file_as_string("res://shaders/compute_active_dispatch.glsl")
+    if active_dispatch_source_text.is_empty():
+        push_error("Missing compute shader source: res://shaders/compute_active_dispatch.glsl")
+    else:
+        var active_dispatch_source := RDShaderSource.new()
+        active_dispatch_source.language = RenderingDevice.SHADER_LANGUAGE_GLSL
+        active_dispatch_source.set_stage_source(RenderingDevice.SHADER_STAGE_COMPUTE, active_dispatch_source_text)
+        var active_dispatch_spirv := _rd.shader_compile_spirv_from_source(active_dispatch_source)
+        var active_dispatch_error := active_dispatch_spirv.get_stage_compile_error(RenderingDevice.SHADER_STAGE_COMPUTE)
+        if active_dispatch_error != "":
+            push_error("Active dispatch shader compile error: %s" % active_dispatch_error)
+        else:
+            _active_dispatch_shader_rid = _rd.shader_create_from_spirv(active_dispatch_spirv)
+            if !_active_dispatch_shader_rid.is_valid():
+                push_error("Failed to create active dispatch shader.")
+            else:
+                _active_dispatch_pipeline_rid = _rd.compute_pipeline_create(_active_dispatch_shader_rid)
+                if !_active_dispatch_pipeline_rid.is_valid():
+                    push_error("Failed to create active dispatch pipeline.")
+
     var fmt := RDTextureFormat.new()
     fmt.width = width
     fmt.height = height
@@ -241,6 +294,27 @@ func _init_render_resources() -> void:
     _metrics_rid = _rd.storage_buffer_create(_metrics_bytes)
     if !_metrics_rid.is_valid():
         push_error("Failed to create metrics buffer.")
+        return
+
+    _active_list_bytes = brick_count * 4
+    _active_count_bytes = 4
+    _sim_dispatch_bytes = 16
+    _active_list_rid = _rd.storage_buffer_create(_active_list_bytes)
+    if !_active_list_rid.is_valid():
+        push_error("Failed to create active list buffer.")
+        return
+    _active_count_rid = _rd.storage_buffer_create(_active_count_bytes)
+    if !_active_count_rid.is_valid():
+        push_error("Failed to create active count buffer.")
+        return
+    var dispatch_init := PackedInt32Array([0, 1, 1, 0]).to_byte_array()
+    _sim_dispatch_rid = _rd.storage_buffer_create(
+        _sim_dispatch_bytes,
+        dispatch_init,
+        RenderingDevice.STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT
+    )
+    if !_sim_dispatch_rid.is_valid():
+        push_error("Failed to create sim dispatch buffer.")
         return
 
     _upload_brickmap_data()
@@ -372,6 +446,61 @@ func _init_render_resources() -> void:
         push_error("Failed to create occupancy uniform set B.")
         return
 
+    if _active_list_shader_rid.is_valid():
+        var active_ubo_uniform := RDUniform.new()
+        active_ubo_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER
+        active_ubo_uniform.binding = 0
+        active_ubo_uniform.add_id(_ubo_rid)
+
+        var active_occ_uniform := RDUniform.new()
+        active_occ_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        active_occ_uniform.binding = 1
+        active_occ_uniform.add_id(_occupancy_rid)
+
+        var active_list_uniform := RDUniform.new()
+        active_list_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        active_list_uniform.binding = 2
+        active_list_uniform.add_id(_active_list_rid)
+
+        var active_count_uniform := RDUniform.new()
+        active_count_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        active_count_uniform.binding = 3
+        active_count_uniform.add_id(_active_count_rid)
+
+        _active_list_uniform_set_rid = _rd.uniform_set_create(
+            [active_ubo_uniform, active_occ_uniform, active_list_uniform, active_count_uniform],
+            _active_list_shader_rid,
+            0
+        )
+        if !_active_list_uniform_set_rid.is_valid():
+            push_error("Failed to create active list uniform set.")
+            return
+
+    if _active_dispatch_shader_rid.is_valid():
+        var active_dispatch_ubo_uniform := RDUniform.new()
+        active_dispatch_ubo_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER
+        active_dispatch_ubo_uniform.binding = 0
+        active_dispatch_ubo_uniform.add_id(_ubo_rid)
+
+        var active_dispatch_count_uniform := RDUniform.new()
+        active_dispatch_count_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        active_dispatch_count_uniform.binding = 1
+        active_dispatch_count_uniform.add_id(_active_count_rid)
+
+        var active_dispatch_args_uniform := RDUniform.new()
+        active_dispatch_args_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        active_dispatch_args_uniform.binding = 2
+        active_dispatch_args_uniform.add_id(_sim_dispatch_rid)
+
+        _active_dispatch_uniform_set_rid = _rd.uniform_set_create(
+            [active_dispatch_ubo_uniform, active_dispatch_count_uniform, active_dispatch_args_uniform],
+            _active_dispatch_shader_rid,
+            0
+        )
+        if !_active_dispatch_uniform_set_rid.is_valid():
+            push_error("Failed to create active dispatch uniform set.")
+            return
+
     if _light_shader_rid.is_valid():
         var light_ubo_uniform := RDUniform.new()
         light_ubo_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER
@@ -458,17 +587,22 @@ func _init_render_resources() -> void:
         sim_indirection_uniform.add_id(_indirection_rid)
 
         var sim_in_a := RDUniform.new()
-        sim_in_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        sim_in_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER     
         sim_in_a.binding = 2
         sim_in_a.add_id(_atlas_a_rid)
 
         var sim_out_b := RDUniform.new()
-        sim_out_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        sim_out_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER    
         sim_out_b.binding = 3
         sim_out_b.add_id(_atlas_b_rid)
 
+        var sim_active_list_uniform := RDUniform.new()
+        sim_active_list_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        sim_active_list_uniform.binding = 4
+        sim_active_list_uniform.add_id(_active_list_rid)
+
         _sim_uniform_set_ab = _rd.uniform_set_create(
-            [sim_ubo_uniform, sim_indirection_uniform, sim_in_a, sim_out_b],
+            [sim_ubo_uniform, sim_indirection_uniform, sim_in_a, sim_out_b, sim_active_list_uniform],
             _sim_shader_rid,
             0
         )
@@ -480,12 +614,12 @@ func _init_render_resources() -> void:
         sim_in_b.add_id(_atlas_b_rid)
 
         var sim_out_a := RDUniform.new()
-        sim_out_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        sim_out_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER    
         sim_out_a.binding = 3
         sim_out_a.add_id(_atlas_a_rid)
 
         _sim_uniform_set_ba = _rd.uniform_set_create(
-            [sim_ubo_uniform, sim_indirection_uniform, sim_in_b, sim_out_a],
+            [sim_ubo_uniform, sim_indirection_uniform, sim_in_b, sim_out_a, sim_active_list_uniform],
             _sim_shader_rid,
             0
         )
@@ -534,6 +668,8 @@ func _process(_delta: float) -> void:
     _dispatch_sim(grid_extent_i)
     _reset_metrics()
     _dispatch_occupancy()
+    _dispatch_active_list()
+    _dispatch_active_dispatch()
     _dispatch_light(grid_extent_i)
     _dispatch_compute()
     _readback_metrics()
@@ -544,7 +680,13 @@ func _update_params(bytes: PackedByteArray) -> void:
         return
     _rd.buffer_update(_ubo_rid, 0, bytes.size(), bytes)
 
-func _dispatch_sim(grid_extent: int) -> void:
+func _prime_active_list() -> void:
+    if _active_list_ready:
+        return
+    _dispatch_active_list()
+    _dispatch_active_dispatch()
+
+func _dispatch_sim(_grid_extent: int) -> void:
     if !sim_enabled:
         return
     if !_sim_pipeline_rid.is_valid():
@@ -556,8 +698,12 @@ func _dispatch_sim(grid_extent: int) -> void:
     if _sim_frame % every != 0:
         return
     var use_a := _atlas_use_a
-    var uniform_set := _sim_uniform_set_ab if use_a else _sim_uniform_set_ba
+    var uniform_set := _sim_uniform_set_ab if use_a else _sim_uniform_set_ba    
     if !uniform_set.is_valid():
+        return
+    if !_sim_dispatch_rid.is_valid():
+        return
+    if !_active_list_ready:
         return
     var atlas_out := _atlas_b_rid if use_a else _atlas_a_rid
     if sim_clear_output and _atlas_bytes > 0:
@@ -565,8 +711,7 @@ func _dispatch_sim(grid_extent: int) -> void:
     var list := _rd.compute_list_begin()
     _rd.compute_list_bind_compute_pipeline(list, _sim_pipeline_rid)
     _rd.compute_list_bind_uniform_set(list, uniform_set, 0)
-    var groups := int(ceil(float(grid_extent) / 4.0))
-    _rd.compute_list_dispatch(list, groups, groups, groups)
+    _rd.compute_list_dispatch_indirect(list, _sim_dispatch_rid, 0)
     _rd.compute_list_end()
     _atlas_use_a = !use_a
 
@@ -583,11 +728,40 @@ func _dispatch_occupancy() -> void:
         return
     _rd.buffer_clear(_occupancy_rid, 0, _occupancy_bytes)
     var list := _rd.compute_list_begin()
-    _rd.compute_list_bind_compute_pipeline(list, _occupancy_pipeline_rid)
+    _rd.compute_list_bind_compute_pipeline(list, _occupancy_pipeline_rid)       
     _rd.compute_list_bind_uniform_set(list, uniform_set, 0)
     var brick_count := chunk_grid * chunk_grid * chunk_grid
     _rd.compute_list_dispatch(list, brick_count, 1, 1)
     _rd.compute_list_end()
+
+func _dispatch_active_list() -> void:
+    if !_active_list_pipeline_rid.is_valid():
+        return
+    if !_active_list_uniform_set_rid.is_valid():
+        return
+    _active_list_ready = false
+    if _active_count_bytes > 0:
+        _rd.buffer_clear(_active_count_rid, 0, _active_count_bytes)
+    var brick_count := chunk_grid * chunk_grid * chunk_grid
+    if brick_count <= 0:
+        return
+    var list := _rd.compute_list_begin()
+    _rd.compute_list_bind_compute_pipeline(list, _active_list_pipeline_rid)
+    _rd.compute_list_bind_uniform_set(list, _active_list_uniform_set_rid, 0)
+    _rd.compute_list_dispatch(list, brick_count, 1, 1)
+    _rd.compute_list_end()
+
+func _dispatch_active_dispatch() -> void:
+    if !_active_dispatch_pipeline_rid.is_valid():
+        return
+    if !_active_dispatch_uniform_set_rid.is_valid():
+        return
+    var list := _rd.compute_list_begin()
+    _rd.compute_list_bind_compute_pipeline(list, _active_dispatch_pipeline_rid)
+    _rd.compute_list_bind_uniform_set(list, _active_dispatch_uniform_set_rid, 0)
+    _rd.compute_list_dispatch(list, 1, 1, 1)
+    _rd.compute_list_end()
+    _active_list_ready = true
 
 func _dispatch_light(grid_extent: int) -> void:
     if !light_enabled:
@@ -643,11 +817,35 @@ func _readback_metrics_on_render_thread() -> void:
     var hit_count := ints[1]
     var step_count := ints[2]
     var occupied_bricks := ints[3]
+    var active_bricks := -1
+    if _active_count_rid.is_valid():
+        var active_bytes := _rd.buffer_get_data(_active_count_rid, 0, 4)
+        if active_bytes.size() >= 4:
+            var active_vals := active_bytes.to_int32_array()
+            if active_vals.size() > 0:
+                active_bricks = active_vals[0]
     var avg_steps := 0.0
     if ray_count > 0:
         avg_steps = float(step_count) / float(ray_count)
     var main_thread := Thread.is_main_thread()
-    print("GPU metrics | rays=%d hits=%d avg_steps=%.2f occupied_bricks=%d main_thread=%s" % [ray_count, hit_count, avg_steps, occupied_bricks, str(main_thread)])
+    var total_bricks := chunk_grid * chunk_grid * chunk_grid
+    var groups_per_brick := int(ceil(float(chunk_size) / 4.0))
+    var indirect_groups := -1
+    var full_groups := int(ceil(float(chunk_grid * chunk_size) / 4.0))
+    if active_bricks >= 0:
+        indirect_groups = active_bricks * groups_per_brick * groups_per_brick * groups_per_brick
+    var full_group_count := full_groups * full_groups * full_groups
+    print("GPU metrics | rays=%d hits=%d avg_steps=%.2f occupied_bricks=%d active_bricks=%d total_bricks=%d indirect_groups=%d full_groups=%d main_thread=%s" % [
+        ray_count,
+        hit_count,
+        avg_steps,
+        occupied_bricks,
+        active_bricks,
+        total_bricks,
+        indirect_groups,
+        full_group_count,
+        str(main_thread)
+    ])
 
 func _dispatch_compute() -> void:
     if !_render_ready or !_pipeline_rid.is_valid():
@@ -977,6 +1175,10 @@ func _exit_tree() -> void:
         _rd.free_rid(_sim_uniform_set_ab)
     if _sim_uniform_set_ba.is_valid():
         _rd.free_rid(_sim_uniform_set_ba)
+    if _active_list_uniform_set_rid.is_valid():
+        _rd.free_rid(_active_list_uniform_set_rid)
+    if _active_dispatch_uniform_set_rid.is_valid():
+        _rd.free_rid(_active_dispatch_uniform_set_rid)
     if _light_uniform_set_a_ab.is_valid():
         _rd.free_rid(_light_uniform_set_a_ab)
     if _light_uniform_set_a_ba.is_valid():
@@ -1003,6 +1205,12 @@ func _exit_tree() -> void:
         _rd.free_rid(_occupancy_rid)
     if _metrics_rid.is_valid():
         _rd.free_rid(_metrics_rid)
+    if _active_list_rid.is_valid():
+        _rd.free_rid(_active_list_rid)
+    if _active_count_rid.is_valid():
+        _rd.free_rid(_active_count_rid)
+    if _sim_dispatch_rid.is_valid():
+        _rd.free_rid(_sim_dispatch_rid)
     if _pipeline_rid.is_valid():
         _rd.free_rid(_pipeline_rid)
     if _shader_rid.is_valid():
@@ -1019,3 +1227,11 @@ func _exit_tree() -> void:
         _rd.free_rid(_light_pipeline_rid)
     if _light_shader_rid.is_valid():
         _rd.free_rid(_light_shader_rid)
+    if _active_list_pipeline_rid.is_valid():
+        _rd.free_rid(_active_list_pipeline_rid)
+    if _active_list_shader_rid.is_valid():
+        _rd.free_rid(_active_list_shader_rid)
+    if _active_dispatch_pipeline_rid.is_valid():
+        _rd.free_rid(_active_dispatch_pipeline_rid)
+    if _active_dispatch_shader_rid.is_valid():
+        _rd.free_rid(_active_dispatch_shader_rid)

@@ -27,6 +27,10 @@ layout(set = 0, binding = 3, std430) buffer AtlasOut {
     uint data[];
 } atlas_out;
 
+layout(set = 0, binding = 4, std430) readonly buffer ActiveList {
+    uint data[];
+} active_list;
+
 uint idx_brick(ivec3 b) {
     return uint(b.x) + uint(b.y) * uint(u.brick_info.x)
         + uint(b.z) * uint(u.brick_info.x) * uint(u.brick_info.y);
@@ -62,8 +66,37 @@ uint hash_cell(ivec3 c) {
     return uint(c.x * 73856093 ^ c.y * 19349663 ^ c.z * 83492791);
 }
 
+ivec3 brick_from_index(uint brick_index) {
+    uint bx = brick_index % uint(u.brick_info.x);
+    uint by = (brick_index / uint(u.brick_info.x)) % uint(u.brick_info.y);
+    uint bz = brick_index / (uint(u.brick_info.x) * uint(u.brick_info.y));
+    return ivec3(int(bx), int(by), int(bz));
+}
+
 void main() {
-    ivec3 cell = ivec3(gl_GlobalInvocationID.xyz);
+    const uint LOCAL_SIZE = 4u;
+    uint brick_size = uint(u.brick_info.w);
+    uint groups_per_brick = (brick_size + LOCAL_SIZE - 1u) / LOCAL_SIZE;
+    if (groups_per_brick == 0u) {
+        return;
+    }
+    uint brick_list_index = gl_WorkGroupID.x / groups_per_brick;
+    uint tile_x = gl_WorkGroupID.x - brick_list_index * groups_per_brick;
+    uint tile_y = gl_WorkGroupID.y;
+    uint tile_z = gl_WorkGroupID.z;
+    if (tile_y >= groups_per_brick || tile_z >= groups_per_brick) {
+        return;
+    }
+    uint brick_index = active_list.data[brick_list_index];
+    ivec3 brick = brick_from_index(brick_index);
+    uvec3 local_id = gl_LocalInvocationID.xyz;
+    uint lx = tile_x * LOCAL_SIZE + local_id.x;
+    uint ly = tile_y * LOCAL_SIZE + local_id.y;
+    uint lz = tile_z * LOCAL_SIZE + local_id.z;
+    if (lx >= brick_size || ly >= brick_size || lz >= brick_size) {
+        return;
+    }
+    ivec3 cell = brick * int(brick_size) + ivec3(int(lx), int(ly), int(lz));
     if (!in_bounds(cell)) {
         return;
     }
