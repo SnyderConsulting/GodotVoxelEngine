@@ -6,7 +6,8 @@ param(
   [string]$AutomationToken = "voxdebug",
   [switch]$AutoPort = $true,
   [switch]$KillExisting,
-  [switch]$Detached
+  [switch]$Detached,
+  [string]$LogPath = ""
 )
 
 function Resolve-ListenAddress([string]$HostName) {
@@ -116,8 +117,27 @@ if ($Scene -and $Scene.Length -gt 0) {
 }
 
 if ($Detached) {
+  # In detached mode, always redirect stdout/stderr to a log if provided.
+  if ($LogPath -and $LogPath.Length -gt 0) {
+    $args += @(">", $LogPath, "2>&1")
+  }
   Start-Detached -ExePath $exe -Arguments $args
   return
 }
 
-& $exe @args
+if ($LogPath -and $LogPath.Length -gt 0) {
+  # Run attached but tee output to a log for debugging.
+  $psi = New-Object System.Diagnostics.ProcessStartInfo
+  $psi.FileName = $exe
+  $psi.Arguments = (Join-CommandLine $args)
+  $psi.UseShellExecute = $false
+  $psi.RedirectStandardOutput = $true
+  $psi.RedirectStandardError = $true
+  $p = New-Object System.Diagnostics.Process
+  $p.StartInfo = $psi
+  $p.Start() | Out-Null
+  $p.StandardOutput.BaseStream.CopyTo([IO.File]::Open($LogPath, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::Read))
+  $p.WaitForExit()
+} else {
+  & $exe @args
+}

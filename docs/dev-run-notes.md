@@ -16,6 +16,50 @@ These create a one-off Scheduled Task, start Godot out-of-band, then immediately
 - Godot opens, then closes right when the CLI stops "waiting for background terminal".
 - This happens even though there are no fatal errors in the Godot logs.
 
+## Launch Options
+### Editor (manual debug)
+Use this for manual inspection or to edit scenes in the editor.
+```
+godot/run_editor_dev.ps1
+```
+
+### Game (interactive window)
+Use this to open the game normally. If Codex closes it, relaunch with `-Detached`.
+```
+godot/run_game_dev.ps1
+```
+
+### Game (wait, bound to current shell)
+Use this if you want the current shell to stay attached to the game process.
+```
+godot/run_game_dev.ps1 -Wait
+```
+
+### Game (detached, long-running)
+Use this when you want the window to stay alive after Codex responds.
+```
+godot/run_game_dev.ps1 -Detached
+```
+
+### Automation (interactive debug bridge)
+Use this to run the automation server for screenshots/logs/commands.
+```
+godot/run_automation_dev.ps1 -AutomationToken voxdebug
+```
+
+### Automation (detached, long-running bridge)
+Use this to keep the automation server alive beyond the CLI lifecycle.
+```
+godot/run_automation_dev.ps1 -Detached -AutomationToken voxdebug
+```
+
+## Automation Client Usage
+Once the automation server is running, use the client to send commands:
+```
+godot/automation_client.ps1 -ServerHost 127.0.0.1 -Port 24680 -Token voxdebug -Method ping
+godot/automation_client.ps1 -ServerHost 127.0.0.1 -Port 24680 -Token voxdebug -Method screenshot -ParamsJson '{\"path\":\"user://snap.png\"}'
+```
+
 ## Launcher Notes
 - `godot/run_game_dev.ps1` uses the windowed `Godot_v4.5.1-automation-dev_win64.exe`.
 - `godot/run_automation_dev.ps1` uses the console build with `--automation` and supports:
