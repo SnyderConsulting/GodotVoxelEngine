@@ -1,5 +1,7 @@
 # **The Granular Frontier: Architectural Paradigms and Implementation Strategies for GPU-Accelerated Voxel Physics Engines**
 
+> Implementation note (current project): the voxel renderer/simulation described here now lives in the engine module at `godot/engine-src/modules/voxels`. The project-side shaders/scripts are kept for reference and scene orchestration; the live compute pipelines run from the module.
+
 ## **1\. Introduction: The Transition to Granular Volumetrics**
 
 The domain of real-time computer graphics and physics simulation is currently undergoing a fundamental paradigm shift, moving from the approximation of surfaces to the simulation of volumes. For over three decades, the industry standard has relied on Boundary Representation (B-Rep), where objects are defined by their hollow outer shells—polygonal meshes. In this traditional model, physics is an abstraction; interactions are calculated using simplified collision hulls (capsules, boxes, and convex hulls) that approximate the geometry but ignore the internal constitution of the object. While computationally efficient, this approach inherently limits the potential for emergent interactivity. A mesh-based wall is a static plane that can perhaps play a destruction animation, but it cannot structurally fail based on stress, crumble into constituent bricks, or allow fluids to permeate its cracks based on material porosity.

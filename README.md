@@ -47,7 +47,11 @@ This project is a clean restart focused on a single GPU-resident voxel volume re
 - `godot/engine-bin`: Rebuilt editor binaries.
 - `godot/project`: Fresh Godot project scaffold (currently minimal scene).
 
-## Run
+## Run / Build
+
+- Engine voxel renderer lives in `godot/engine-src/modules/voxels`; keep that module present for any rebuild.
+- After each `scons` build, copy the template_debug binaries from `godot/engine-src/bin/` into `godot/engine-bin/` with the expected names (`Godot_v4.5.1-automation-dev_win64{.console}.exe`).
+- See `docs/build-and-launch.md` for the exact build command, copy steps, and launch options.
 
 Launch the custom editor and open the project:
 
@@ -57,7 +61,7 @@ godot\run_editor_dev.ps1
 
 ## Engine Automation (Custom Build)
 
-This repo includes a custom Godot editor build with a TCP JSON automation server.
+This repo includes a custom Godot build with a TCP JSON automation server.
 
 - Binary: `godot/engine-bin/Godot_v4.5.1-automation-dev_win64.exe` (rebuilt from `godot/engine-src`)
 - Start with automation enabled:

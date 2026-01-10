@@ -1,5 +1,7 @@
 # Compute Rendering Notes
 
+> Current state: the active compute pipelines now live in the engine module (`godot/engine-src/modules/voxels`). The project-side `.glsl` files are kept for reference/experimentation; follow these notes if authoring new shaders or validating legacy copies.
+
 ## Summary
 - Compute GLSL files are not auto-imported as RDShaderFile resources unless the shader file importer runs. In this project, loading a `.glsl` directly failed and broke the script.
 - Workaround: load the GLSL source with `FileAccess.get_file_as_string`, remove the `#[compute]` hint, then compile via `RDShaderSource` and `RenderingDevice.shader_compile_spirv_from_source()`.

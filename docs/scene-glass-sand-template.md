@@ -4,6 +4,8 @@ This project has two working scene patterns (TumblerTest and HourglassTest) that
 share a common scaffold. Use this guide to build a new scene with glass voxels,
 sand voxels, and the gravity/world rotation control panel.
 
+Renderer ownership note: scenes use the engine module `VoxelRenderer` (from `godot/engine-src/modules/voxels`). The project-side GPU shaders (`res://shaders/compute_*.glsl`) remain for reference but the live compute pipelines are in the engine module. The display shader `compute_display.gdshader` stays project-side.
+
 ## What the existing scenes share
 
 TumblerTest and HourglassTest both use the same core components:

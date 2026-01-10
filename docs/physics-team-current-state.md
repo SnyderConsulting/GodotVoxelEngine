@@ -2,6 +2,8 @@
 
 This document summarizes the *current* in-engine technical setup of VoxLand for the physics research team. It describes what is implemented today in Godot without requiring access to the project source.
 
+Implementation location: the voxel renderer/simulation/light passes are implemented in the engine module at `godot/engine-src/modules/voxels` (project scripts orchestrate scenes and UI; compute lives in the module).
+
 ## 1) Core Pipeline Overview
 
 The system is a GPU-driven voxel simulation and renderer. The simulation, lighting, and raymarching all run on the GPU via compute shaders. Each frame:

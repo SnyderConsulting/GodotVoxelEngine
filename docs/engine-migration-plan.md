@@ -1,6 +1,6 @@
 # VoxLand Engine Refactor / Migration Plan
 
-This plan migrates the current project‑level voxel renderer + sim into the Godot engine as a dedicated voxel‑physics subsystem. It is organized as a phased, low‑risk refactor where the project gradually becomes a thin content layer on top of engine‑owned primitives.
+This plan migrates the current project‑level voxel renderer + sim into the Godot engine as a dedicated voxel‑physics subsystem. A baseline engine module now exists at `godot/engine-src/modules/voxels`; the remaining phases here describe how to evolve and harden that module while keeping the project as a thin content layer.
 
 ## Goals
 

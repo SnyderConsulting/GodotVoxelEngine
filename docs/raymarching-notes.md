@@ -1,5 +1,7 @@
 # Raymarching Notes (Godot)
 
+> Note: The active raymarch compute now lives in the engine module (`godot/engine-src/modules/voxels/compute_raymarch.glsl`). Project-side compute shaders remain for reference/legacy. The display shader (`res://shaders/compute_display.gdshader`) is still project-side.
+
 ## Why the screen was solid gray
 - The shader failed to compile, so the material did not render.
 - `CAMERA_POSITION` is not a valid identifier in Godot 4 spatial shaders.

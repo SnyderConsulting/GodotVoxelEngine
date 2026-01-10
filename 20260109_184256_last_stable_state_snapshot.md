@@ -19,11 +19,11 @@
 - If SCons fails in `voxel_renderer` with duplicate members, remove the extra MPM metrics fields and rebuild.
 - Binaries need `disable_path_overrides=no` to allow `--path` in launch scripts.
 
-## Current Project State
-- Engine rebuilt and binaries in `godot/engine-bin` include the voxel module; voxel scenes render correctly under automation.
+## Current Project State (updated)
+- Engine rebuilt with voxel module present; binaries staged in `godot/engine-bin` render voxel scenes correctly under automation.
 - Automation server reachable on 127.0.0.1:24680 with token `voxdebug`; latest run rendered `res://scenes/TumblerTest.tscn` successfully (see `automation_frame.png` in `%APPDATA%/Godot/app_userdata/VoxLand`).
-- Git: engine-src has local changes (voxel module + metrics cleanup) not committed; project repo clean. One stash remains in engine (`temp-stash` consumed when reapplying module).
+- Git: root repo clean; `godot/engine-src` clean; no stashes. Voxel module and texture RD tweaks are committed.
 - Launch commands:
   - Game: `godot/run_game_dev.ps1 -Detached`
   - Automation: `godot/run_automation_dev.ps1 -Detached -AutomationToken voxdebug [-Scene <tscn>]`
-  - Automation client example: `godot/automation_client.ps1 -ServerHost 127.0.0.1 -Port 24680 -Token voxdebug -Method screenshot -ParamsJson '{"path":"user://snap.png"}'`
+  - Automation client example: `godot/automation_client.ps1 -ServerHost 127.0.0.1 -Port 24680 -Token voxdebug -Method screenshot -ParamsJson '{\"path\":\"user://snap.png\"}'`
