@@ -10,7 +10,7 @@ func _after_ready() -> void:
     call_deferred("_initialize_scenario")
 
 func _initialize_scenario() -> void:
-    wait_for_renderer_ready(func () -> void:
+    wait_for_renderer_ready(func ():
         _build_tumbler()
         _update_overlay()
     )

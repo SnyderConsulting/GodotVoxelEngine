@@ -13,7 +13,7 @@ func _after_ready() -> void:
     call_deferred("_initialize_scenario")
 
 func _initialize_scenario() -> void:
-    wait_for_renderer_ready(func () -> void:
+    wait_for_renderer_ready(func ():
         _build_hourglass()
         renderer.gravity_dir = Vector3(0, -1, 0)
         _update_overlay()
