@@ -1,4 +1,4 @@
-extends "res://scripts/BaseVoxelSceneController.gd"
+extends BaseVoxelSceneController
 
 @export var fill_height_ratio: float = 0.55
 @export var sand_density: float = 0.75

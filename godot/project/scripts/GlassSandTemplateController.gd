@@ -1,4 +1,4 @@
-extends "res://scripts/BaseVoxelSceneController.gd"
+extends BaseVoxelSceneController
 
 @export var floor_thickness: int = 2
 @export var edge_padding: int = 8

@@ -1,4 +1,5 @@
 extends Node
+class_name BaseVoxelSceneController
 
 @export var voxel_renderer_path: NodePath
 @export var overlay_path: NodePath

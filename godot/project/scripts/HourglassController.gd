@@ -1,4 +1,4 @@
-extends "res://scripts/BaseVoxelSceneController.gd"
+extends BaseVoxelSceneController
 
 @export var bulb_radius_ratio: float = 0.45
 @export var neck_radius_ratio: float = 0.12
