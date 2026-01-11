@@ -27,6 +27,10 @@ extends Node
 @export var sim_enabled: bool = false
 @export var sim_every: int = 1
 @export var sim_clear_output: bool = true
+@export var diag_enabled: bool = false
+@export var diag_every: int = 60
+@export var diag_log_buffers: bool = false
+@export var diag_log_dispatch: bool = false
 
 var _rd: RenderingDevice
 var _shader_rid: RID
@@ -88,7 +92,15 @@ var _light_frame := 0
 var _active_list_ready := false
 var _indirection_cpu: PackedInt32Array = PackedInt32Array()
 
+func _diag(msg: String) -> void:
+    if !diag_enabled:
+        return
+    print("VoxelRenderer diag | frame=%d %s" % [_debug_frame, msg])
+
 func _ready() -> void:
+    _diag("ready start width=%d height=%d chunk_size=%d chunk_grid=%d lattice=%.3f" % [
+        width, height, chunk_size, chunk_grid, lattice_spacing
+    ])
     _rd = RenderingServer.get_rendering_device()
     _use_global_rd = _rd != null
     if _rd == null:
@@ -114,6 +126,7 @@ func _ready() -> void:
         quad.material_override = _display_material
 
     _init_render_resources()
+    _diag("ready end render_ready=%s" % str(_render_ready))
 
 func _init_render_resources() -> void:
     var shader_source_text := FileAccess.get_file_as_string("res://shaders/compute_raymarch.glsl")
@@ -320,6 +333,10 @@ func _init_render_resources() -> void:
         push_error("Failed to create sim dispatch buffer.")
         return
 
+    if diag_enabled and diag_log_buffers:
+        _diag("buffers allocated atlas_bytes=%d indirection_bytes=%d occupancy_bytes=%d metrics_bytes=%d active_list_bytes=%d" % [
+            _atlas_bytes, indirection_bytes, occupancy_bytes, _metrics_bytes, _active_list_bytes
+        ])
     _upload_brickmap_data()
     if _light_a_rid.is_valid():
         _rd.buffer_clear(_light_a_rid, 0, _atlas_bytes)
@@ -887,6 +904,10 @@ func _dispatch_compute() -> void:
     var groups_y := int(ceil(float(height) / 8.0))
     _rd.compute_list_dispatch(list, groups_x, groups_y, 1)
     _rd.compute_list_end()
+    if diag_enabled and diag_log_dispatch and (_debug_frame % max(1, diag_every) == 0):
+        _diag("dispatch raymarch groups=(%d,%d,1) atlas_use_a=%s light_use_a=%s" % [
+            groups_x, groups_y, str(_atlas_use_a), str(_light_use_a)
+        ])
 
 func _upload_brickmap_data() -> void:
     var brick_grid := chunk_grid
@@ -1039,6 +1060,10 @@ func set_voxel_entries(entries: Array, allocate_all_bricks: bool = false) -> voi
         _rd.buffer_clear(_light_a_rid, 0, _atlas_bytes)
     if _light_b_rid.is_valid():
         _rd.buffer_clear(_light_b_rid, 0, _atlas_bytes)
+    if diag_enabled and diag_log_buffers:
+        _diag("set_voxel_entries entries=%d allocate_all=%s grid=%d chunk=%d atlas_bytes=%d" % [
+            entries.size(), str(allocate_all_bricks), brick_grid, chunk_size, _atlas_bytes
+        ])
 
 func _load_voxel_entries(grid_extent: int) -> Array:
     if voxel_data_path.is_empty():

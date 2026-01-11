@@ -1,4 +1,5 @@
 extends Control
+@export var diag_enabled: bool = false
 
 @export var voxel_renderer_path: NodePath
 
@@ -36,14 +37,30 @@ func _ready() -> void:
     _apply_gravity()
     _apply_world_rotation()
     _update_labels()
+    _diag("ready world_rot_deg=(%.0f, %.0f, %.0f)" % [
+        _world_pitch_slider.value,
+        _world_yaw_slider.value,
+        _world_roll_slider.value
+    ])
 
 func _on_gravity_changed(_value: float) -> void:
     _apply_gravity()
     _update_labels()
+    _diag("gravity yaw=%.1f pitch=%.1f dir=%s" % [
+        _gravity_yaw_slider.value,
+        _gravity_pitch_slider.value,
+        str(_renderer.gravity_dir) if _renderer else "null"
+    ])
 
 func _on_world_changed(_value: float) -> void:
     _apply_world_rotation()
     _update_labels()
+    _diag("world yaw=%.1f pitch=%.1f roll=%.1f rot=%s" % [
+        _world_yaw_slider.value,
+        _world_pitch_slider.value,
+        _world_roll_slider.value,
+        str(_renderer.world_rotation) if _renderer else "null"
+    ])
 
 func _on_reset_pressed() -> void:
     _gravity_yaw_slider.value = 0.0
@@ -54,6 +71,7 @@ func _on_reset_pressed() -> void:
     _apply_gravity()
     _apply_world_rotation()
     _update_labels()
+    _diag("reset sliders to zero")
 
 func _apply_gravity() -> void:
     var yaw := deg_to_rad(_gravity_yaw_slider.value)
@@ -74,3 +92,8 @@ func _update_labels() -> void:
     _world_yaw_value.text = "%.0f" % _world_yaw_slider.value
     _world_pitch_value.text = "%.0f" % _world_pitch_slider.value
     _world_roll_value.text = "%.0f" % _world_roll_slider.value
+
+func _diag(msg: String) -> void:
+    if !diag_enabled:
+        return
+    print("SceneControls diag | %s" % msg)
