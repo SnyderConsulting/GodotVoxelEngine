@@ -12,7 +12,7 @@ TumblerTest and HourglassTest both use the same core components:
 
 - OrbitRig (Node3D + `OrbitCamera.gd`) to drive the camera.
 - Camera3D with a RaymarchQuad (QuadMesh + `compute_display.gdshader`).
-- VoxelRenderer node (`VoxelRenderer.gd`) that owns the GPU buffers.
+- VoxelRenderer node (engine module class) that owns the GPU buffers.
 - A scene controller script that fills voxel data on startup.
 - HUD CanvasLayer with:
   - InfoLabel (overlay text).
