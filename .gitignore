@@ -4,10 +4,10 @@ dist/
 Thumbs.db
 *.log
 *.import
-godot/engine-bin/
-godot/engine-src/bin/
-godot/engine-src/.scons_env.json
-godot/engine-src/.sconsign.dblite
-godot/project/.godot/
-godot/project/.import/
+engine-bin/
+engine-src/bin/
+engine-src/.scons_env.json
+engine-src/.sconsign.dblite
+project/.godot/
+project/.import/
 logs/

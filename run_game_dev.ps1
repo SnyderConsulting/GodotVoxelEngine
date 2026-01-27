@@ -1,5 +1,5 @@
 param(
-  [string]$ProjectPath = (Join-Path $PSScriptRoot "project"),
+  [string]$ProjectPath = (Join-Path $PSScriptRoot "."),
   [switch]$Wait,
   [switch]$Detached
 )

@@ -1,5 +1,5 @@
 param(
-  [string]$ProjectPath = (Join-Path $PSScriptRoot "project"),
+  [string]$ProjectPath = (Join-Path $PSScriptRoot "."),
   [string]$Scene = "res://scenes/ProtoHub.tscn",
   [string]$AutomationHost = "127.0.0.1",
   [int]$AutomationPort = 24680,
