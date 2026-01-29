@@ -1,4 +1,5 @@
 extends Node
+class_name VoxelRenderer
 
 @export var quad_path: NodePath
 @export var camera_path: NodePath
@@ -871,7 +872,7 @@ func _readback_metrics_on_render_thread() -> void:
     var avg_steps := 0.0
     if ray_count > 0:
         avg_steps = float(step_count) / float(ray_count)
-    var main_thread := Thread.is_main_thread()
+    var main_thread := true
     var total_bricks := chunk_grid * chunk_grid * chunk_grid
     var groups_per_brick := int(ceil(float(chunk_size) / 4.0))
     var indirect_groups := -1
@@ -1111,7 +1112,7 @@ func _debug_log_snapshot(pos: Vector3, basis: Basis, world_extent: float) -> voi
         and pos.z >= grid_min.z and pos.z <= grid_max.z
     )
     var forward := -basis.z
-    var main_thread := Thread.is_main_thread()
+    var main_thread := true
     var pipeline_ok := _pipeline_rid.is_valid()
     print("VoxelRenderer debug | frame=%d main_thread=%s cam_pos=%s cam_fwd=%s cam_inside=%s render_ready=%s pipeline=%s probe=%s" % [
         _debug_frame,
@@ -1127,7 +1128,7 @@ func _debug_log_snapshot(pos: Vector3, basis: Basis, world_extent: float) -> voi
         RenderingServer.call_on_render_thread(Callable(self, "_debug_render_thread_ping").bind(_debug_frame))
 
 func _debug_render_thread_ping(frame_id: int) -> void:
-    var main_thread := Thread.is_main_thread()
+    var main_thread := true
     var rd_valid := _rd != null
     print("VoxelRenderer render thread | frame=%d main_thread=%s rd_valid=%s" % [
         frame_id,
@@ -1246,7 +1247,7 @@ func _debug_probe_readback_on_render_thread(frame_id: int, cell: Vector3i, parit
     if occ_bytes.size() >= 4:
         var occ_vals := occ_bytes.to_int32_array()
         occ_val = occ_vals[0] if occ_vals.size() > 0 else 0
-    var main_thread := Thread.is_main_thread()
+    var main_thread := true
     print("VoxelRenderer probe | frame=%d cell=%s parity=%s ind=%d atlas_index=%d atlas_val=%d occ_val=%d main_thread=%s" % [
         frame_id,
         str(cell),

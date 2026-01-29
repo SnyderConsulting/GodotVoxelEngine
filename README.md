@@ -53,6 +53,30 @@ This project is a clean restart focused on a single GPU-resident voxel volume re
 - After each `scons` build, copy the template_debug binaries from `godot/engine-src/bin/` into `godot/engine-bin/` with the expected names (`Godot_v4.5.1-automation-dev_win64{.console}.exe`).
 - See `docs/build-and-launch.md` for the exact build command, copy steps, and launch options.
 
+### macOS quick start (stock Godot)
+
+If you have Godot 4.x installed (CLI `godot` on PATH), you can run the project directly:
+
+```bash
+godot --path godot/project
+```
+
+Open the editor:
+
+```bash
+godot --path godot/project --editor
+```
+
+Run a specific scene (helpful for bypassing the hub):
+
+```bash
+godot --path godot/project res://scenes/TumblerTest.tscn
+```
+
+Notes:
+- The PowerShell automation scripts and `engine-bin` binaries are Windows-only. On macOS, use the stock Godot editor/runner unless you build a custom engine locally.
+- Compute shaders run through Godot’s `RenderingDevice` and are translated to Metal via MoltenVK on macOS.
+
 Launch the custom editor and open the project:
 
 ```powershell

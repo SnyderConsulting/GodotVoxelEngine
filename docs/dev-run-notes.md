@@ -1,5 +1,7 @@
 # Dev Run Notes (Codex CLI + Windows)
 
+This document covers the Windows-specific launch scripts. On macOS, use `godot --path godot/project` (see `docs/build-and-launch.md`).
+
 ## Summary
 - Godot started from Codex CLI can exit as soon as the tool finishes, even if the window was visible.
 - This is caused by the Codex CLI job/process teardown (PowerShell + job objects) killing child processes when the parent session ends.

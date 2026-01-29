@@ -1,6 +1,7 @@
-[gd_scene load_steps=6 format=3]
+[gd_scene load_steps=7 format=3]
 
 [ext_resource type="Script" path="res://scripts/OrbitCamera.gd" id="1"]
+[ext_resource type="Script" path="res://scripts/VoxelRenderer.gd" id="2"]
 [ext_resource type="Shader" path="res://shaders/compute_display.gdshader" id="3"]
 [ext_resource type="Script" path="res://scripts/GlassSandTemplateController.gd" id="4"]
 [ext_resource type="Script" path="res://scripts/SceneControls.gd" id="5"]
@@ -28,7 +29,8 @@ scale = Vector3(2, 2, 2)
 mesh = SubResource("1")
 material_override = SubResource("2")
 
-[node name="VoxelRenderer" type="VoxelRenderer" parent="."]
+[node name="VoxelRenderer" type="Node" parent="."]
+script = ExtResource("2")
 quad_path = NodePath("../OrbitRig/Camera3D/RaymarchQuad")
 camera_path = NodePath("../OrbitRig/Camera3D")
 chunk_size = 8

@@ -2,6 +2,30 @@
 
 Centralized steps to rebuild the engine, stage binaries, and launch the app/automation without losing required sources.
 
+## macOS quick start (stock Godot)
+
+If you have Godot 4.x installed, you can run the project directly without the custom engine:
+
+```
+godot --path godot/project
+```
+
+Open the editor:
+
+```
+godot --path godot/project --editor
+```
+
+Run a specific scene (useful for direct testing):
+
+```
+godot --path godot/project res://scenes/TumblerTest.tscn
+```
+
+Notes:
+- The PowerShell launchers and `engine-bin` binaries are Windows-only.
+- On macOS, compute shaders run via Godot’s RenderingDevice and are translated to Metal through MoltenVK.
+
 ## Engine build
 - Workdir: `godot/engine-src`
 - Required module: `modules/voxels/` must exist (tracked source of truth lives here, not in project scripts).
