@@ -1,5 +1,4 @@
 extends Node
-class_name VoxelRenderer
 
 @export var quad_path: NodePath
 @export var camera_path: NodePath
