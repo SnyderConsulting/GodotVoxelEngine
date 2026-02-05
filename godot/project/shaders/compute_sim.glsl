@@ -42,6 +42,7 @@ layout(set = 0, binding = 6, std430) buffer SeedOut {
 
 const uint GLASS_MATERIAL = 8u;
 const uint INVISIBLE_MATERIAL = 9u;
+const uint WATER_MATERIAL = 2u;
 
 uint idx_brick(ivec3 b) {
     return uint(b.x) + uint(b.y) * uint(u.brick_info.x)
@@ -123,6 +124,7 @@ void main() {
     if (material == 0u) {
         return;
     }
+    bool is_water = material == WATER_MATERIAL;
     uint seed = seed_in.data[self_idx];
     if (material == GLASS_MATERIAL || material == INVISIBLE_MATERIAL) {
         if (atomicCompSwap(atlas_out.data[self_idx], 0u, material) == 0u) {
@@ -161,8 +163,14 @@ void main() {
     for (int i = 0; i < NEIGHBOR_COUNT; i++) {
         ivec3 offset = offsets[i];
         float score = dot(vec3(offset), gravity);
-        if (score <= 0.0) {
-            continue;
+        if (is_water) {
+            if (score < 0.0) {
+                continue;
+            }
+        } else {
+            if (score <= 0.0) {
+                continue;
+            }
         }
         ivec3 target = cell + offset;
         if (!in_bounds(target)) {
