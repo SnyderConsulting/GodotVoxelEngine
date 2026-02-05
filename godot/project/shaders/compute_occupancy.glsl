@@ -60,8 +60,34 @@ void main() {
             break;
         }
     }
-    occ.data[brick_index] = any;
     if (any != 0u) {
+        occ.data[brick_index] = 1u;
         atomicAdd(metrics.data[3], 1u);
+        // Mark neighboring bricks as active so agents can move into empty space.
+        ivec3 b = ivec3(
+            int(brick_index % uint(u.brick_info.x)),
+            int((brick_index / uint(u.brick_info.x)) % uint(u.brick_info.y)),
+            int(brick_index / (uint(u.brick_info.x) * uint(u.brick_info.y)))
+        );
+        for (int dz = -1; dz <= 1; dz++) {
+            for (int dy = -1; dy <= 1; dy++) {
+                for (int dx = -1; dx <= 1; dx++) {
+                    if (dx == 0 && dy == 0 && dz == 0) {
+                        continue;
+                    }
+                    ivec3 nb = b + ivec3(dx, dy, dz);
+                    if (nb.x < 0 || nb.y < 0 || nb.z < 0
+                        || nb.x >= int(u.brick_info.x)
+                        || nb.y >= int(u.brick_info.y)
+                        || nb.z >= int(u.brick_info.z)) {
+                        continue;
+                    }
+                    uint n_index = idx_brick(nb);
+                    occ.data[n_index] = 1u;
+                }
+            }
+        }
+    } else {
+        occ.data[brick_index] = 0u;
     }
 }

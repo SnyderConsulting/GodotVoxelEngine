@@ -804,7 +804,7 @@ func _process(_delta: float) -> void:
         float(width), float(height), tan_half_fov, aspect,
         voxel_size, effective_max_distance, 0.8, 0.25,
         brick_grid, brick_grid, brick_grid, float(chunk_size),
-        gravity.x, gravity.y, gravity.z, 0.0,
+        gravity.x, gravity.y, gravity.z, float(_sim_frame % 4),
         world_basis.x.x, world_basis.x.y, world_basis.x.z, 0.0,
         world_basis.y.x, world_basis.y.y, world_basis.y.z, 0.0,
         world_basis.z.x, world_basis.z.y, world_basis.z.z, 0.0
@@ -1245,12 +1245,13 @@ func _load_voxel_entries(grid_extent: int) -> Array:
 
 func _load_material_props() -> PackedByteArray:
     # Each material uses 8 floats:
-    # [density, friction, viscosity, cohesion, drag, rest_cost, lateral_cost, gravity_bias]
+    # [mass, friction, cohesion, resistance, drag, support_bonus, lateral_bias, gravity_bias]
     var defaults := {
-        1: {"density": 1.6, "friction": 0.6, "viscosity": 0.2, "cohesion": 0.2, "drag": 0.3, "rest_cost": 0.35, "lateral_cost": 0.6, "gravity_bias": 1.4},
-        2: {"density": 1.0, "friction": 0.1, "viscosity": 0.4, "cohesion": 0.05, "drag": 0.2, "rest_cost": 0.2, "lateral_cost": 0.35, "gravity_bias": 0.9},
-        8: {"density": 2.5, "friction": 1.0, "viscosity": 1.0, "cohesion": 1.0, "drag": 1.0, "rest_cost": 10.0, "lateral_cost": 10.0, "gravity_bias": 0.0},
-        9: {"density": 2.5, "friction": 1.0, "viscosity": 1.0, "cohesion": 1.0, "drag": 1.0, "rest_cost": 10.0, "lateral_cost": 10.0, "gravity_bias": 0.0}
+        1: {"mass": 1.6, "friction": 0.7, "cohesion": 0.4, "resistance": 0.6, "drag": 0.35, "support_bonus": 0.25, "lateral_bias": -0.15, "gravity_bias": 1.2},
+        2: {"mass": 1.0, "friction": 0.05, "cohesion": 0.1, "resistance": 0.1, "drag": 0.15, "support_bonus": 0.15, "lateral_bias": 0.2, "gravity_bias": 1.0},
+        3: {"mass": 0.05, "friction": 0.0, "cohesion": 0.0, "resistance": 0.0, "drag": 0.01, "support_bonus": 0.0, "lateral_bias": 0.0, "gravity_bias": 0.0},
+        8: {"mass": 3.0, "friction": 10.0, "cohesion": 2.0, "resistance": 10.0, "drag": 2.0, "support_bonus": 0.0, "lateral_bias": -1.0, "gravity_bias": 0.0},
+        9: {"mass": 3.0, "friction": 10.0, "cohesion": 2.0, "resistance": 10.0, "drag": 2.0, "support_bonus": 0.0, "lateral_bias": -1.0, "gravity_bias": 0.0}
     }
     var materials: Dictionary = {}
     var max_id := 9
@@ -1281,13 +1282,13 @@ func _load_material_props() -> PackedByteArray:
         var src: Dictionary = materials.get(i, defaults.get(i, {}))
         if typeof(src) != TYPE_DICTIONARY:
             src = {}
-        floats[i * 8 + 0] = float(src.get("density", 0.0))
+        floats[i * 8 + 0] = float(src.get("mass", 0.0))
         floats[i * 8 + 1] = float(src.get("friction", 0.0))
-        floats[i * 8 + 2] = float(src.get("viscosity", 0.0))
-        floats[i * 8 + 3] = float(src.get("cohesion", 0.0))
+        floats[i * 8 + 2] = float(src.get("cohesion", 0.0))
+        floats[i * 8 + 3] = float(src.get("resistance", 0.0))
         floats[i * 8 + 4] = float(src.get("drag", 0.0))
-        floats[i * 8 + 5] = float(src.get("rest_cost", 0.0))
-        floats[i * 8 + 6] = float(src.get("lateral_cost", 0.0))
+        floats[i * 8 + 5] = float(src.get("support_bonus", 0.0))
+        floats[i * 8 + 6] = float(src.get("lateral_bias", 0.0))
         floats[i * 8 + 7] = float(src.get("gravity_bias", 1.0))
     return floats.to_byte_array()
 
@@ -1726,6 +1727,111 @@ func debug_scan_for_material(mat_id: int, max_checks: int = 200000) -> void:
                     print("VoxelRenderer scan_mat | hit cell=%s atlas_val=%d" % [str(Vector3i(x, y, z)), atlas_val])
                     return
     print("VoxelRenderer scan_mat | no hits for mat=%d" % mat_id)
+
+func debug_material_column_metrics(mat_id: int) -> void:
+    if _rd == null or !_atlas_a_rid.is_valid() or _indirection_cpu.size() == 0:
+        print("VoxelRenderer columns | rd/indirection unavailable")
+        return
+    var atlas_rid := _atlas_a_rid if _atlas_use_a else _atlas_b_rid
+    if !atlas_rid.is_valid():
+        print("VoxelRenderer columns | atlas rid invalid")
+        return
+    var atlas_bytes := _rd.buffer_get_data(atlas_rid)
+    var atlas_vals := atlas_bytes.to_int32_array()
+    var grid_extent: int = chunk_grid * chunk_size
+    var min_h := 1e9
+    var max_h := -1e9
+    var sum_h := 0.0
+    var count := 0
+    for z in range(grid_extent):
+        for x in range(grid_extent):
+            var h := -1
+            for y in range(grid_extent - 1, -1, -1):
+                if !((x & 1) == (y & 1) and (y & 1) == (z & 1)):
+                    continue
+                var idx := _atlas_index_for_cell(Vector3i(x, y, z))
+                if idx <= 0 or idx >= atlas_vals.size():
+                    continue
+                if atlas_vals[idx] == mat_id:
+                    h = y
+                    break
+            if h >= 0:
+                min_h = min(min_h, h)
+                max_h = max(max_h, h)
+                sum_h += h
+                count += 1
+    if count == 0:
+        print("VoxelRenderer columns | mat=%d no columns" % mat_id)
+        return
+    var avg_h := sum_h / float(count)
+    var variance := 0.0
+    for z in range(grid_extent):
+        for x in range(grid_extent):
+            var h := -1
+            for y in range(grid_extent - 1, -1, -1):
+                if !((x & 1) == (y & 1) and (y & 1) == (z & 1)):
+                    continue
+                var idx := _atlas_index_for_cell(Vector3i(x, y, z))
+                if idx <= 0 or idx >= atlas_vals.size():
+                    continue
+                if atlas_vals[idx] == mat_id:
+                    h = y
+                    break
+            if h >= 0:
+                var d := float(h) - avg_h
+                variance += d * d
+    variance /= float(count)
+    print("VoxelRenderer columns | mat=%d columns=%d min=%d max=%d avg=%.2f var=%.2f" % [
+        mat_id, count, int(min_h), int(max_h), avg_h, variance
+    ])
+
+func debug_water_depth_metrics(water_id: int) -> void:
+    if _rd == null or !_atlas_a_rid.is_valid() or _indirection_cpu.size() == 0:
+        print("VoxelRenderer depth | rd/indirection unavailable")
+        return
+    var atlas_rid := _atlas_a_rid if _atlas_use_a else _atlas_b_rid
+    if !atlas_rid.is_valid():
+        print("VoxelRenderer depth | atlas rid invalid")
+        return
+    var atlas_bytes := _rd.buffer_get_data(atlas_rid)
+    var atlas_vals := atlas_bytes.to_int32_array()
+    var grid_extent: int = chunk_grid * chunk_size
+    var min_d := 1e9
+    var max_d := -1e9
+    var sum_d := 0.0
+    var count := 0
+    for z in range(grid_extent):
+        for x in range(grid_extent):
+            var water_y := -1
+            var base_y := -1
+            for y in range(grid_extent - 1, -1, -1):
+                if !((x & 1) == (y & 1) and (y & 1) == (z & 1)):
+                    continue
+                var idx := _atlas_index_for_cell(Vector3i(x, y, z))
+                if idx <= 0 or idx >= atlas_vals.size():
+                    continue
+                var val := atlas_vals[idx]
+                if water_y < 0:
+                    if val == water_id:
+                        water_y = y
+                    continue
+                if val != 0 and val != water_id:
+                    base_y = y
+                    break
+            if water_y >= 0:
+                var depth := water_y - base_y
+                min_d = min(min_d, depth)
+                max_d = max(max_d, depth)
+                sum_d += depth
+                count += 1
+    if count == 0:
+        print("VoxelRenderer depth | water=%d no columns" % water_id)
+        return
+    var avg_d := sum_d / float(count)
+    print("VoxelRenderer depth | water=%d columns=%d min=%d max=%d avg=%.2f" % [
+        water_id, count, int(min_d), int(max_d), avg_d
+    ])
+
 
 func _create_display_texture() -> Texture2D:
     if _use_global_rd and ClassDB.class_exists("Texture2DRD"):
