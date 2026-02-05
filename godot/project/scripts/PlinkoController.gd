@@ -6,6 +6,7 @@ extends Node
 @export var sand_material_id: int = 1
 @export var glass_material_id: int = 8
 @export var invisible_material_id: int = 9
+@export var hub_scene: String = "res://scenes/ProtoHub.tscn"
 @export var floor_thickness: int = 2
 @export var board_margin: int = 4
 @export var board_thickness: int = 2
@@ -32,7 +33,7 @@ func _ready() -> void:
         return
     _overlay = get_node_or_null(overlay_path)
     if _overlay:
-        _overlay.text = "Plinko Board\nSpawned: 0"
+        _overlay.text = "Plinko Board\nSpawned: 0\nEsc: hub"
     _spawn_button = get_node_or_null(spawn_button_path)
     if _spawn_button:
         _spawn_button.pressed.connect(_on_spawn_pressed)
@@ -67,6 +68,11 @@ func _late_init() -> void:
     _schedule_scan(1.0)
     _schedule_scan(2.0)
     _schedule_scan(4.0)
+
+func _process(_delta: float) -> void:
+    if Input.is_action_just_pressed("ui_cancel"):
+        get_tree().change_scene_to_file(hub_scene)
+        return
 
 func _on_spawn_pressed() -> void:
     _spawn_sand()

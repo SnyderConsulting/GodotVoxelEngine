@@ -13,6 +13,7 @@ extends Node
 @export var fill_mode: int = 0
 @export var noise_threshold: float = 0.55
 @export var voxel_data_path: String = "res://data/voxels.json"
+@export var material_data_path: String = "res://data/materials.json"
 @export var gravity_dir: Vector3 = Vector3(0, -1, 0)
 @export var world_rotation: Vector3 = Vector3.ZERO
 @export var light_enabled: bool = true
@@ -62,6 +63,7 @@ var _metrics_rid: RID
 var _active_list_rid: RID
 var _active_count_rid: RID
 var _sim_dispatch_rid: RID
+var _material_props_rid: RID
 var _preview_cells: Array = []
 var _cursor_cell := Vector3i(-1, -1, -1)
 var _preview_occ_bricks: PackedInt32Array = PackedInt32Array()
@@ -85,6 +87,7 @@ var _atlas_bytes := 0
 var _active_list_bytes := 0
 var _active_count_bytes := 0
 var _sim_dispatch_bytes := 0
+var _material_props_bytes := 0
 var _display_texture: Texture2D
 var _display_material: ShaderMaterial
 var _camera: Camera3D
@@ -362,6 +365,16 @@ func _init_render_resources() -> void:
     )
     if !_sim_dispatch_rid.is_valid():
         push_error("Failed to create sim dispatch buffer.")
+        return
+    _material_props_bytes = 0
+    var material_bytes := _load_material_props()
+    if material_bytes.size() == 0:
+        push_error("Failed to load material properties.")
+        return
+    _material_props_bytes = material_bytes.size()
+    _material_props_rid = _rd.storage_buffer_create(_material_props_bytes, material_bytes)
+    if !_material_props_rid.is_valid():
+        push_error("Failed to create material properties buffer.")
         return
 
     if diag_enabled and diag_log_buffers:
@@ -681,6 +694,10 @@ func _init_render_resources() -> void:
         sim_seed_out_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
         sim_seed_out_b.binding = 6
         sim_seed_out_b.add_id(_seed_b_rid)
+        var sim_material_uniform := RDUniform.new()
+        sim_material_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        sim_material_uniform.binding = 7
+        sim_material_uniform.add_id(_material_props_rid)
 
         _sim_uniform_set_ab = _rd.uniform_set_create(
             [
@@ -690,7 +707,8 @@ func _init_render_resources() -> void:
                 sim_out_b,
                 sim_active_list_uniform,
                 sim_seed_in_a,
-                sim_seed_out_b
+                sim_seed_out_b,
+                sim_material_uniform
             ],
             _sim_shader_rid,
             0
@@ -714,6 +732,10 @@ func _init_render_resources() -> void:
         sim_seed_out_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
         sim_seed_out_a.binding = 6
         sim_seed_out_a.add_id(_seed_a_rid)
+        var sim_material_uniform_ba := RDUniform.new()
+        sim_material_uniform_ba.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        sim_material_uniform_ba.binding = 7
+        sim_material_uniform_ba.add_id(_material_props_rid)
 
         _sim_uniform_set_ba = _rd.uniform_set_create(
             [
@@ -723,7 +745,8 @@ func _init_render_resources() -> void:
                 sim_out_a,
                 sim_active_list_uniform,
                 sim_seed_in_b,
-                sim_seed_out_a
+                sim_seed_out_a,
+                sim_material_uniform_ba
             ],
             _sim_shader_rid,
             0
@@ -1219,6 +1242,54 @@ func _load_voxel_entries(grid_extent: int) -> Array:
             "material": mat_id
         })
     return entries
+
+func _load_material_props() -> PackedByteArray:
+    # Each material uses 8 floats:
+    # [density, friction, viscosity, cohesion, drag, rest_cost, lateral_cost, gravity_bias]
+    var defaults := {
+        1: {"density": 1.6, "friction": 0.6, "viscosity": 0.2, "cohesion": 0.2, "drag": 0.3, "rest_cost": 0.35, "lateral_cost": 0.6, "gravity_bias": 1.4},
+        2: {"density": 1.0, "friction": 0.1, "viscosity": 0.4, "cohesion": 0.05, "drag": 0.2, "rest_cost": 0.2, "lateral_cost": 0.35, "gravity_bias": 0.9},
+        8: {"density": 2.5, "friction": 1.0, "viscosity": 1.0, "cohesion": 1.0, "drag": 1.0, "rest_cost": 10.0, "lateral_cost": 10.0, "gravity_bias": 0.0},
+        9: {"density": 2.5, "friction": 1.0, "viscosity": 1.0, "cohesion": 1.0, "drag": 1.0, "rest_cost": 10.0, "lateral_cost": 10.0, "gravity_bias": 0.0}
+    }
+    var materials: Dictionary = {}
+    var max_id := 9
+    if !material_data_path.is_empty() and FileAccess.file_exists(material_data_path):
+        var text := FileAccess.get_file_as_string(material_data_path)
+        if !text.is_empty():
+            var parsed: Variant = JSON.parse_string(text)
+            if typeof(parsed) == TYPE_DICTIONARY:
+                var parsed_dict: Dictionary = parsed
+                var arr: Array = parsed_dict.get("materials", [])
+                if typeof(arr) == TYPE_ARRAY:
+                    for item in arr:
+                        if typeof(item) != TYPE_DICTIONARY:
+                            continue
+                        var id := int(item.get("id", -1))
+                        if id < 0:
+                            continue
+                        materials[id] = item
+                        if id > max_id:
+                            max_id = id
+    for id in defaults.keys():
+        if id > max_id:
+            max_id = id
+    var count := max_id + 1
+    var floats := PackedFloat32Array()
+    floats.resize(count * 8)
+    for i in range(count):
+        var src: Dictionary = materials.get(i, defaults.get(i, {}))
+        if typeof(src) != TYPE_DICTIONARY:
+            src = {}
+        floats[i * 8 + 0] = float(src.get("density", 0.0))
+        floats[i * 8 + 1] = float(src.get("friction", 0.0))
+        floats[i * 8 + 2] = float(src.get("viscosity", 0.0))
+        floats[i * 8 + 3] = float(src.get("cohesion", 0.0))
+        floats[i * 8 + 4] = float(src.get("drag", 0.0))
+        floats[i * 8 + 5] = float(src.get("rest_cost", 0.0))
+        floats[i * 8 + 6] = float(src.get("lateral_cost", 0.0))
+        floats[i * 8 + 7] = float(src.get("gravity_bias", 1.0))
+    return floats.to_byte_array()
 
 func _debug_log_snapshot(pos: Vector3, basis: Basis, world_extent: float) -> void:
     if !debug_logging:
@@ -1733,6 +1804,8 @@ func _exit_tree() -> void:
         _rd.free_rid(_active_count_rid)
     if _sim_dispatch_rid.is_valid():
         _rd.free_rid(_sim_dispatch_rid)
+    if _material_props_rid.is_valid():
+        _rd.free_rid(_material_props_rid)
     if _pipeline_rid.is_valid():
         _rd.free_rid(_pipeline_rid)
     if _shader_rid.is_valid():

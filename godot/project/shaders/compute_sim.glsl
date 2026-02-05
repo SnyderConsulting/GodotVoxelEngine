@@ -39,6 +39,9 @@ layout(set = 0, binding = 5, std430) readonly buffer SeedIn {
 layout(set = 0, binding = 6, std430) buffer SeedOut {
     uint data[];
 } seed_out;
+layout(set = 0, binding = 7, std430) readonly buffer MaterialProps {
+    vec4 data[];
+} material_props;
 
 const uint GLASS_MATERIAL = 8u;
 const uint INVISIBLE_MATERIAL = 9u;
@@ -139,8 +142,18 @@ void main() {
     }
     gravity = normalize(gravity);
 
+    uint mat_index = material * 2u;
+    vec4 props0 = material_props.data[mat_index + 0u];
+    vec4 props1 = material_props.data[mat_index + 1u];
+    float friction = props0.y;
+    float viscosity = props0.z;
+    float cohesion = props0.w;
+    float drag = props1.x;
+    float rest_cost = props1.y;
+    float lateral_cost = props1.z;
+    float gravity_bias = props1.w;
+
     const int NEIGHBOR_COUNT = 14;
-    const int CANDIDATE_MAX = 4;
     ivec3 offsets[NEIGHBOR_COUNT] = ivec3[NEIGHBOR_COUNT](
         ivec3(2, 0, 0),
         ivec3(-2, 0, 0),
@@ -157,18 +170,19 @@ void main() {
         ivec3(-1, -1, 1),
         ivec3(-1, -1, -1)
     );
-    ivec3 candidates[CANDIDATE_MAX];
-    float candidate_scores[CANDIDATE_MAX];
-    int candidate_count = 0;
+    float stay_cost = rest_cost + drag;
+    float best_cost = stay_cost;
+    ivec3 best_offset = ivec3(0);
+    bool can_move = false;
     for (int i = 0; i < NEIGHBOR_COUNT; i++) {
         ivec3 offset = offsets[i];
-        float score = dot(vec3(offset), gravity);
+        float down = dot(vec3(offset), gravity);
         if (is_water) {
-            if (score < 0.0) {
+            if (down < 0.0) {
                 continue;
             }
         } else {
-            if (score <= 0.0) {
+            if (down <= 0.0) {
                 continue;
             }
         }
@@ -186,46 +200,29 @@ void main() {
         if (atlas_in.data[t_idx] != 0u) {
             continue;
         }
-        int insert = candidate_count;
-        if (candidate_count < CANDIDATE_MAX) {
-            candidate_count++;
-        } else if (score <= candidate_scores[candidate_count - 1]) {
-            continue;
+        float move_len = length(vec3(offset));
+        float cost = friction + viscosity + cohesion + drag * move_len;
+        if (down > 0.0) {
+            cost -= down * gravity_bias;
         } else {
-            insert = candidate_count - 1;
+            cost += lateral_cost;
         }
-        while (insert > 0 && score > candidate_scores[insert - 1]) {
-            if (insert < CANDIDATE_MAX) {
-                candidate_scores[insert] = candidate_scores[insert - 1];
-                candidates[insert] = candidates[insert - 1];
-            }
-            insert--;
-        }
-        candidate_scores[insert] = score;
-        candidates[insert] = offset;
-    }
-
-    bool moved = false;
-    if (candidate_count > 0) {
-        uint h = hash_cell(cell, seed);
-        for (int i = 0; i < candidate_count; i++) {
-            int idx = int((uint(i) + h) % uint(candidate_count));
-            ivec3 target = cell + candidates[idx];
-            uint t_idx = atlas_index_for_cell(target);
-            if (t_idx == 0u) {
-                continue;
-            }
-            if (atomicCompSwap(atlas_out.data[t_idx], 0u, material) == 0u) {
-                seed_out.data[t_idx] = seed;
-                moved = true;
-                break;
-            }
+        if (cost + 1e-4 < best_cost) {
+            best_cost = cost;
+            best_offset = offset;
+            can_move = true;
         }
     }
 
-    if (!moved) {
-        if (atomicCompSwap(atlas_out.data[self_idx], 0u, material) == 0u) {
-            seed_out.data[self_idx] = seed;
+    if (can_move && best_cost < stay_cost) {
+        ivec3 target = cell + best_offset;
+        uint t_idx = atlas_index_for_cell(target);
+        if (t_idx != 0u && atomicCompSwap(atlas_out.data[t_idx], 0u, material) == 0u) {
+            seed_out.data[t_idx] = seed;
+            return;
         }
+    }
+    if (atomicCompSwap(atlas_out.data[self_idx], 0u, material) == 0u) {
+        seed_out.data[self_idx] = seed;
     }
 }

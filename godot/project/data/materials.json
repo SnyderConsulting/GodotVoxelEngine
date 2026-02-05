@@ -1,0 +1,52 @@
+{
+  "materials": [
+    {
+      "id": 1,
+      "name": "sand",
+      "density": 1.6,
+      "friction": 0.6,
+      "viscosity": 0.2,
+      "cohesion": 0.2,
+      "drag": 0.3,
+      "rest_cost": 0.35,
+      "lateral_cost": 0.6,
+      "gravity_bias": 1.4
+    },
+    {
+      "id": 2,
+      "name": "water",
+      "density": 1.0,
+      "friction": 0.1,
+      "viscosity": 0.4,
+      "cohesion": 0.05,
+      "drag": 0.2,
+      "rest_cost": 0.2,
+      "lateral_cost": 0.35,
+      "gravity_bias": 0.9
+    },
+    {
+      "id": 8,
+      "name": "glass",
+      "density": 2.5,
+      "friction": 1.0,
+      "viscosity": 1.0,
+      "cohesion": 1.0,
+      "drag": 1.0,
+      "rest_cost": 10.0,
+      "lateral_cost": 10.0,
+      "gravity_bias": 0.0
+    },
+    {
+      "id": 9,
+      "name": "invisible",
+      "density": 2.5,
+      "friction": 1.0,
+      "viscosity": 1.0,
+      "cohesion": 1.0,
+      "drag": 1.0,
+      "rest_cost": 10.0,
+      "lateral_cost": 10.0,
+      "gravity_bias": 0.0
+    }
+  ]
+}

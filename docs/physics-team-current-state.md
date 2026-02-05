@@ -62,15 +62,26 @@ The final shading mixes this light value into ambient + diffuse terms.
 
 ## 6) Simulation / Movement Rules
 
-Current movement is **cellular, per-voxel, GPU-based**, not rigid-body physics.
+Current movement is **cellular, per-voxel, GPU-based**, not rigid-body physics. The old randomized candidate selection has been replaced with **deterministic “least resistance” movement** based on per‑material properties.
 
 Key rules:
-- **Only non-glass voxels move.** Glass is fixed.
+- **Only non-glass voxels move.** Glass and invisible walls are fixed.
 - Each voxel checks 14 BCC neighbors (6 axial at distance 2 + 8 diagonals at distance 1).
-- Neighbors are scored by `dot(offset, gravity_dir)` and the top 4 candidates are kept.
-- A hash-based tie-breaker selects among candidates to reduce bias.
-- Movement uses atomic compare-and-swap to claim a target cell; otherwise the voxel stays.
-- No velocity, no inertia, and no multi-step collision response — this is a discrete “falling sand” model.
+- Each candidate move is assigned a **resistance cost** derived from material properties (friction, viscosity, cohesion, drag) plus a lateral penalty.
+- Movement chooses the **lowest cost** option (a zero‑temperature Markov choice). If no move is cheaper than staying, the voxel remains in place.
+- Water allows lateral moves when downward moves are not available, but lateral moves still carry a cost to prevent endless scattering.
+- Movement uses atomic compare‑and‑swap to claim a target cell; otherwise the voxel stays.
+- No velocity, no inertia, and no multi‑step collision response — this is a discrete “falling sand” model with material‑aware resistance.
+
+Material properties are defined in `godot/project/data/materials.json` and uploaded to the sim pass as a GPU buffer. Each material stores:
+- density
+- friction
+- viscosity
+- cohesion
+- drag
+- rest_cost (energy to stay)
+- lateral_cost (energy to move sideways)
+- gravity_bias (how strongly gravity reduces cost)
 
 **Gravity vs world rotation**  
 Gravity is defined independently of world rotation. The world rotation only rotates the rendered volume; gravity is transformed by the inverse world rotation before it is used in the simulation. This lets you rotate the world without changing the direction of gravity, or rotate gravity without rotating the world.
