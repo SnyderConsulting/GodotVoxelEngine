@@ -37,6 +37,7 @@ layout(set = 0, binding = 6, std430) readonly buffer Light {
 } light_buf;
 
 const uint GLASS_MATERIAL = 8u;
+const uint INVISIBLE_MATERIAL = 9u;
 
 float sdf_truncated_octahedron(vec3 p) {
     const float inv_sqrt3 = 0.57735026919;
@@ -327,6 +328,10 @@ void main() {
                 uint cell_occ = occ.data[idx_brick(cell_brick)];
                 if (cell_occ != 0u) {
                     uint cell_val = atlas.data[atlas_index_for_cell(cell)];
+                    if (cell_val == INVISIBLE_MATERIAL) {
+                        t_cell += empty_step;
+                        continue;
+                    }
                     if (cell_val != 0u) {
                         bool glass_cell = cell_val == GLASS_MATERIAL;
                         vec3 cell_center = u.origin.xyz + vec3(cell) * u.misc.x;
@@ -389,7 +394,7 @@ void main() {
                                             ivec3 s_brick = s_cell / brick_size;
                                             if (occ.data[idx_brick(s_brick)] != 0u) {
                                                 uint s_val = atlas.data[atlas_index_for_cell(s_cell)];
-                                                if (s_val != 0u && s_val != GLASS_MATERIAL) {
+                                                if (s_val != 0u && s_val != GLASS_MATERIAL && s_val != INVISIBLE_MATERIAL) {
                                                     vec3 s_center = u.origin.xyz + vec3(s_cell) * u.misc.x;
                                                     vec3 s_lp = (sp - s_center) / u.misc.x;
                                                     float sd = sdf_truncated_octahedron(s_lp) * u.misc.x;
@@ -420,7 +425,7 @@ void main() {
                                             ivec3 r_brick = r_cell / brick_size;
                                             if (occ.data[idx_brick(r_brick)] != 0u) {
                                                 uint r_val = atlas.data[atlas_index_for_cell(r_cell)];
-                                                if (r_val != 0u && r_val != GLASS_MATERIAL) {
+                                                if (r_val != 0u && r_val != GLASS_MATERIAL && r_val != INVISIBLE_MATERIAL) {
                                                     vec3 r_center = u.origin.xyz + vec3(r_cell) * u.misc.x;
                                                     vec3 r_lp = (rp - r_center) / u.misc.x;
                                                     float rdv = sdf_truncated_octahedron(r_lp) * u.misc.x;

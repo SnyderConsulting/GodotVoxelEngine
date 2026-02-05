@@ -33,8 +33,15 @@ layout(set = 0, binding = 3, std430) buffer AtlasOut {
 layout(set = 0, binding = 4, std430) readonly buffer ActiveList {
     uint data[];
 } active_list;
+layout(set = 0, binding = 5, std430) readonly buffer SeedIn {
+    uint data[];
+} seed_in;
+layout(set = 0, binding = 6, std430) buffer SeedOut {
+    uint data[];
+} seed_out;
 
 const uint GLASS_MATERIAL = 8u;
+const uint INVISIBLE_MATERIAL = 9u;
 
 uint idx_brick(ivec3 b) {
     return uint(b.x) + uint(b.y) * uint(u.brick_info.x)
@@ -67,8 +74,8 @@ uint atlas_index_for_cell(ivec3 cell) {
     return brick_index * uint(brick_size * brick_size * brick_size) + local_index;
 }
 
-uint hash_cell(ivec3 c) {
-    return uint(c.x * 73856093 ^ c.y * 19349663 ^ c.z * 83492791);
+uint hash_cell(ivec3 c, uint seed) {
+    return uint(c.x * 73856093 ^ c.y * 19349663 ^ c.z * 83492791) ^ seed;
 }
 
 ivec3 brick_from_index(uint brick_index) {
@@ -116,8 +123,11 @@ void main() {
     if (material == 0u) {
         return;
     }
-    if (material == GLASS_MATERIAL) {
-        atomicCompSwap(atlas_out.data[self_idx], 0u, material);
+    uint seed = seed_in.data[self_idx];
+    if (material == GLASS_MATERIAL || material == INVISIBLE_MATERIAL) {
+        if (atomicCompSwap(atlas_out.data[self_idx], 0u, material) == 0u) {
+            seed_out.data[self_idx] = 0u;
+        }
         return;
     }
 
@@ -189,7 +199,7 @@ void main() {
 
     bool moved = false;
     if (candidate_count > 0) {
-        uint h = hash_cell(cell);
+        uint h = hash_cell(cell, seed);
         for (int i = 0; i < candidate_count; i++) {
             int idx = int((uint(i) + h) % uint(candidate_count));
             ivec3 target = cell + candidates[idx];
@@ -198,6 +208,7 @@ void main() {
                 continue;
             }
             if (atomicCompSwap(atlas_out.data[t_idx], 0u, material) == 0u) {
+                seed_out.data[t_idx] = seed;
                 moved = true;
                 break;
             }
@@ -205,6 +216,8 @@ void main() {
     }
 
     if (!moved) {
-        atomicCompSwap(atlas_out.data[self_idx], 0u, material);
+        if (atomicCompSwap(atlas_out.data[self_idx], 0u, material) == 0u) {
+            seed_out.data[self_idx] = seed;
+        }
     }
 }

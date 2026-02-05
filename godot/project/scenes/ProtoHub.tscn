@@ -38,5 +38,8 @@ text = "Hourglass: Glass + Sand"
 [node name="TemplateButton" type="Button" parent="Margin/VBox"]
 text = "Template: Glass + Sand"
 
+[node name="PlinkoButton" type="Button" parent="Margin/VBox"]
+text = "Plinko: Glass + Sand"
+
 [node name="Hint" type="Label" parent="Margin/VBox"]
 text = "Tip: Run a scene directly to skip this menu."

@@ -50,6 +50,8 @@ var _ubo_rid: RID
 var _indirection_rid: RID
 var _atlas_a_rid: RID
 var _atlas_b_rid: RID
+var _seed_a_rid: RID
+var _seed_b_rid: RID
 var _light_a_rid: RID
 var _light_b_rid: RID
 var _occupancy_rid: RID
@@ -91,6 +93,7 @@ var _light_use_a := true
 var _light_frame := 0
 var _active_list_ready := false
 var _indirection_cpu: PackedInt32Array = PackedInt32Array()
+var _rng := RandomNumberGenerator.new()
 
 func _diag(msg: String) -> void:
     if !diag_enabled:
@@ -101,6 +104,7 @@ func _ready() -> void:
     _diag("ready start width=%d height=%d chunk_size=%d chunk_grid=%d lattice=%.3f" % [
         width, height, chunk_size, chunk_grid, lattice_spacing
     ])
+    _rng.seed = Time.get_ticks_usec()
     _rd = RenderingServer.get_rendering_device()
     _use_global_rd = _rd != null
     if _rd == null:
@@ -295,6 +299,14 @@ func _init_render_resources() -> void:
     if !_atlas_b_rid.is_valid():
         push_error("Failed to create atlas buffer B.")
         return
+    _seed_a_rid = _rd.storage_buffer_create(_atlas_bytes)
+    if !_seed_a_rid.is_valid():
+        push_error("Failed to create seed buffer A.")
+        return
+    _seed_b_rid = _rd.storage_buffer_create(_atlas_bytes)
+    if !_seed_b_rid.is_valid():
+        push_error("Failed to create seed buffer B.")
+        return
     _light_a_rid = _rd.storage_buffer_create(_atlas_bytes)
     if !_light_a_rid.is_valid():
         push_error("Failed to create light buffer A.")
@@ -342,6 +354,10 @@ func _init_render_resources() -> void:
         _rd.buffer_clear(_light_a_rid, 0, _atlas_bytes)
     if _light_b_rid.is_valid():
         _rd.buffer_clear(_light_b_rid, 0, _atlas_bytes)
+    if _seed_a_rid.is_valid():
+        _rd.buffer_clear(_seed_a_rid, 0, _atlas_bytes)
+    if _seed_b_rid.is_valid():
+        _rd.buffer_clear(_seed_b_rid, 0, _atlas_bytes)
 
     var img_uniform := RDUniform.new()
     img_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
@@ -620,9 +636,25 @@ func _init_render_resources() -> void:
         sim_active_list_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
         sim_active_list_uniform.binding = 4
         sim_active_list_uniform.add_id(_active_list_rid)
+        var sim_seed_in_a := RDUniform.new()
+        sim_seed_in_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        sim_seed_in_a.binding = 5
+        sim_seed_in_a.add_id(_seed_a_rid)
+        var sim_seed_out_b := RDUniform.new()
+        sim_seed_out_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        sim_seed_out_b.binding = 6
+        sim_seed_out_b.add_id(_seed_b_rid)
 
         _sim_uniform_set_ab = _rd.uniform_set_create(
-            [sim_ubo_uniform, sim_indirection_uniform, sim_in_a, sim_out_b, sim_active_list_uniform],
+            [
+                sim_ubo_uniform,
+                sim_indirection_uniform,
+                sim_in_a,
+                sim_out_b,
+                sim_active_list_uniform,
+                sim_seed_in_a,
+                sim_seed_out_b
+            ],
             _sim_shader_rid,
             0
         )
@@ -637,9 +669,25 @@ func _init_render_resources() -> void:
         sim_out_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER    
         sim_out_a.binding = 3
         sim_out_a.add_id(_atlas_a_rid)
+        var sim_seed_in_b := RDUniform.new()
+        sim_seed_in_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        sim_seed_in_b.binding = 5
+        sim_seed_in_b.add_id(_seed_b_rid)
+        var sim_seed_out_a := RDUniform.new()
+        sim_seed_out_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        sim_seed_out_a.binding = 6
+        sim_seed_out_a.add_id(_seed_a_rid)
 
         _sim_uniform_set_ba = _rd.uniform_set_create(
-            [sim_ubo_uniform, sim_indirection_uniform, sim_in_b, sim_out_a, sim_active_list_uniform],
+            [
+                sim_ubo_uniform,
+                sim_indirection_uniform,
+                sim_in_b,
+                sim_out_a,
+                sim_active_list_uniform,
+                sim_seed_in_b,
+                sim_seed_out_a
+            ],
             _sim_shader_rid,
             0
         )
@@ -704,11 +752,11 @@ func _process(_delta: float) -> void:
     var bytes := params.to_byte_array()
     _update_params(bytes)
     _debug_log_snapshot(pos, basis, world_extent)
-    _dispatch_sim(grid_extent_i)
     _reset_metrics()
     _dispatch_occupancy()
     _dispatch_active_list()
     _dispatch_active_dispatch()
+    _dispatch_sim(grid_extent_i)
     _dispatch_light(grid_extent_i)
     _dispatch_compute()
     _readback_metrics()
@@ -749,9 +797,14 @@ func _dispatch_sim(_grid_extent: int) -> void:
         return
     if !_active_list_ready:
         return
+    if diag_enabled and (_debug_frame % max(1, diag_every) == 0):
+        print("Sim dispatch | frame=%d atlas_in=%s" % [_debug_frame, "A" if use_a else "B"])
     var atlas_out := _atlas_b_rid if use_a else _atlas_a_rid
+    var seed_out := _seed_b_rid if use_a else _seed_a_rid
     if sim_clear_output and _atlas_bytes > 0:
         _rd.buffer_clear(atlas_out, 0, _atlas_bytes)
+        if seed_out.is_valid():
+            _rd.buffer_clear(seed_out, 0, _atlas_bytes)
     var list := _rd.compute_list_begin()
     _rd.compute_list_bind_compute_pipeline(list, _sim_pipeline_rid)
     _rd.compute_list_bind_uniform_set(list, uniform_set, 0)
@@ -924,6 +977,10 @@ func _upload_brickmap_data() -> void:
     atlas.resize(brick_count * chunk_size * chunk_size * chunk_size)
     for i in range(atlas.size()):
         atlas[i] = 0
+    var seeds := PackedInt32Array()
+    seeds.resize(atlas.size())
+    for i in range(seeds.size()):
+        seeds[i] = 0
 
     var grid_extent := brick_grid * chunk_size
     var center := Vector3((grid_extent - 1) * 0.5, (grid_extent - 1) * 0.5, (grid_extent - 1) * 0.5)
@@ -953,6 +1010,10 @@ func _upload_brickmap_data() -> void:
             var base_offset := brick_index * chunk_size * chunk_size * chunk_size
             var local_index := base_offset + lx + ly * chunk_size + lz * chunk_size * chunk_size
             atlas[local_index] = mat_id
+            var seed_val := int((gx * 73856093) ^ (gy * 19349663) ^ (gz * 83492791))
+            if seed_val == 0:
+                seed_val = 1
+            seeds[local_index] = seed_val
             occupancy[brick_index] = 1
             indirection[brick_index] = brick_index + 1
     else:
@@ -980,6 +1041,10 @@ func _upload_brickmap_data() -> void:
                                         continue
                                 var local_index := base_offset + lx + ly * chunk_size + lz * chunk_size * chunk_size
                                 atlas[local_index] = 1
+                                var seed_val := int((gx * 73856093) ^ (gy * 19349663) ^ (gz * 83492791))
+                                if seed_val == 0:
+                                    seed_val = 1
+                                seeds[local_index] = seed_val
                                 any = true
                     if any:
                         occupancy[brick_index] = 1
@@ -995,6 +1060,11 @@ func _upload_brickmap_data() -> void:
         _rd.buffer_update(_atlas_a_rid, 0, atlas_bytes.size(), atlas_bytes)
     if _atlas_b_rid.is_valid():
         _rd.buffer_update(_atlas_b_rid, 0, atlas_bytes.size(), atlas_bytes)
+    var seed_bytes := seeds.to_byte_array()
+    if _seed_a_rid.is_valid():
+        _rd.buffer_update(_seed_a_rid, 0, seed_bytes.size(), seed_bytes)
+    if _seed_b_rid.is_valid():
+        _rd.buffer_update(_seed_b_rid, 0, seed_bytes.size(), seed_bytes)
     _atlas_use_a = true
     var occ_bytes := occupancy.to_byte_array()
     _rd.buffer_update(_occupancy_rid, 0, occ_bytes.size(), occ_bytes)
@@ -1017,6 +1087,10 @@ func set_voxel_entries(entries: Array, allocate_all_bricks: bool = false) -> voi
     atlas.resize(brick_count * chunk_size * chunk_size * chunk_size)
     for i in range(atlas.size()):
         atlas[i] = 0
+    var seeds := PackedInt32Array()
+    seeds.resize(atlas.size())
+    for i in range(seeds.size()):
+        seeds[i] = 0
 
     var grid_extent := brick_grid * chunk_size
     for entry in entries:
@@ -1027,6 +1101,8 @@ func set_voxel_entries(entries: Array, allocate_all_bricks: bool = false) -> voi
         var gx := int(pos.x)
         var gy := int(pos.y)
         var gz := int(pos.z)
+        if mat_id == 1:
+            print("VoxelRenderer entries | sand pos=%s" % str(Vector3i(gx, gy, gz)))
         if gx < 0 or gy < 0 or gz < 0 or gx >= grid_extent or gy >= grid_extent or gz >= grid_extent:
             continue
         if !((gx & 1) == (gy & 1) and (gy & 1) == (gz & 1)):
@@ -1041,7 +1117,14 @@ func set_voxel_entries(entries: Array, allocate_all_bricks: bool = false) -> voi
         var base_offset := brick_index * chunk_size * chunk_size * chunk_size
         var local_index := base_offset + lx + ly * chunk_size + lz * chunk_size * chunk_size
         atlas[local_index] = mat_id
+        if mat_id > 0:
+            var seed_val := int(_rng.randi())
+            if seed_val == 0:
+                seed_val = 1
+            seeds[local_index] = seed_val
         occupancy[brick_index] = 1
+        if mat_id == 1:
+            print("VoxelRenderer entries | wrote sand local_index=%d atlas_val=%d" % [local_index, atlas[local_index]])
         if !allocate_all_bricks:
             indirection[brick_index] = brick_index + 1
 
@@ -1053,6 +1136,11 @@ func set_voxel_entries(entries: Array, allocate_all_bricks: bool = false) -> voi
         _rd.buffer_update(_atlas_a_rid, 0, atlas_bytes.size(), atlas_bytes)
     if _atlas_b_rid.is_valid():
         _rd.buffer_update(_atlas_b_rid, 0, atlas_bytes.size(), atlas_bytes)
+    var seed_bytes: PackedByteArray = seeds.to_byte_array()
+    if _seed_a_rid.is_valid():
+        _rd.buffer_update(_seed_a_rid, 0, seed_bytes.size(), seed_bytes)
+    if _seed_b_rid.is_valid():
+        _rd.buffer_update(_seed_b_rid, 0, seed_bytes.size(), seed_bytes)
     _atlas_use_a = true
     var occ_bytes := occupancy.to_byte_array()
     _rd.buffer_update(_occupancy_rid, 0, occ_bytes.size(), occ_bytes)
@@ -1140,6 +1228,61 @@ func _bcc_parity(cell: Vector3i) -> bool:
 
 func _current_atlas_rid() -> RID:
     return _atlas_a_rid if _atlas_use_a else _atlas_b_rid
+
+func _atlas_index_for_cell(cell: Vector3i) -> int:
+    if _indirection_cpu.is_empty():
+        return -1
+    var grid_extent := chunk_grid * chunk_size
+    if cell.x < 0 or cell.y < 0 or cell.z < 0 or cell.x >= grid_extent or cell.y >= grid_extent or cell.z >= grid_extent:
+        return -1
+    var brick_size := chunk_size
+    var bx := int(cell.x / brick_size)
+    var by := int(cell.y / brick_size)
+    var bz := int(cell.z / brick_size)
+    if bx < 0 or by < 0 or bz < 0 or bx >= chunk_grid or by >= chunk_grid or bz >= chunk_grid:
+        return -1
+    var brick_index := bx + by * chunk_grid + bz * chunk_grid * chunk_grid
+    if brick_index < 0 or brick_index >= _indirection_cpu.size():
+        return -1
+    var ind := _indirection_cpu[brick_index]
+    if ind <= 0:
+        return -1
+    var lx := cell.x - bx * brick_size
+    var ly := cell.y - by * brick_size
+    var lz := cell.z - bz * brick_size
+    var local_index := lx + ly * brick_size + lz * brick_size * brick_size
+    var bricks_total := chunk_grid * chunk_grid * chunk_grid
+    var atlas_size := bricks_total * brick_size * brick_size * brick_size
+    var atlas_index := (ind - 1) * brick_size * brick_size * brick_size + local_index
+    if atlas_index < 0 or atlas_index >= atlas_size:
+        return -1
+    return atlas_index
+
+func set_voxel_at(cell: Vector3i, material: int) -> void:
+    if _rd == null:
+        return
+    if !_bcc_parity(cell):
+        print("VoxelRenderer set_voxel_at | non-bcc cell=%s" % str(cell))
+    var atlas_index := _atlas_index_for_cell(cell)
+    if atlas_index < 0:
+        print("VoxelRenderer set_voxel_at | invalid cell=%s" % str(cell))
+        return
+    var bytes := PackedInt32Array([material]).to_byte_array()
+    var offset := atlas_index * 4
+    if _atlas_a_rid.is_valid():
+        _rd.buffer_update(_atlas_a_rid, offset, bytes.size(), bytes)
+    if _atlas_b_rid.is_valid():
+        _rd.buffer_update(_atlas_b_rid, offset, bytes.size(), bytes)
+    var seed_val := 0
+    if material > 0:
+        seed_val = int(_rng.randi())
+        if seed_val == 0:
+            seed_val = 1
+    var seed_bytes := PackedInt32Array([seed_val]).to_byte_array()
+    if _seed_a_rid.is_valid():
+        _rd.buffer_update(_seed_a_rid, offset, seed_bytes.size(), seed_bytes)
+    if _seed_b_rid.is_valid():
+        _rd.buffer_update(_seed_b_rid, offset, seed_bytes.size(), seed_bytes)
 
 func set_debug_probe_cell_xyz(x: int, y: int, z: int) -> void:
     debug_probe_cell = Vector3i(x, y, z)
@@ -1258,6 +1401,142 @@ func _debug_probe_readback_on_render_thread(frame_id: int, cell: Vector3i, parit
         str(main_thread)
     ])
 
+func debug_scan_column(x: int, z: int, y0: int, y1: int) -> void:
+    if _rd == null or _indirection_cpu.is_empty():
+        print("VoxelRenderer scan | rd/indirection unavailable")
+        return
+    var grid_extent: int = chunk_grid * chunk_size
+    var ys: int = int(clamp(y0, 0, grid_extent - 1))
+    var ye: int = int(clamp(y1, 0, grid_extent - 1))
+    if ys > ye:
+        var tmp: int = ys
+        ys = ye
+        ye = tmp
+    var atlas_rid := _current_atlas_rid()
+    if !atlas_rid.is_valid():
+        print("VoxelRenderer scan | atlas rid invalid")
+        return
+    for y in range(ys, ye + 1):
+        var gx := x
+        var gy := y
+        var gz := z
+        if gx < 0 or gy < 0 or gz < 0 or gx >= grid_extent or gy >= grid_extent or gz >= grid_extent:
+            continue
+        if !((gx & 1) == (gy & 1) and (gy & 1) == (gz & 1)):
+            continue
+        var bx: int = gx / chunk_size
+        var by: int = gy / chunk_size
+        var bz: int = gz / chunk_size
+        var brick_index: int = bx + by * chunk_grid + bz * chunk_grid * chunk_grid
+        if brick_index < 0 or brick_index >= _indirection_cpu.size():
+            continue
+        var ind: int = _indirection_cpu[brick_index]
+        if ind <= 0:
+            continue
+        var lx: int = gx - bx * chunk_size
+        var ly: int = gy - by * chunk_size
+        var lz: int = gz - bz * chunk_size
+        var local_index: int = lx + ly * chunk_size + lz * chunk_size * chunk_size
+        var atlas_index: int = (ind - 1) * chunk_size * chunk_size * chunk_size + local_index
+        var atlas_offset: int = atlas_index * 4
+        var atlas_bytes := _rd.buffer_get_data(atlas_rid, atlas_offset, 4)
+        if atlas_bytes.size() < 4:
+            continue
+        var atlas_vals := atlas_bytes.to_int32_array()
+        var atlas_val := atlas_vals[0] if atlas_vals.size() > 0 else 0
+        if atlas_val != 0:
+            print("VoxelRenderer scan | hit cell=%s atlas_val=%d" % [str(Vector3i(gx, gy, gz)), atlas_val])
+            return
+    print("VoxelRenderer scan | no hits in column x=%d z=%d y=%d..%d" % [x, z, ys, ye])
+
+func debug_scan_any(max_checks: int = 5000) -> void:
+    if _rd == null or _indirection_cpu.is_empty():
+        print("VoxelRenderer scan_any | rd/indirection unavailable")
+        return
+    var grid_extent: int = chunk_grid * chunk_size
+    var atlas_rid := _current_atlas_rid()
+    if !atlas_rid.is_valid():
+        print("VoxelRenderer scan_any | atlas rid invalid")
+        return
+    var checks := 0
+    for z in range(grid_extent):
+        for y in range(grid_extent):
+            for x in range(grid_extent):
+                if checks >= max_checks:
+                    print("VoxelRenderer scan_any | no hits in first %d checks" % max_checks)
+                    return
+                checks += 1
+                if !((x & 1) == (y & 1) and (y & 1) == (z & 1)):
+                    continue
+                var bx: int = x / chunk_size
+                var by: int = y / chunk_size
+                var bz: int = z / chunk_size
+                var brick_index: int = bx + by * chunk_grid + bz * chunk_grid * chunk_grid
+                if brick_index < 0 or brick_index >= _indirection_cpu.size():
+                    continue
+                var ind: int = _indirection_cpu[brick_index]
+                if ind <= 0:
+                    continue
+                var lx: int = x - bx * chunk_size
+                var ly: int = y - by * chunk_size
+                var lz: int = z - bz * chunk_size
+                var local_index: int = lx + ly * chunk_size + lz * chunk_size * chunk_size
+                var atlas_index: int = (ind - 1) * chunk_size * chunk_size * chunk_size + local_index
+                var atlas_offset: int = atlas_index * 4
+                var atlas_bytes := _rd.buffer_get_data(atlas_rid, atlas_offset, 4)
+                if atlas_bytes.size() < 4:
+                    continue
+                var atlas_vals := atlas_bytes.to_int32_array()
+                var atlas_val := atlas_vals[0] if atlas_vals.size() > 0 else 0
+                if atlas_val != 0:
+                    print("VoxelRenderer scan_any | hit cell=%s atlas_val=%d" % [str(Vector3i(x, y, z)), atlas_val])
+                    return
+    print("VoxelRenderer scan_any | no hits in scan")
+
+func debug_scan_for_material(mat_id: int, max_checks: int = 200000) -> void:
+    if _rd == null or _indirection_cpu.is_empty():
+        print("VoxelRenderer scan_mat | rd/indirection unavailable")
+        return
+    var grid_extent: int = chunk_grid * chunk_size
+    var atlas_rid := _current_atlas_rid()
+    if !atlas_rid.is_valid():
+        print("VoxelRenderer scan_mat | atlas rid invalid")
+        return
+    var checks := 0
+    for z in range(grid_extent):
+        for y in range(grid_extent):
+            for x in range(grid_extent):
+                if checks >= max_checks:
+                    print("VoxelRenderer scan_mat | no hits in first %d checks for mat=%d" % [max_checks, mat_id])
+                    return
+                checks += 1
+                if !((x & 1) == (y & 1) and (y & 1) == (z & 1)):
+                    continue
+                var bx: int = x / chunk_size
+                var by: int = y / chunk_size
+                var bz: int = z / chunk_size
+                var brick_index: int = bx + by * chunk_grid + bz * chunk_grid * chunk_grid
+                if brick_index < 0 or brick_index >= _indirection_cpu.size():
+                    continue
+                var ind: int = _indirection_cpu[brick_index]
+                if ind <= 0:
+                    continue
+                var lx: int = x - bx * chunk_size
+                var ly: int = y - by * chunk_size
+                var lz: int = z - bz * chunk_size
+                var local_index: int = lx + ly * chunk_size + lz * chunk_size * chunk_size
+                var atlas_index: int = (ind - 1) * chunk_size * chunk_size * chunk_size + local_index
+                var atlas_offset: int = atlas_index * 4
+                var atlas_bytes := _rd.buffer_get_data(atlas_rid, atlas_offset, 4)
+                if atlas_bytes.size() < 4:
+                    continue
+                var atlas_vals := atlas_bytes.to_int32_array()
+                var atlas_val := atlas_vals[0] if atlas_vals.size() > 0 else 0
+                if atlas_val == mat_id:
+                    print("VoxelRenderer scan_mat | hit cell=%s atlas_val=%d" % [str(Vector3i(x, y, z)), atlas_val])
+                    return
+    print("VoxelRenderer scan_mat | no hits for mat=%d" % mat_id)
+
 func _create_display_texture() -> Texture2D:
     if _use_global_rd and ClassDB.class_exists("Texture2DRD"):
         var rd_tex := ClassDB.instantiate("Texture2DRD") as Object
@@ -1311,6 +1590,10 @@ func _exit_tree() -> void:
         _rd.free_rid(_atlas_a_rid)
     if _atlas_b_rid.is_valid():
         _rd.free_rid(_atlas_b_rid)
+    if _seed_a_rid.is_valid():
+        _rd.free_rid(_seed_a_rid)
+    if _seed_b_rid.is_valid():
+        _rd.free_rid(_seed_b_rid)
     if _light_a_rid.is_valid():
         _rd.free_rid(_light_a_rid)
     if _light_b_rid.is_valid():

@@ -1,0 +1,175 @@
+[gd_scene load_steps=7 format=3]
+
+[ext_resource type="Script" path="res://scripts/OrbitCamera.gd" id="1"]
+[ext_resource type="Script" path="res://scripts/VoxelRenderer.gd" id="2"]
+[ext_resource type="Shader" path="res://shaders/compute_display.gdshader" id="3"]
+[ext_resource type="Script" path="res://scripts/PlinkoController.gd" id="4"]
+[ext_resource type="Script" path="res://scripts/SceneControls.gd" id="5"]
+
+[sub_resource type="QuadMesh" id="1"]
+size = Vector2(2, 2)
+
+[sub_resource type="ShaderMaterial" id="2"]
+shader = ExtResource("3")
+
+[node name="PlinkoTest" type="Node3D"]
+
+[node name="OrbitRig" type="Node3D" parent="."]
+script = ExtResource("1")
+distance = 120.0
+min_distance = 24.0
+max_distance = 800.0
+
+[node name="Camera3D" type="Camera3D" parent="OrbitRig"]
+current = true
+
+[node name="RaymarchQuad" type="MeshInstance3D" parent="OrbitRig/Camera3D"]
+position = Vector3(0, 0, -1)
+scale = Vector3(2, 2, 2)
+mesh = SubResource("1")
+material_override = SubResource("2")
+
+[node name="VoxelRenderer" type="Node" parent="."]
+script = ExtResource("2")
+quad_path = NodePath("../OrbitRig/Camera3D/RaymarchQuad")
+camera_path = NodePath("../OrbitRig/Camera3D")
+chunk_size = 8
+chunk_grid = 8
+sim_enabled = true
+sim_every = 1
+
+[node name="PlinkoController" type="Node" parent="."]
+script = ExtResource("4")
+voxel_renderer_path = NodePath("../VoxelRenderer")
+overlay_path = NodePath("../HUD/InfoLabel")
+spawn_button_path = NodePath("../HUD/Controls/Panel/Margin/VBox/SpawnButton")
+
+[node name="HUD" type="CanvasLayer" parent="."]
+
+[node name="InfoLabel" type="Label" parent="HUD"]
+anchor_right = 0.0
+anchor_bottom = 0.0
+offset_left = 16.0
+offset_top = 16.0
+offset_right = 560.0
+offset_bottom = 140.0
+text = "Plinko Board"
+theme_override_font_sizes/font_size = 16
+
+[node name="Controls" type="Control" parent="HUD"]
+anchor_left = 1.0
+anchor_top = 0.0
+anchor_right = 1.0
+anchor_bottom = 0.0
+offset_left = -360.0
+offset_top = 16.0
+offset_right = -16.0
+offset_bottom = 360.0
+script = ExtResource("5")
+voxel_renderer_path = NodePath("../../VoxelRenderer")
+
+[node name="Panel" type="PanelContainer" parent="HUD/Controls"]
+anchor_right = 1.0
+anchor_bottom = 1.0
+
+[node name="Margin" type="MarginContainer" parent="HUD/Controls/Panel"]
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 8.0
+offset_top = 8.0
+offset_right = -8.0
+offset_bottom = -8.0
+
+[node name="VBox" type="VBoxContainer" parent="HUD/Controls/Panel/Margin"]
+size_flags_horizontal = 3
+size_flags_vertical = 3
+theme_override_constants/separation = 6
+
+[node name="SpawnButton" type="Button" parent="HUD/Controls/Panel/Margin/VBox"]
+text = "Spawn Sand"
+
+[node name="GravityLabel" type="Label" parent="HUD/Controls/Panel/Margin/VBox"]
+text = "Gravity"
+
+[node name="GravityYaw" type="HBoxContainer" parent="HUD/Controls/Panel/Margin/VBox"]
+theme_override_constants/separation = 6
+
+[node name="Label" type="Label" parent="HUD/Controls/Panel/Margin/VBox/GravityYaw"]
+text = "Yaw"
+
+[node name="Slider" type="HSlider" parent="HUD/Controls/Panel/Margin/VBox/GravityYaw"]
+min_value = -180.0
+max_value = 180.0
+step = 1.0
+size_flags_horizontal = 3
+
+[node name="Value" type="Label" parent="HUD/Controls/Panel/Margin/VBox/GravityYaw"]
+text = "0"
+
+[node name="GravityPitch" type="HBoxContainer" parent="HUD/Controls/Panel/Margin/VBox"]
+theme_override_constants/separation = 6
+
+[node name="Label" type="Label" parent="HUD/Controls/Panel/Margin/VBox/GravityPitch"]
+text = "Pitch"
+
+[node name="Slider" type="HSlider" parent="HUD/Controls/Panel/Margin/VBox/GravityPitch"]
+min_value = -180.0
+max_value = 180.0
+step = 1.0
+size_flags_horizontal = 3
+
+[node name="Value" type="Label" parent="HUD/Controls/Panel/Margin/VBox/GravityPitch"]
+text = "0"
+
+[node name="Separator" type="HSeparator" parent="HUD/Controls/Panel/Margin/VBox"]
+
+[node name="WorldLabel" type="Label" parent="HUD/Controls/Panel/Margin/VBox"]
+text = "World Rotation"
+
+[node name="WorldYaw" type="HBoxContainer" parent="HUD/Controls/Panel/Margin/VBox"]
+theme_override_constants/separation = 6
+
+[node name="Label" type="Label" parent="HUD/Controls/Panel/Margin/VBox/WorldYaw"]
+text = "Yaw"
+
+[node name="Slider" type="HSlider" parent="HUD/Controls/Panel/Margin/VBox/WorldYaw"]
+min_value = -180.0
+max_value = 180.0
+step = 1.0
+size_flags_horizontal = 3
+
+[node name="Value" type="Label" parent="HUD/Controls/Panel/Margin/VBox/WorldYaw"]
+text = "0"
+
+[node name="WorldPitch" type="HBoxContainer" parent="HUD/Controls/Panel/Margin/VBox"]
+theme_override_constants/separation = 6
+
+[node name="Label" type="Label" parent="HUD/Controls/Panel/Margin/VBox/WorldPitch"]
+text = "Pitch"
+
+[node name="Slider" type="HSlider" parent="HUD/Controls/Panel/Margin/VBox/WorldPitch"]
+min_value = -180.0
+max_value = 180.0
+step = 1.0
+size_flags_horizontal = 3
+
+[node name="Value" type="Label" parent="HUD/Controls/Panel/Margin/VBox/WorldPitch"]
+text = "0"
+
+[node name="WorldRoll" type="HBoxContainer" parent="HUD/Controls/Panel/Margin/VBox"]
+theme_override_constants/separation = 6
+
+[node name="Label" type="Label" parent="HUD/Controls/Panel/Margin/VBox/WorldRoll"]
+text = "Roll"
+
+[node name="Slider" type="HSlider" parent="HUD/Controls/Panel/Margin/VBox/WorldRoll"]
+min_value = -180.0
+max_value = 180.0
+step = 1.0
+size_flags_horizontal = 3
+
+[node name="Value" type="Label" parent="HUD/Controls/Panel/Margin/VBox/WorldRoll"]
+text = "0"
+
+[node name="ResetButton" type="Button" parent="HUD/Controls/Panel/Margin/VBox"]
+text = "Reset"
