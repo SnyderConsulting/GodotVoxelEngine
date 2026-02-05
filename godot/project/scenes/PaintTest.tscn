@@ -1,11 +1,10 @@
-[gd_scene load_steps=8 format=3]
+[gd_scene load_steps=7 format=3]
 
 [ext_resource type="Script" path="res://scripts/OrbitCamera.gd" id="1"]
 [ext_resource type="Script" path="res://scripts/VoxelRenderer.gd" id="2"]
 [ext_resource type="Shader" path="res://shaders/compute_display.gdshader" id="3"]
 [ext_resource type="Script" path="res://scripts/PaintController.gd" id="4"]
 [ext_resource type="Script" path="res://scripts/SceneControls.gd" id="5"]
-[ext_resource type="Script" path="res://scripts/BrushPreview.gd" id="6"]
 
 [sub_resource type="QuadMesh" id="1"]
 size = Vector2(2, 2)
@@ -38,22 +37,24 @@ chunk_size = 8
 chunk_grid = 8
 sim_enabled = true
 sim_every = 1
+debug_logging = false
+debug_log_every = 60
 
 [node name="PaintController" type="Node" parent="."]
 script = ExtResource("4")
 voxel_renderer_path = NodePath("../VoxelRenderer")
 camera_path = NodePath("../OrbitRig/Camera3D")
+quad_path = NodePath("../OrbitRig/Camera3D/RaymarchQuad")
 overlay_path = NodePath("../HUD/InfoLabel")
 sand_button_path = NodePath("../HUD/Controls/Panel/Margin/VBox/SandButton")
 water_button_path = NodePath("../HUD/Controls/Panel/Margin/VBox/WaterButton")
 brush_slider_path = NodePath("../HUD/Controls/Panel/Margin/VBox/BrushSize/Slider")
 brush_value_path = NodePath("../HUD/Controls/Panel/Margin/VBox/BrushSize/Value")
-brush_preview_path = NodePath("../HUD/BrushPreview")
+debug_logging = false
+debug_log_every = 60
 
 [node name="HUD" type="CanvasLayer" parent="."]
 
-[node name="BrushPreview" type="Control" parent="HUD"]
-script = ExtResource("6")
 
 [node name="InfoLabel" type="Label" parent="HUD"]
 anchor_right = 0.0

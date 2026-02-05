@@ -35,9 +35,20 @@ layout(set = 0, binding = 5, std430) buffer Metrics {
 layout(set = 0, binding = 6, std430) readonly buffer Light {
     uint data[];
 } light_buf;
+layout(set = 0, binding = 7, std430) readonly buffer Preview {
+    uint data[];
+} preview_buf;
+layout(set = 0, binding = 8, std430) readonly buffer Cursor {
+    uint data[];
+} cursor_buf;
+layout(set = 0, binding = 9, std430) readonly buffer PreviewOcc {
+    uint data[];
+} preview_occ;
 
 const uint GLASS_MATERIAL = 8u;
 const uint INVISIBLE_MATERIAL = 9u;
+const uint PREVIEW_MATERIAL = 10u;
+const uint CURSOR_MATERIAL = 11u;
 
 float sdf_truncated_octahedron(vec3 p) {
     const float inv_sqrt3 = 0.57735026919;
@@ -293,7 +304,7 @@ void main() {
         float t_brick_exit = min(tMax.x, min(tMax.y, tMax.z));
         float t_brick_limit = min(t_brick_exit + 1.5 * u.misc.x, t_exit);
         uint occ_val = occ.data[idx_brick(brick)];
-        bool brick_active = occ_val != 0u;
+        bool brick_active = occ_val != 0u || preview_occ.data[idx_brick(brick)] != 0u;
         if (!brick_active) {
             for (int dz = -1; dz <= 1 && !brick_active; dz++) {
                 for (int dy = -1; dy <= 1 && !brick_active; dy++) {
@@ -302,7 +313,7 @@ void main() {
                         if (!brick_in_bounds(nb)) {
                             continue;
                         }
-                        if (occ.data[idx_brick(nb)] != 0u) {
+                        if (occ.data[idx_brick(nb)] != 0u || preview_occ.data[idx_brick(nb)] != 0u) {
                             brick_active = true;
                             break;
                         }
@@ -326,14 +337,23 @@ void main() {
                 }
                 ivec3 cell_brick = cell / brick_size;
                 uint cell_occ = occ.data[idx_brick(cell_brick)];
-                if (cell_occ != 0u) {
-                    uint cell_val = atlas.data[atlas_index_for_cell(cell)];
-                    if (cell_val == INVISIBLE_MATERIAL) {
-                        t_cell += empty_step;
-                        continue;
-                    }
-                    if (cell_val != 0u) {
+                uint atlas_index = atlas_index_for_cell(cell);
+                if (atlas_index == 0u) {
+                    t_cell += empty_step;
+                    continue;
+                }
+                uint cell_val = atlas.data[atlas_index];
+                uint preview_val = preview_buf.data[atlas_index];
+                uint cursor_val = cursor_buf.data[atlas_index];
+                if (cell_val == INVISIBLE_MATERIAL) {
+                    t_cell += empty_step;
+                    continue;
+                }
+                if (cell_occ != 0u || preview_val != 0u || cursor_val != 0u) {
+                    if (cell_val != 0u || preview_val != 0u || cursor_val != 0u) {
                         bool glass_cell = cell_val == GLASS_MATERIAL;
+                        bool preview_cell = (cell_val == 0u && preview_val != 0u && cursor_val == 0u);
+                        bool cursor_cell = (cell_val == 0u && cursor_val != 0u);
                         vec3 cell_center = u.origin.xyz + vec3(cell) * u.misc.x;
                         vec3 rc = ro - cell_center;
                         float a = u.misc.x;
@@ -365,11 +385,11 @@ void main() {
                                 vec3 lp = (p - cell_center) / a;
                                 float d = sdf_truncated_octahedron(lp) * a;     
                                 if (d < 0.0) {
-                                    if (glass_cell) {
+                                    if (glass_cell || preview_cell || cursor_cell) {
                                         float edge = 1.0 - smoothstep(0.0, 0.02 * a, abs(d));
                                         if (edge > 0.0) {
-                                            overlay_alpha = max(overlay_alpha, edge * 0.3);
-                                            overlay_color = vec3(0.05);
+                                            overlay_alpha = max(overlay_alpha, edge * 0.5);
+                                            overlay_color = cursor_cell ? vec3(0.0, 1.0, 0.6) : (preview_cell ? vec3(0.05, 0.9, 0.2) : vec3(0.05));
                                         }
                                         glass_hit = true;
                                         t_voxel += max(abs(d), min_step);

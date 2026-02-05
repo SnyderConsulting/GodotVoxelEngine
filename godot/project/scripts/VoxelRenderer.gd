@@ -52,6 +52,9 @@ var _atlas_a_rid: RID
 var _atlas_b_rid: RID
 var _seed_a_rid: RID
 var _seed_b_rid: RID
+var _preview_rid: RID
+var _cursor_rid: RID
+var _preview_occ_rid: RID
 var _light_a_rid: RID
 var _light_b_rid: RID
 var _occupancy_rid: RID
@@ -59,6 +62,9 @@ var _metrics_rid: RID
 var _active_list_rid: RID
 var _active_count_rid: RID
 var _sim_dispatch_rid: RID
+var _preview_cells: Array = []
+var _cursor_cell := Vector3i(-1, -1, -1)
+var _preview_occ_bricks: PackedInt32Array = PackedInt32Array()
 var _uniform_set_a_light_a_rid: RID
 var _uniform_set_a_light_b_rid: RID
 var _uniform_set_b_light_a_rid: RID
@@ -307,6 +313,19 @@ func _init_render_resources() -> void:
     if !_seed_b_rid.is_valid():
         push_error("Failed to create seed buffer B.")
         return
+    _preview_rid = _rd.storage_buffer_create(_atlas_bytes)
+    if !_preview_rid.is_valid():
+        push_error("Failed to create preview buffer.")
+        return
+    _cursor_rid = _rd.storage_buffer_create(_atlas_bytes)
+    if !_cursor_rid.is_valid():
+        push_error("Failed to create cursor buffer.")
+        return
+    var preview_occ_bytes := brick_count * 4
+    _preview_occ_rid = _rd.storage_buffer_create(preview_occ_bytes)
+    if !_preview_occ_rid.is_valid():
+        push_error("Failed to create preview occupancy buffer.")
+        return
     _light_a_rid = _rd.storage_buffer_create(_atlas_bytes)
     if !_light_a_rid.is_valid():
         push_error("Failed to create light buffer A.")
@@ -358,6 +377,12 @@ func _init_render_resources() -> void:
         _rd.buffer_clear(_seed_a_rid, 0, _atlas_bytes)
     if _seed_b_rid.is_valid():
         _rd.buffer_clear(_seed_b_rid, 0, _atlas_bytes)
+    if _preview_rid.is_valid():
+        _rd.buffer_clear(_preview_rid, 0, _atlas_bytes)
+    if _cursor_rid.is_valid():
+        _rd.buffer_clear(_cursor_rid, 0, _atlas_bytes)
+    if _preview_occ_rid.is_valid():
+        _rd.buffer_clear(_preview_occ_rid, 0, brick_count * 4)
 
     var img_uniform := RDUniform.new()
     img_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_IMAGE
@@ -392,6 +417,18 @@ func _init_render_resources() -> void:
     metrics_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
     metrics_uniform.binding = 5
     metrics_uniform.add_id(_metrics_rid)
+    var preview_uniform := RDUniform.new()
+    preview_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+    preview_uniform.binding = 7
+    preview_uniform.add_id(_preview_rid)
+    var cursor_uniform := RDUniform.new()
+    cursor_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+    cursor_uniform.binding = 8
+    cursor_uniform.add_id(_cursor_rid)
+    var preview_occ_uniform := RDUniform.new()
+    preview_occ_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+    preview_occ_uniform.binding = 9
+    preview_occ_uniform.add_id(_preview_occ_rid)
 
     var light_uniform_a := RDUniform.new()
     light_uniform_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
@@ -404,7 +441,7 @@ func _init_render_resources() -> void:
     light_uniform_b.add_id(_light_b_rid)
 
     _uniform_set_a_light_a_rid = _rd.uniform_set_create(
-        [img_uniform, ubo_uniform, indirection_uniform, atlas_uniform_a, occupancy_uniform, metrics_uniform, light_uniform_a],
+        [img_uniform, ubo_uniform, indirection_uniform, atlas_uniform_a, occupancy_uniform, metrics_uniform, light_uniform_a, preview_uniform, cursor_uniform, preview_occ_uniform],
         _shader_rid,
         0
     )
@@ -412,7 +449,7 @@ func _init_render_resources() -> void:
         push_error("Failed to create uniform set A (light A).")
         return
     _uniform_set_a_light_b_rid = _rd.uniform_set_create(
-        [img_uniform, ubo_uniform, indirection_uniform, atlas_uniform_a, occupancy_uniform, metrics_uniform, light_uniform_b],
+        [img_uniform, ubo_uniform, indirection_uniform, atlas_uniform_a, occupancy_uniform, metrics_uniform, light_uniform_b, preview_uniform, cursor_uniform, preview_occ_uniform],
         _shader_rid,
         0
     )
@@ -420,7 +457,7 @@ func _init_render_resources() -> void:
         push_error("Failed to create uniform set A (light B).")
         return
     _uniform_set_b_light_a_rid = _rd.uniform_set_create(
-        [img_uniform, ubo_uniform, indirection_uniform, atlas_uniform_b, occupancy_uniform, metrics_uniform, light_uniform_a],
+        [img_uniform, ubo_uniform, indirection_uniform, atlas_uniform_b, occupancy_uniform, metrics_uniform, light_uniform_a, preview_uniform, cursor_uniform, preview_occ_uniform],
         _shader_rid,
         0
     )
@@ -428,7 +465,7 @@ func _init_render_resources() -> void:
         push_error("Failed to create uniform set B (light A).")
         return
     _uniform_set_b_light_b_rid = _rd.uniform_set_create(
-        [img_uniform, ubo_uniform, indirection_uniform, atlas_uniform_b, occupancy_uniform, metrics_uniform, light_uniform_b],
+        [img_uniform, ubo_uniform, indirection_uniform, atlas_uniform_b, occupancy_uniform, metrics_uniform, light_uniform_b, preview_uniform, cursor_uniform, preview_occ_uniform],
         _shader_rid,
         0
     )
@@ -1258,6 +1295,24 @@ func _atlas_index_for_cell(cell: Vector3i) -> int:
         return -1
     return atlas_index
 
+func get_cell_material(cell: Vector3i) -> int:
+    if _rd == null:
+        return 0
+    var atlas_index := _atlas_index_for_cell(cell)
+    if atlas_index < 0:
+        return 0
+    var atlas_rid := _current_atlas_rid()
+    if !atlas_rid.is_valid():
+        return 0
+    var atlas_offset := atlas_index * 4
+    var atlas_bytes := _rd.buffer_get_data(atlas_rid, atlas_offset, 4)
+    if atlas_bytes.size() < 4:
+        return 0
+    var atlas_vals := atlas_bytes.to_int32_array()
+    if atlas_vals.size() == 0:
+        return 0
+    return atlas_vals[0]
+
 func set_voxel_at(cell: Vector3i, material: int) -> void:
     if _rd == null:
         return
@@ -1283,6 +1338,70 @@ func set_voxel_at(cell: Vector3i, material: int) -> void:
         _rd.buffer_update(_seed_a_rid, offset, seed_bytes.size(), seed_bytes)
     if _seed_b_rid.is_valid():
         _rd.buffer_update(_seed_b_rid, offset, seed_bytes.size(), seed_bytes)
+
+func set_preview_cells(cells: Array) -> void:
+    if _rd == null or !_preview_rid.is_valid():
+        return
+    # Clear previous preview cells
+    if _preview_cells.size() > 0:
+        var zero_bytes := PackedInt32Array([0]).to_byte_array()
+        for cell in _preview_cells:
+            if typeof(cell) != TYPE_VECTOR3I:
+                continue
+            var atlas_index := _atlas_index_for_cell(cell)
+            if atlas_index < 0:
+                continue
+            var offset := atlas_index * 4
+            _rd.buffer_update(_preview_rid, offset, zero_bytes.size(), zero_bytes)
+    # Clear previous preview brick occupancy
+    if _preview_occ_bricks.size() > 0 and _preview_occ_rid.is_valid():
+        var zero_occ := PackedInt32Array([0]).to_byte_array()
+        for brick_index in _preview_occ_bricks:
+            var off := int(brick_index) * 4
+            _rd.buffer_update(_preview_occ_rid, off, zero_occ.size(), zero_occ)
+    _preview_cells = []
+    _preview_occ_bricks = PackedInt32Array()
+    if cells.size() == 0:
+        return
+    var one_bytes := PackedInt32Array([1]).to_byte_array()
+    var one_occ := PackedInt32Array([1]).to_byte_array()
+    var brick_set := {}
+    for cell in cells:
+        if typeof(cell) != TYPE_VECTOR3I:
+            continue
+        var atlas_index := _atlas_index_for_cell(cell)
+        if atlas_index < 0:
+            continue
+        var offset := atlas_index * 4
+        _rd.buffer_update(_preview_rid, offset, one_bytes.size(), one_bytes)
+        _preview_cells.append(cell)
+        if _preview_occ_rid.is_valid():
+            var bx := int(cell.x / chunk_size)
+            var by := int(cell.y / chunk_size)
+            var bz := int(cell.z / chunk_size)
+            var brick_index := bx + by * chunk_grid + bz * chunk_grid * chunk_grid
+            var key := str(brick_index)
+            if !brick_set.has(key):
+                brick_set[key] = true
+                _rd.buffer_update(_preview_occ_rid, brick_index * 4, one_occ.size(), one_occ)
+                _preview_occ_bricks.append(brick_index)
+
+func set_cursor_cell(cell: Vector3i) -> void:
+    if _rd == null or !_cursor_rid.is_valid():
+        return
+    if _cursor_cell.x >= 0:
+        var old_index := _atlas_index_for_cell(_cursor_cell)
+        if old_index >= 0:
+            var zero_bytes := PackedInt32Array([0]).to_byte_array()
+            _rd.buffer_update(_cursor_rid, old_index * 4, zero_bytes.size(), zero_bytes)
+    _cursor_cell = cell
+    if _cursor_cell.x < 0:
+        return
+    var atlas_index := _atlas_index_for_cell(_cursor_cell)
+    if atlas_index < 0:
+        return
+    var one_bytes := PackedInt32Array([1]).to_byte_array()
+    _rd.buffer_update(_cursor_rid, atlas_index * 4, one_bytes.size(), one_bytes)
 
 func set_debug_probe_cell_xyz(x: int, y: int, z: int) -> void:
     debug_probe_cell = Vector3i(x, y, z)
@@ -1594,6 +1713,12 @@ func _exit_tree() -> void:
         _rd.free_rid(_seed_a_rid)
     if _seed_b_rid.is_valid():
         _rd.free_rid(_seed_b_rid)
+    if _preview_rid.is_valid():
+        _rd.free_rid(_preview_rid)
+    if _cursor_rid.is_valid():
+        _rd.free_rid(_cursor_rid)
+    if _preview_occ_rid.is_valid():
+        _rd.free_rid(_preview_occ_rid)
     if _light_a_rid.is_valid():
         _rd.free_rid(_light_a_rid)
     if _light_b_rid.is_valid():

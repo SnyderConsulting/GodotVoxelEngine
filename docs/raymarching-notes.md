@@ -34,6 +34,19 @@
 - Added a brick-level DDA over the occupancy grid in `godot/project/shaders/compute_raymarch.glsl` to skip empty bricks and only do fine SDF marching inside occupied chunks.
 - Neighbor bricks are treated as active to avoid clipping truncated-octahedron voxels that straddle brick boundaries.
 
+## Cursor picking alignment (raymarch quad + BCC grid)
+- Symptom: preview/spawn only worked from a single camera side; other rotations projected to the wrong place or returned no hit.
+- Root causes:
+  - Picking used viewport UVs, while the raymarch image is rendered onto a quad with its own screen-space rectangle.
+  - Entry-point precision: starting DDA exactly at `tmin` can place the first cell on the max boundary (e.g. `z = grid_extent`), which is out of bounds.
+- Fixes implemented in `godot/project/scripts/PaintController.gd`:
+  - Compute mouse UV by projecting the quad corners into screen space and mapping the mouse into that rectangle.
+  - Use the same projection math as the raymarch shader (FOV + renderer aspect) to build the world ray.
+  - Nudge the DDA entry by a tiny epsilon (`t = max(tmin, 0.0) + 1e-4`) to avoid boundary hits.
+- Diagnostics that helped:
+  - Log `quad_min/quad_max`, UV, and `ro/rd` to confirm the mouse is inside the render area.
+  - When hits fail, log `grid_pos` and starting `cell` to see out-of-bounds on the entry face.
+
 ## Simple flood-fill lighting
 - Added `godot/project/shaders/compute_light.glsl` to propagate Minecraft-style light through empty BCC cells (sunlight from the top layer).
 - Raymarching samples the light buffer (plus neighbor max) to modulate ambient and diffuse terms.
