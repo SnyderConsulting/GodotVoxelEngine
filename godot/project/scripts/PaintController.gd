@@ -62,7 +62,10 @@ func _late_init() -> void:
     if _renderer.has_method("get") and _renderer.get("_rd") == null:
         call_deferred("_late_init")
         return
-    if _renderer.has_method("set_voxel_entries"):
+    _renderer.sim_mode = 1
+    if _renderer.has_method("set_voxel_entries_mpm"):
+        _renderer.set_voxel_entries_mpm([])
+    elif _renderer.has_method("set_voxel_entries"):
         _renderer.set_voxel_entries([], true)
 
 func _process(delta: float) -> void:
@@ -107,8 +110,6 @@ func _update_brush_ui() -> void:
     # preview handled via VoxelRenderer buffer
 
 func _spawn_at_cursor() -> void:
-    if !_renderer.has_method("set_voxel_at"):
-        return
     var cell: Vector3i = _raycast_to_cell()
     if cell.x < 0:
         return
@@ -116,14 +117,25 @@ func _spawn_at_cursor() -> void:
     _spawn_cells(cells)
 
 func _spawn_cells(cells: Array) -> void:
+    if _renderer == null:
+        return
+    var batch: Array = []
     var count := 0
     for cell in cells:
         if max_voxels_per_spawn > 0 and count >= max_voxels_per_spawn:
             break
         if typeof(cell) != TYPE_VECTOR3I:
             continue
-        _renderer.set_voxel_at(cell, _current_material)
+        batch.append(cell)
         count += 1
+    if batch.size() == 0:
+        return
+    if _renderer.has_method("mpm_spawn_cells"):
+        _renderer.mpm_spawn_cells(batch, _current_material, Vector3.ZERO, 1.0)
+        return
+    if _renderer.has_method("set_voxel_at"):
+        for cell in batch:
+            _renderer.set_voxel_at(cell, _current_material)
 
 func _raycast_to_cell() -> Vector3i:
     var mouse_pos: Vector2 = _get_mouse_viewport_pos()

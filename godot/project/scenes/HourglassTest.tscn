@@ -16,9 +16,9 @@ shader = ExtResource("3")
 
 [node name="OrbitRig" type="Node3D" parent="."]
 script = ExtResource("1")
-distance = 400.0
+distance = 360.0
 min_distance = 60.0
-max_distance = 800.0
+max_distance = 900.0
 
 [node name="Camera3D" type="Camera3D" parent="OrbitRig"]
 current = true
@@ -36,9 +36,14 @@ camera_path = NodePath("../OrbitRig/Camera3D")
 width = 512
 height = 512
 chunk_size = 8
-chunk_grid = 20
+chunk_grid = 10
 sim_enabled = true
 sim_every = 1
+sim_mode = 1
+mpm_max_particles = 50000
+mpm_substeps = 2
+mpm_dt = 0.016666667
+mpm_gravity_strength = 50.0
 
 [node name="HourglassController" type="Node" parent="."]
 script = ExtResource("4")

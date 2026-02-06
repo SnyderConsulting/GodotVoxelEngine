@@ -22,6 +22,8 @@ func _initialize_scenario() -> void:
     wait_for_renderer_ready(Callable(self, "_start_scene"))
 
 func _start_scene() -> void:
+    if renderer != null:
+        renderer.sim_mode = 1
     _build_container()
     _spawn_sand_pile()
     _spawn_water_sheet()
@@ -65,7 +67,10 @@ func _build_container() -> void:
                 var is_wall := (x == min_wall or x == max_wall or z == min_wall or z == max_wall or y == min_wall)
                 if is_wall:
                     entries.append({"pos": Vector3(x, y, z), "material": glass_material_id})
-    renderer.set_voxel_entries(entries, true)
+    if renderer.has_method("set_voxel_entries_mpm"):
+        renderer.set_voxel_entries_mpm(entries)
+    else:
+        renderer.set_voxel_entries(entries, true)
 
 func _spawn_sand_pile() -> void:
     var grid_extent: int = renderer.chunk_grid * renderer.chunk_size

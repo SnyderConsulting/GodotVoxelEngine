@@ -28,7 +28,7 @@ extends Node
 @export var sim_enabled: bool = false
 @export var sim_every: int = 1
 @export var sim_clear_output: bool = true
-@export var sim_mode: int = 0 # 0 = CA (grid), 1 = MPM (particles)
+@export var sim_mode: int = 1 # 1 = MPM (particles), 0 = legacy CA (grid)
 @export var mpm_dt: float = 1.0 / 60.0
 @export var mpm_substeps: int = 2
 @export var mpm_max_particles: int = 50000
@@ -199,6 +199,8 @@ var _active_list_ready := false
 var _indirection_cpu: PackedInt32Array = PackedInt32Array()
 var _rng := RandomNumberGenerator.new()
 var _mpm_particles_use_a := true
+var _mpm_particle_count_cpu: int = 0
+var _material_mass_by_id: Dictionary = {}
 
 func _diag(msg: String) -> void:
     if !diag_enabled:
@@ -2792,6 +2794,7 @@ func set_voxel_entries_mpm(entries: Array) -> void:
     if _mpm_particle_count_rid.is_valid():
         var count_bytes := PackedInt32Array([count]).to_byte_array()
         _rd.buffer_update(_mpm_particle_count_rid, 0, count_bytes.size(), count_bytes)
+    _mpm_particle_count_cpu = count
 
     # Reset deformation state and initialize F=I on the GPU (C=0).
     var particle_mat3_bytes: int = max_p * 48
@@ -2887,11 +2890,14 @@ func _load_material_props() -> PackedByteArray:
     var count := max_id + 1
     var floats := PackedFloat32Array()
     floats.resize(count * 8)
+    _material_mass_by_id = {}
     for i in range(count):
         var src: Dictionary = materials.get(i, defaults.get(i, {}))
         if typeof(src) != TYPE_DICTIONARY:
             src = {}
-        floats[i * 8 + 0] = float(src.get("mass", 0.0))
+        var mass_val: float = float(src.get("mass", 0.0))
+        floats[i * 8 + 0] = mass_val
+        _material_mass_by_id[i] = mass_val
         floats[i * 8 + 1] = float(src.get("friction", 0.0))
         floats[i * 8 + 2] = float(src.get("cohesion", 0.0))
         floats[i * 8 + 3] = float(src.get("resistance", 0.0))
@@ -3235,8 +3241,167 @@ func get_cell_material(cell: Vector3i) -> int:
         return 0
     return atlas_vals[0]
 
+func _snap_cell_in_bounds_to_bcc(cell: Vector3i) -> Vector3i:
+    var grid_extent: int = chunk_grid * chunk_size
+    if cell.x < 0 or cell.y < 0 or cell.z < 0 or cell.x >= grid_extent or cell.y >= grid_extent or cell.z >= grid_extent:
+        return Vector3i(-1, -1, -1)
+    if _bcc_parity(cell):
+        return cell
+    # Try nudging one axis by +/- 1 to reach a valid BCC point.
+    var offsets: Array[Vector3i] = [
+        Vector3i(0, -1, 0),
+        Vector3i(0, 1, 0),
+        Vector3i(-1, 0, 0),
+        Vector3i(1, 0, 0),
+        Vector3i(0, 0, -1),
+        Vector3i(0, 0, 1),
+    ]
+    for o in offsets:
+        var c: Vector3i = cell + o
+        if c.x < 0 or c.y < 0 or c.z < 0 or c.x >= grid_extent or c.y >= grid_extent or c.z >= grid_extent:
+            continue
+        if _bcc_parity(c):
+            return c
+    return Vector3i(-1, -1, -1)
+
+func _mpm_set_static_cell(cell: Vector3i, material: int) -> void:
+    if _rd == null:
+        return
+    if !_atlas_static_rid.is_valid():
+        return
+    var atlas_index := _atlas_index_for_cell(cell)
+    if atlas_index < 0:
+        return
+    var bytes := PackedInt32Array([material]).to_byte_array()
+    var offset := atlas_index * 4
+    _rd.buffer_update(_atlas_static_rid, offset, bytes.size(), bytes)
+    # Mirror into both render atlases so it shows immediately (MPM copy-static runs next frame).
+    if _atlas_a_rid.is_valid():
+        _rd.buffer_update(_atlas_a_rid, offset, bytes.size(), bytes)
+    if _atlas_b_rid.is_valid():
+        _rd.buffer_update(_atlas_b_rid, offset, bytes.size(), bytes)
+
+func mpm_spawn_cells(cells: Array, material: int, velocity: Vector3 = Vector3.ZERO, volume: float = 1.0) -> int:
+    if _rd == null:
+        return 0
+    if sim_mode != 1:
+        return 0
+    if !_mpm_particle_count_rid.is_valid() or !_mpm_meta_rid.is_valid():
+        return 0
+    if !_mpm_pos_mass_a_rid.is_valid() or !_mpm_pos_mass_b_rid.is_valid():
+        return 0
+    if !_mpm_vel_vol_a_rid.is_valid() or !_mpm_vel_vol_b_rid.is_valid():
+        return 0
+    if !_mpm_c_a_rid.is_valid() or !_mpm_c_b_rid.is_valid() or !_mpm_f_a_rid.is_valid() or !_mpm_f_b_rid.is_valid():
+        return 0
+    if cells.size() == 0 or material <= 0:
+        return 0
+
+    var max_p: int = maxi(1, mpm_max_particles)
+    var start: int = clampi(_mpm_particle_count_cpu, 0, max_p)
+    if start >= max_p:
+        return 0
+
+    var snapped: Array = []
+    snapped.resize(0)
+    for c in cells:
+        if typeof(c) != TYPE_VECTOR3I:
+            continue
+        var s := _snap_cell_in_bounds_to_bcc(c)
+        if s.x < 0:
+            continue
+        snapped.append(s)
+        if start + snapped.size() >= max_p:
+            break
+
+    var n: int = snapped.size()
+    if n <= 0:
+        return 0
+
+    var mass_val: float = float(_material_mass_by_id.get(material, 1.0))
+    if mass_val <= 0.0:
+        mass_val = 1.0
+    var vol_val: float = maxf(0.0, volume)
+
+    var pos_f := PackedFloat32Array()
+    pos_f.resize(n * 4)
+    var vel_f := PackedFloat32Array()
+    vel_f.resize(n * 4)
+    var meta_i := PackedInt32Array()
+    meta_i.resize(n * 4)
+    var c_f := PackedFloat32Array()
+    c_f.resize(n * 12) # mat3 in std430: 3 vec4 columns (padding)
+    var f_f := PackedFloat32Array()
+    f_f.resize(n * 12)
+
+    for i in range(n):
+        var cell: Vector3i = snapped[i]
+
+        pos_f[i * 4 + 0] = float(cell.x)
+        pos_f[i * 4 + 1] = float(cell.y)
+        pos_f[i * 4 + 2] = float(cell.z)
+        pos_f[i * 4 + 3] = mass_val
+
+        vel_f[i * 4 + 0] = velocity.x
+        vel_f[i * 4 + 1] = velocity.y
+        vel_f[i * 4 + 2] = velocity.z
+        vel_f[i * 4 + 3] = vol_val
+
+        meta_i[i * 4 + 0] = material
+        meta_i[i * 4 + 1] = 0 # flags
+        meta_i[i * 4 + 2] = 0 # bond_mask
+        meta_i[i * 4 + 3] = 0 # island_id
+
+        # C starts at 0; resize() already filled zeros.
+
+        # F starts at identity; mat3 is stored as 3 vec4 columns in std430.
+        var fi := i * 12
+        f_f[fi + 0] = 1.0
+        f_f[fi + 5] = 1.0
+        f_f[fi + 10] = 1.0
+
+    var pos_bytes := pos_f.to_byte_array()
+    var vel_bytes := vel_f.to_byte_array()
+    var meta_bytes := meta_i.to_byte_array()
+    var c_bytes := c_f.to_byte_array()
+    var f_bytes := f_f.to_byte_array()
+
+    var p_off: int = start * 16
+    var m_off: int = start * 16
+    var mat_off: int = start * 48
+
+    _rd.buffer_update(_mpm_pos_mass_a_rid, p_off, pos_bytes.size(), pos_bytes)
+    _rd.buffer_update(_mpm_pos_mass_b_rid, p_off, pos_bytes.size(), pos_bytes)
+    _rd.buffer_update(_mpm_vel_vol_a_rid, p_off, vel_bytes.size(), vel_bytes)
+    _rd.buffer_update(_mpm_vel_vol_b_rid, p_off, vel_bytes.size(), vel_bytes)
+    _rd.buffer_update(_mpm_meta_rid, m_off, meta_bytes.size(), meta_bytes)
+    _rd.buffer_update(_mpm_c_a_rid, mat_off, c_bytes.size(), c_bytes)
+    _rd.buffer_update(_mpm_c_b_rid, mat_off, c_bytes.size(), c_bytes)
+    _rd.buffer_update(_mpm_f_a_rid, mat_off, f_bytes.size(), f_bytes)
+    _rd.buffer_update(_mpm_f_b_rid, mat_off, f_bytes.size(), f_bytes)
+
+    var new_count: int = start + n
+    var count_bytes := PackedInt32Array([new_count]).to_byte_array()
+    _rd.buffer_update(_mpm_particle_count_rid, 0, count_bytes.size(), count_bytes)
+    _mpm_particle_count_cpu = new_count
+    return n
+
+func mpm_spawn_particle(cell: Vector3i, material: int, velocity: Vector3 = Vector3.ZERO) -> bool:
+    return mpm_spawn_cells([cell], material, velocity, 1.0) > 0
+
 func set_voxel_at(cell: Vector3i, material: int) -> void:
     if _rd == null:
+        return
+    if sim_mode == 1:
+        var c := _snap_cell_in_bounds_to_bcc(cell)
+        if c.x < 0:
+            print("VoxelRenderer set_voxel_at (MPM) | invalid cell=%s" % str(cell))
+            return
+        if material == 8 or material == 9:
+            _mpm_set_static_cell(c, material)
+            return
+        if material > 0:
+            mpm_spawn_particle(c, material)
         return
     if !_bcc_parity(cell):
         print("VoxelRenderer set_voxel_at | non-bcc cell=%s" % str(cell))

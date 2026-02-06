@@ -35,9 +35,6 @@ text = "Tumbler: Rotate Gravity (Voxel Sand)"
 [node name="HourglassButton" type="Button" parent="Margin/VBox"]
 text = "Hourglass: Glass + Sand"
 
-[node name="MpmHourglassButton" type="Button" parent="Margin/VBox"]
-text = "Hourglass (MPM): Glass + Sand"
-
 [node name="TemplateButton" type="Button" parent="Margin/VBox"]
 text = "Template: Glass + Sand"
 

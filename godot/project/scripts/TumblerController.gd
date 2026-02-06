@@ -20,6 +20,8 @@ func _initialize_scenario() -> void:
     wait_for_renderer_ready(Callable(self, "_start_scene"))
 
 func _start_scene() -> void:
+    if renderer != null:
+        renderer.sim_mode = 1
     _build_tumbler()
     _update_overlay()
 
@@ -57,4 +59,7 @@ func _build_tumbler() -> void:
                     continue
                 if y <= fill_height and rng.randf() <= sand_density:
                     entries.append({"pos": Vector3(x, y, z), "material": sand_material_id})
-    renderer.set_voxel_entries(entries, true)
+    if renderer.has_method("set_voxel_entries_mpm"):
+        renderer.set_voxel_entries_mpm(entries)
+    else:
+        renderer.set_voxel_entries(entries, true)

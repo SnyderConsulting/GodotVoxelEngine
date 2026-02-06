@@ -37,6 +37,8 @@ chunk_size = 8
 chunk_grid = 8
 sim_enabled = true
 sim_every = 1
+sim_mode = 1
+mpm_gravity_strength = 50.0
 
 [node name="PlinkoController" type="Node" parent="."]
 script = ExtResource("4")

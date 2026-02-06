@@ -48,6 +48,8 @@ func _late_init() -> void:
     if _renderer != null and _renderer.has_method("get") and _renderer.get("_rd") == null:
         call_deferred("_late_init")
         return
+    if _renderer != null:
+        _renderer.sim_mode = 1
     _build_board()
     _apply_entries()
 
@@ -59,15 +61,6 @@ func _late_init() -> void:
 
     # Auto-spawn one sand voxel for debug visibility.
     _spawn_sand()
-    # Scan the column to locate any sand voxels.
-    _renderer.debug_scan_column(_center, _center, _grid_extent - 1, 0)
-    _renderer.debug_scan_any(300000)
-    _renderer.debug_scan_for_material(1, 300000)
-    _renderer.debug_scan_for_material(glass_material_id, 300000)
-    _renderer.debug_scan_for_material(invisible_material_id, 300000)
-    _schedule_scan(1.0)
-    _schedule_scan(2.0)
-    _schedule_scan(4.0)
 
 func _process(_delta: float) -> void:
     if Input.is_action_just_pressed("ui_cancel"):
@@ -165,7 +158,10 @@ func _apply_entries() -> void:
     if _entries.size() > 0:
         var last_entry = _entries[_entries.size() - 1]
         print("Plinko apply | entries=%d last=%s" % [_entries.size(), str(last_entry)])
-    _renderer.set_voxel_entries(_entries, true)
+    if _renderer.has_method("set_voxel_entries_mpm"):
+        _renderer.set_voxel_entries_mpm(_entries)
+    else:
+        _renderer.set_voxel_entries(_entries, true)
 
 func _compute_spawn_y(x: int, z: int) -> int:
     var y := _grid_extent - 2

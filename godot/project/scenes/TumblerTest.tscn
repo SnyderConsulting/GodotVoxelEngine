@@ -35,6 +35,8 @@ quad_path = NodePath("../OrbitRig/Camera3D/RaymarchQuad")
 camera_path = NodePath("../OrbitRig/Camera3D")
 sim_enabled = true
 sim_every = 1
+sim_mode = 1
+mpm_gravity_strength = 50.0
 
 [node name="TumblerController" type="Node" parent="."]
 script = ExtResource("4")
