@@ -4,6 +4,8 @@ dist/
 Thumbs.db
 *.log
 *.import
+*.pyc
+__pycache__/
 godot/engine-bin/
 godot/engine-src/bin/
 godot/engine-src/.scons_env.json

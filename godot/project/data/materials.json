@@ -37,6 +37,18 @@
       "gravity_bias": 0.0
     },
     {
+      "id": 4,
+      "name": "stone",
+      "mass": 4.0,
+      "friction": 1.0,
+      "cohesion": 1.5,
+      "resistance": 8.0,
+      "drag": 0.2,
+      "support_bonus": 0.0,
+      "lateral_bias": -0.5,
+      "gravity_bias": 0.0
+    },
+    {
       "id": 8,
       "name": "glass",
       "mass": 3.0,

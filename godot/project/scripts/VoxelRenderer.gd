@@ -28,6 +28,14 @@ extends Node
 @export var sim_enabled: bool = false
 @export var sim_every: int = 1
 @export var sim_clear_output: bool = true
+@export var sim_mode: int = 0 # 0 = CA (grid), 1 = MPM (particles)
+@export var mpm_dt: float = 1.0 / 60.0
+@export var mpm_substeps: int = 2
+@export var mpm_max_particles: int = 50000
+@export var mpm_gravity_strength: float = 12.0
+@export var mpm_rigid_enabled: bool = true
+@export var mpm_fracture_enabled: bool = true
+@export var mpm_ccl_iterations: int = 12
 @export var diag_enabled: bool = false
 @export var diag_every: int = 60
 @export var diag_log_buffers: bool = false
@@ -46,11 +54,44 @@ var _active_list_shader_rid: RID
 var _active_list_pipeline_rid: RID
 var _active_dispatch_shader_rid: RID
 var _active_dispatch_pipeline_rid: RID
+var _mpm_copy_static_shader_rid: RID
+var _mpm_copy_static_pipeline_rid: RID
+var _mpm_init_particles_shader_rid: RID
+var _mpm_init_particles_pipeline_rid: RID
+var _mpm_p2g_shader_rid: RID
+var _mpm_p2g_pipeline_rid: RID
+var _mpm_grid_update_shader_rid: RID
+var _mpm_grid_update_pipeline_rid: RID
+var _mpm_g2p_advect_shader_rid: RID
+var _mpm_g2p_advect_pipeline_rid: RID
+var _mpm_grid_to_atlas_shader_rid: RID
+var _mpm_grid_to_atlas_pipeline_rid: RID
+var _mpm_particles_to_atlas_shader_rid: RID
+var _mpm_particles_to_atlas_pipeline_rid: RID
+var _mpm_build_rigid_map_shader_rid: RID
+var _mpm_build_rigid_map_pipeline_rid: RID
+var _mpm_update_bonds_shader_rid: RID
+var _mpm_update_bonds_pipeline_rid: RID
+var _mpm_ccl_init_shader_rid: RID
+var _mpm_ccl_init_pipeline_rid: RID
+var _mpm_ccl_propagate_shader_rid: RID
+var _mpm_ccl_propagate_pipeline_rid: RID
+var _mpm_ccl_write_shader_rid: RID
+var _mpm_ccl_write_pipeline_rid: RID
+var _mpm_island_accum0_shader_rid: RID
+var _mpm_island_accum0_pipeline_rid: RID
+var _mpm_island_finalize_shader_rid: RID
+var _mpm_island_finalize_pipeline_rid: RID
+var _mpm_island_accum1_shader_rid: RID
+var _mpm_island_accum1_pipeline_rid: RID
+var _mpm_island_apply_shader_rid: RID
+var _mpm_island_apply_pipeline_rid: RID
 var _texture_rid: RID
 var _ubo_rid: RID
 var _indirection_rid: RID
 var _atlas_a_rid: RID
 var _atlas_b_rid: RID
+var _atlas_static_rid: RID
 var _seed_a_rid: RID
 var _seed_b_rid: RID
 var _preview_rid: RID
@@ -64,6 +105,29 @@ var _active_list_rid: RID
 var _active_count_rid: RID
 var _sim_dispatch_rid: RID
 var _material_props_rid: RID
+var _mpm_pos_mass_a_rid: RID
+var _mpm_pos_mass_b_rid: RID
+var _mpm_vel_vol_a_rid: RID
+var _mpm_vel_vol_b_rid: RID
+var _mpm_c_a_rid: RID
+var _mpm_c_b_rid: RID
+var _mpm_f_a_rid: RID
+var _mpm_f_b_rid: RID
+var _mpm_meta_rid: RID
+var _mpm_particle_count_rid: RID
+var _mpm_grid_accum_rid: RID
+var _mpm_grid_vel_rid: RID
+var _mpm_rigid_map_rid: RID
+var _mpm_cell_pos_rid: RID
+var _mpm_labels_a_rid: RID
+var _mpm_labels_b_rid: RID
+var _mpm_island_mass_mom_rid: RID
+var _mpm_island_mass_com_rid: RID
+var _mpm_island_com_mass_rid: RID
+var _mpm_island_vel_rid: RID
+var _mpm_island_L_rid: RID
+var _mpm_island_I0_rid: RID
+var _mpm_island_I1_rid: RID
 var _preview_cells: Array = []
 var _cursor_cell := Vector3i(-1, -1, -1)
 var _preview_occ_bricks: PackedInt32Array = PackedInt32Array()
@@ -75,6 +139,37 @@ var _occupancy_uniform_set_a_rid: RID
 var _occupancy_uniform_set_b_rid: RID
 var _sim_uniform_set_ab: RID
 var _sim_uniform_set_ba: RID
+var _mpm_copy_uniform_set_a: RID
+var _mpm_copy_uniform_set_b: RID
+var _mpm_init_uniform_set: RID
+var _mpm_p2g_uniform_set_a: RID
+var _mpm_p2g_uniform_set_b: RID
+var _mpm_grid_uniform_set: RID
+var _mpm_g2p_uniform_set_ab: RID
+var _mpm_g2p_uniform_set_ba: RID
+var _mpm_grid_to_atlas_uniform_set_a: RID
+var _mpm_grid_to_atlas_uniform_set_b: RID
+var _mpm_particles_to_atlas_uniform_set_a: RID
+var _mpm_particles_to_atlas_uniform_set_b: RID
+var _mpm_rigid_map_set_a: RID
+var _mpm_rigid_map_set_b: RID
+var _mpm_update_bonds_set_a: RID
+var _mpm_update_bonds_set_b: RID
+var _mpm_ccl_init_set_a: RID
+var _mpm_ccl_init_set_b: RID
+var _mpm_ccl_prop_set_a_ab: RID
+var _mpm_ccl_prop_set_a_ba: RID
+var _mpm_ccl_prop_set_b_ab: RID
+var _mpm_ccl_prop_set_b_ba: RID
+var _mpm_ccl_write_set_a: RID
+var _mpm_ccl_write_set_b: RID
+var _mpm_island_accum0_set_a: RID
+var _mpm_island_accum0_set_b: RID
+var _mpm_island_finalize_set: RID
+var _mpm_island_accum1_set_a: RID
+var _mpm_island_accum1_set_b: RID
+var _mpm_island_apply_set_a: RID
+var _mpm_island_apply_set_b: RID
 var _active_list_uniform_set_rid: RID
 var _active_dispatch_uniform_set_rid: RID
 var _light_uniform_set_a_ab: RID
@@ -103,6 +198,7 @@ var _light_frame := 0
 var _active_list_ready := false
 var _indirection_cpu: PackedInt32Array = PackedInt32Array()
 var _rng := RandomNumberGenerator.new()
+var _mpm_particles_use_a := true
 
 func _diag(msg: String) -> void:
     if !diag_enabled:
@@ -270,6 +366,327 @@ func _init_render_resources() -> void:
                 if !_active_dispatch_pipeline_rid.is_valid():
                     push_error("Failed to create active dispatch pipeline.")
 
+    # MPM (particle) physics pipelines.
+    _mpm_copy_static_shader_rid = RID()
+    _mpm_copy_static_pipeline_rid = RID()
+    var mpm_copy_text := FileAccess.get_file_as_string("res://shaders/mpm_copy_static.glsl")
+    if !mpm_copy_text.is_empty():
+        var mpm_copy_source := RDShaderSource.new()
+        mpm_copy_source.language = RenderingDevice.SHADER_LANGUAGE_GLSL
+        mpm_copy_source.set_stage_source(RenderingDevice.SHADER_STAGE_COMPUTE, mpm_copy_text)
+        var mpm_copy_spirv := _rd.shader_compile_spirv_from_source(mpm_copy_source)
+        var mpm_copy_error := mpm_copy_spirv.get_stage_compile_error(RenderingDevice.SHADER_STAGE_COMPUTE)
+        if mpm_copy_error != "":
+            push_error("MPM copy_static shader compile error: %s" % mpm_copy_error)
+        else:
+            _mpm_copy_static_shader_rid = _rd.shader_create_from_spirv(mpm_copy_spirv)
+            if !_mpm_copy_static_shader_rid.is_valid():
+                push_error("Failed to create MPM copy_static shader.")
+            else:
+                _mpm_copy_static_pipeline_rid = _rd.compute_pipeline_create(_mpm_copy_static_shader_rid)
+                if !_mpm_copy_static_pipeline_rid.is_valid():
+                    push_error("Failed to create MPM copy_static pipeline.")
+
+    _mpm_init_particles_shader_rid = RID()
+    _mpm_init_particles_pipeline_rid = RID()
+    var mpm_init_text := FileAccess.get_file_as_string("res://shaders/mpm_init_particles.glsl")
+    if !mpm_init_text.is_empty():
+        var mpm_init_source := RDShaderSource.new()
+        mpm_init_source.language = RenderingDevice.SHADER_LANGUAGE_GLSL
+        mpm_init_source.set_stage_source(RenderingDevice.SHADER_STAGE_COMPUTE, mpm_init_text)
+        var mpm_init_spirv := _rd.shader_compile_spirv_from_source(mpm_init_source)
+        var mpm_init_error := mpm_init_spirv.get_stage_compile_error(RenderingDevice.SHADER_STAGE_COMPUTE)
+        if mpm_init_error != "":
+            push_error("MPM init_particles shader compile error: %s" % mpm_init_error)
+        else:
+            _mpm_init_particles_shader_rid = _rd.shader_create_from_spirv(mpm_init_spirv)
+            if !_mpm_init_particles_shader_rid.is_valid():
+                push_error("Failed to create MPM init_particles shader.")
+            else:
+                _mpm_init_particles_pipeline_rid = _rd.compute_pipeline_create(_mpm_init_particles_shader_rid)
+                if !_mpm_init_particles_pipeline_rid.is_valid():
+                    push_error("Failed to create MPM init_particles pipeline.")
+
+    _mpm_p2g_shader_rid = RID()
+    _mpm_p2g_pipeline_rid = RID()
+    var mpm_p2g_text := FileAccess.get_file_as_string("res://shaders/mpm_p2g.glsl")
+    if !mpm_p2g_text.is_empty():
+        var mpm_p2g_source := RDShaderSource.new()
+        mpm_p2g_source.language = RenderingDevice.SHADER_LANGUAGE_GLSL
+        mpm_p2g_source.set_stage_source(RenderingDevice.SHADER_STAGE_COMPUTE, mpm_p2g_text)
+        var mpm_p2g_spirv := _rd.shader_compile_spirv_from_source(mpm_p2g_source)
+        var mpm_p2g_error := mpm_p2g_spirv.get_stage_compile_error(RenderingDevice.SHADER_STAGE_COMPUTE)
+        if mpm_p2g_error != "":
+            push_error("MPM p2g shader compile error: %s" % mpm_p2g_error)
+        else:
+            _mpm_p2g_shader_rid = _rd.shader_create_from_spirv(mpm_p2g_spirv)
+            if !_mpm_p2g_shader_rid.is_valid():
+                push_error("Failed to create MPM p2g shader.")
+            else:
+                _mpm_p2g_pipeline_rid = _rd.compute_pipeline_create(_mpm_p2g_shader_rid)
+                if !_mpm_p2g_pipeline_rid.is_valid():
+                    push_error("Failed to create MPM p2g pipeline.")
+
+    _mpm_grid_update_shader_rid = RID()
+    _mpm_grid_update_pipeline_rid = RID()
+    var mpm_grid_text := FileAccess.get_file_as_string("res://shaders/mpm_grid_update.glsl")
+    if !mpm_grid_text.is_empty():
+        var mpm_grid_source := RDShaderSource.new()
+        mpm_grid_source.language = RenderingDevice.SHADER_LANGUAGE_GLSL
+        mpm_grid_source.set_stage_source(RenderingDevice.SHADER_STAGE_COMPUTE, mpm_grid_text)
+        var mpm_grid_spirv := _rd.shader_compile_spirv_from_source(mpm_grid_source)
+        var mpm_grid_error := mpm_grid_spirv.get_stage_compile_error(RenderingDevice.SHADER_STAGE_COMPUTE)
+        if mpm_grid_error != "":
+            push_error("MPM grid_update shader compile error: %s" % mpm_grid_error)
+        else:
+            _mpm_grid_update_shader_rid = _rd.shader_create_from_spirv(mpm_grid_spirv)
+            if !_mpm_grid_update_shader_rid.is_valid():
+                push_error("Failed to create MPM grid_update shader.")
+            else:
+                _mpm_grid_update_pipeline_rid = _rd.compute_pipeline_create(_mpm_grid_update_shader_rid)
+                if !_mpm_grid_update_pipeline_rid.is_valid():
+                    push_error("Failed to create MPM grid_update pipeline.")
+
+    _mpm_g2p_advect_shader_rid = RID()
+    _mpm_g2p_advect_pipeline_rid = RID()
+    var mpm_g2p_text := FileAccess.get_file_as_string("res://shaders/mpm_g2p_advect.glsl")
+    if !mpm_g2p_text.is_empty():
+        var mpm_g2p_source := RDShaderSource.new()
+        mpm_g2p_source.language = RenderingDevice.SHADER_LANGUAGE_GLSL
+        mpm_g2p_source.set_stage_source(RenderingDevice.SHADER_STAGE_COMPUTE, mpm_g2p_text)
+        var mpm_g2p_spirv := _rd.shader_compile_spirv_from_source(mpm_g2p_source)
+        var mpm_g2p_error := mpm_g2p_spirv.get_stage_compile_error(RenderingDevice.SHADER_STAGE_COMPUTE)
+        if mpm_g2p_error != "":
+            push_error("MPM g2p_advect shader compile error: %s" % mpm_g2p_error)
+        else:
+            _mpm_g2p_advect_shader_rid = _rd.shader_create_from_spirv(mpm_g2p_spirv)
+            if !_mpm_g2p_advect_shader_rid.is_valid():
+                push_error("Failed to create MPM g2p_advect shader.")
+            else:
+                _mpm_g2p_advect_pipeline_rid = _rd.compute_pipeline_create(_mpm_g2p_advect_shader_rid)
+                if !_mpm_g2p_advect_pipeline_rid.is_valid():
+                    push_error("Failed to create MPM g2p_advect pipeline.")
+
+    _mpm_grid_to_atlas_shader_rid = RID()
+    _mpm_grid_to_atlas_pipeline_rid = RID()
+    var mpm_grid_to_atlas_text := FileAccess.get_file_as_string("res://shaders/mpm_grid_to_atlas.glsl")
+    if !mpm_grid_to_atlas_text.is_empty():
+        var mpm_grid_to_atlas_source := RDShaderSource.new()
+        mpm_grid_to_atlas_source.language = RenderingDevice.SHADER_LANGUAGE_GLSL
+        mpm_grid_to_atlas_source.set_stage_source(RenderingDevice.SHADER_STAGE_COMPUTE, mpm_grid_to_atlas_text)
+        var mpm_grid_to_atlas_spirv := _rd.shader_compile_spirv_from_source(mpm_grid_to_atlas_source)
+        var mpm_grid_to_atlas_error := mpm_grid_to_atlas_spirv.get_stage_compile_error(RenderingDevice.SHADER_STAGE_COMPUTE)
+        if mpm_grid_to_atlas_error != "":
+            push_error("MPM grid_to_atlas shader compile error: %s" % mpm_grid_to_atlas_error)
+        else:
+            _mpm_grid_to_atlas_shader_rid = _rd.shader_create_from_spirv(mpm_grid_to_atlas_spirv)
+            if !_mpm_grid_to_atlas_shader_rid.is_valid():
+                push_error("Failed to create MPM grid_to_atlas shader.")
+            else:
+                _mpm_grid_to_atlas_pipeline_rid = _rd.compute_pipeline_create(_mpm_grid_to_atlas_shader_rid)
+                if !_mpm_grid_to_atlas_pipeline_rid.is_valid():
+                    push_error("Failed to create MPM grid_to_atlas pipeline.")
+
+    _mpm_particles_to_atlas_shader_rid = RID()
+    _mpm_particles_to_atlas_pipeline_rid = RID()
+    var mpm_particles_to_atlas_text := FileAccess.get_file_as_string("res://shaders/mpm_particles_to_atlas.glsl")
+    if !mpm_particles_to_atlas_text.is_empty():
+        var mpm_particles_to_atlas_source := RDShaderSource.new()
+        mpm_particles_to_atlas_source.language = RenderingDevice.SHADER_LANGUAGE_GLSL
+        mpm_particles_to_atlas_source.set_stage_source(RenderingDevice.SHADER_STAGE_COMPUTE, mpm_particles_to_atlas_text)
+        var mpm_particles_to_atlas_spirv := _rd.shader_compile_spirv_from_source(mpm_particles_to_atlas_source)
+        var mpm_particles_to_atlas_error := mpm_particles_to_atlas_spirv.get_stage_compile_error(RenderingDevice.SHADER_STAGE_COMPUTE)
+        if mpm_particles_to_atlas_error != "":
+            push_error("MPM particles_to_atlas shader compile error: %s" % mpm_particles_to_atlas_error)
+        else:
+            _mpm_particles_to_atlas_shader_rid = _rd.shader_create_from_spirv(mpm_particles_to_atlas_spirv)
+            if !_mpm_particles_to_atlas_shader_rid.is_valid():
+                push_error("Failed to create MPM particles_to_atlas shader.")
+            else:
+                _mpm_particles_to_atlas_pipeline_rid = _rd.compute_pipeline_create(_mpm_particles_to_atlas_shader_rid)
+                if !_mpm_particles_to_atlas_pipeline_rid.is_valid():
+                    push_error("Failed to create MPM particles_to_atlas pipeline.")
+
+    _mpm_build_rigid_map_shader_rid = RID()
+    _mpm_build_rigid_map_pipeline_rid = RID()
+    var mpm_rigid_map_text := FileAccess.get_file_as_string("res://shaders/mpm_build_rigid_map.glsl")
+    if !mpm_rigid_map_text.is_empty():
+        var mpm_rigid_map_source := RDShaderSource.new()
+        mpm_rigid_map_source.language = RenderingDevice.SHADER_LANGUAGE_GLSL
+        mpm_rigid_map_source.set_stage_source(RenderingDevice.SHADER_STAGE_COMPUTE, mpm_rigid_map_text)
+        var mpm_rigid_map_spirv := _rd.shader_compile_spirv_from_source(mpm_rigid_map_source)
+        var mpm_rigid_map_error := mpm_rigid_map_spirv.get_stage_compile_error(RenderingDevice.SHADER_STAGE_COMPUTE)
+        if mpm_rigid_map_error != "":
+            push_error("MPM build_rigid_map shader compile error: %s" % mpm_rigid_map_error)
+        else:
+            _mpm_build_rigid_map_shader_rid = _rd.shader_create_from_spirv(mpm_rigid_map_spirv)
+            if !_mpm_build_rigid_map_shader_rid.is_valid():
+                push_error("Failed to create MPM build_rigid_map shader.")
+            else:
+                _mpm_build_rigid_map_pipeline_rid = _rd.compute_pipeline_create(_mpm_build_rigid_map_shader_rid)
+                if !_mpm_build_rigid_map_pipeline_rid.is_valid():
+                    push_error("Failed to create MPM build_rigid_map pipeline.")
+
+    _mpm_update_bonds_shader_rid = RID()
+    _mpm_update_bonds_pipeline_rid = RID()
+    var mpm_update_bonds_text := FileAccess.get_file_as_string("res://shaders/mpm_update_bonds.glsl")
+    if !mpm_update_bonds_text.is_empty():
+        var mpm_update_bonds_source := RDShaderSource.new()
+        mpm_update_bonds_source.language = RenderingDevice.SHADER_LANGUAGE_GLSL
+        mpm_update_bonds_source.set_stage_source(RenderingDevice.SHADER_STAGE_COMPUTE, mpm_update_bonds_text)
+        var mpm_update_bonds_spirv := _rd.shader_compile_spirv_from_source(mpm_update_bonds_source)
+        var mpm_update_bonds_error := mpm_update_bonds_spirv.get_stage_compile_error(RenderingDevice.SHADER_STAGE_COMPUTE)
+        if mpm_update_bonds_error != "":
+            push_error("MPM update_bonds shader compile error: %s" % mpm_update_bonds_error)
+        else:
+            _mpm_update_bonds_shader_rid = _rd.shader_create_from_spirv(mpm_update_bonds_spirv)
+            if !_mpm_update_bonds_shader_rid.is_valid():
+                push_error("Failed to create MPM update_bonds shader.")
+            else:
+                _mpm_update_bonds_pipeline_rid = _rd.compute_pipeline_create(_mpm_update_bonds_shader_rid)
+                if !_mpm_update_bonds_pipeline_rid.is_valid():
+                    push_error("Failed to create MPM update_bonds pipeline.")
+
+    _mpm_ccl_init_shader_rid = RID()
+    _mpm_ccl_init_pipeline_rid = RID()
+    var mpm_ccl_init_text := FileAccess.get_file_as_string("res://shaders/mpm_ccl_init.glsl")
+    if !mpm_ccl_init_text.is_empty():
+        var mpm_ccl_init_source := RDShaderSource.new()
+        mpm_ccl_init_source.language = RenderingDevice.SHADER_LANGUAGE_GLSL
+        mpm_ccl_init_source.set_stage_source(RenderingDevice.SHADER_STAGE_COMPUTE, mpm_ccl_init_text)
+        var mpm_ccl_init_spirv := _rd.shader_compile_spirv_from_source(mpm_ccl_init_source)
+        var mpm_ccl_init_error := mpm_ccl_init_spirv.get_stage_compile_error(RenderingDevice.SHADER_STAGE_COMPUTE)
+        if mpm_ccl_init_error != "":
+            push_error("MPM ccl_init shader compile error: %s" % mpm_ccl_init_error)
+        else:
+            _mpm_ccl_init_shader_rid = _rd.shader_create_from_spirv(mpm_ccl_init_spirv)
+            if !_mpm_ccl_init_shader_rid.is_valid():
+                push_error("Failed to create MPM ccl_init shader.")
+            else:
+                _mpm_ccl_init_pipeline_rid = _rd.compute_pipeline_create(_mpm_ccl_init_shader_rid)
+                if !_mpm_ccl_init_pipeline_rid.is_valid():
+                    push_error("Failed to create MPM ccl_init pipeline.")
+
+    _mpm_ccl_propagate_shader_rid = RID()
+    _mpm_ccl_propagate_pipeline_rid = RID()
+    var mpm_ccl_prop_text := FileAccess.get_file_as_string("res://shaders/mpm_ccl_propagate.glsl")
+    if !mpm_ccl_prop_text.is_empty():
+        var mpm_ccl_prop_source := RDShaderSource.new()
+        mpm_ccl_prop_source.language = RenderingDevice.SHADER_LANGUAGE_GLSL
+        mpm_ccl_prop_source.set_stage_source(RenderingDevice.SHADER_STAGE_COMPUTE, mpm_ccl_prop_text)
+        var mpm_ccl_prop_spirv := _rd.shader_compile_spirv_from_source(mpm_ccl_prop_source)
+        var mpm_ccl_prop_error := mpm_ccl_prop_spirv.get_stage_compile_error(RenderingDevice.SHADER_STAGE_COMPUTE)
+        if mpm_ccl_prop_error != "":
+            push_error("MPM ccl_propagate shader compile error: %s" % mpm_ccl_prop_error)
+        else:
+            _mpm_ccl_propagate_shader_rid = _rd.shader_create_from_spirv(mpm_ccl_prop_spirv)
+            if !_mpm_ccl_propagate_shader_rid.is_valid():
+                push_error("Failed to create MPM ccl_propagate shader.")
+            else:
+                _mpm_ccl_propagate_pipeline_rid = _rd.compute_pipeline_create(_mpm_ccl_propagate_shader_rid)
+                if !_mpm_ccl_propagate_pipeline_rid.is_valid():
+                    push_error("Failed to create MPM ccl_propagate pipeline.")
+
+    _mpm_ccl_write_shader_rid = RID()
+    _mpm_ccl_write_pipeline_rid = RID()
+    var mpm_ccl_write_text := FileAccess.get_file_as_string("res://shaders/mpm_ccl_write_meta.glsl")
+    if !mpm_ccl_write_text.is_empty():
+        var mpm_ccl_write_source := RDShaderSource.new()
+        mpm_ccl_write_source.language = RenderingDevice.SHADER_LANGUAGE_GLSL
+        mpm_ccl_write_source.set_stage_source(RenderingDevice.SHADER_STAGE_COMPUTE, mpm_ccl_write_text)
+        var mpm_ccl_write_spirv := _rd.shader_compile_spirv_from_source(mpm_ccl_write_source)
+        var mpm_ccl_write_error := mpm_ccl_write_spirv.get_stage_compile_error(RenderingDevice.SHADER_STAGE_COMPUTE)
+        if mpm_ccl_write_error != "":
+            push_error("MPM ccl_write_meta shader compile error: %s" % mpm_ccl_write_error)
+        else:
+            _mpm_ccl_write_shader_rid = _rd.shader_create_from_spirv(mpm_ccl_write_spirv)
+            if !_mpm_ccl_write_shader_rid.is_valid():
+                push_error("Failed to create MPM ccl_write_meta shader.")
+            else:
+                _mpm_ccl_write_pipeline_rid = _rd.compute_pipeline_create(_mpm_ccl_write_shader_rid)
+                if !_mpm_ccl_write_pipeline_rid.is_valid():
+                    push_error("Failed to create MPM ccl_write_meta pipeline.")
+
+    _mpm_island_accum0_shader_rid = RID()
+    _mpm_island_accum0_pipeline_rid = RID()
+    var mpm_island_accum0_text := FileAccess.get_file_as_string("res://shaders/mpm_island_accum0.glsl")
+    if !mpm_island_accum0_text.is_empty():
+        var mpm_island_accum0_source := RDShaderSource.new()
+        mpm_island_accum0_source.language = RenderingDevice.SHADER_LANGUAGE_GLSL
+        mpm_island_accum0_source.set_stage_source(RenderingDevice.SHADER_STAGE_COMPUTE, mpm_island_accum0_text)
+        var mpm_island_accum0_spirv := _rd.shader_compile_spirv_from_source(mpm_island_accum0_source)
+        var mpm_island_accum0_error := mpm_island_accum0_spirv.get_stage_compile_error(RenderingDevice.SHADER_STAGE_COMPUTE)
+        if mpm_island_accum0_error != "":
+            push_error("MPM island_accum0 shader compile error: %s" % mpm_island_accum0_error)
+        else:
+            _mpm_island_accum0_shader_rid = _rd.shader_create_from_spirv(mpm_island_accum0_spirv)
+            if !_mpm_island_accum0_shader_rid.is_valid():
+                push_error("Failed to create MPM island_accum0 shader.")
+            else:
+                _mpm_island_accum0_pipeline_rid = _rd.compute_pipeline_create(_mpm_island_accum0_shader_rid)
+                if !_mpm_island_accum0_pipeline_rid.is_valid():
+                    push_error("Failed to create MPM island_accum0 pipeline.")
+
+    _mpm_island_finalize_shader_rid = RID()
+    _mpm_island_finalize_pipeline_rid = RID()
+    var mpm_island_finalize_text := FileAccess.get_file_as_string("res://shaders/mpm_island_finalize.glsl")
+    if !mpm_island_finalize_text.is_empty():
+        var mpm_island_finalize_source := RDShaderSource.new()
+        mpm_island_finalize_source.language = RenderingDevice.SHADER_LANGUAGE_GLSL
+        mpm_island_finalize_source.set_stage_source(RenderingDevice.SHADER_STAGE_COMPUTE, mpm_island_finalize_text)
+        var mpm_island_finalize_spirv := _rd.shader_compile_spirv_from_source(mpm_island_finalize_source)
+        var mpm_island_finalize_error := mpm_island_finalize_spirv.get_stage_compile_error(RenderingDevice.SHADER_STAGE_COMPUTE)
+        if mpm_island_finalize_error != "":
+            push_error("MPM island_finalize shader compile error: %s" % mpm_island_finalize_error)
+        else:
+            _mpm_island_finalize_shader_rid = _rd.shader_create_from_spirv(mpm_island_finalize_spirv)
+            if !_mpm_island_finalize_shader_rid.is_valid():
+                push_error("Failed to create MPM island_finalize shader.")
+            else:
+                _mpm_island_finalize_pipeline_rid = _rd.compute_pipeline_create(_mpm_island_finalize_shader_rid)
+                if !_mpm_island_finalize_pipeline_rid.is_valid():
+                    push_error("Failed to create MPM island_finalize pipeline.")
+
+    _mpm_island_accum1_shader_rid = RID()
+    _mpm_island_accum1_pipeline_rid = RID()
+    var mpm_island_accum1_text := FileAccess.get_file_as_string("res://shaders/mpm_island_accum1.glsl")
+    if !mpm_island_accum1_text.is_empty():
+        var mpm_island_accum1_source := RDShaderSource.new()
+        mpm_island_accum1_source.language = RenderingDevice.SHADER_LANGUAGE_GLSL
+        mpm_island_accum1_source.set_stage_source(RenderingDevice.SHADER_STAGE_COMPUTE, mpm_island_accum1_text)
+        var mpm_island_accum1_spirv := _rd.shader_compile_spirv_from_source(mpm_island_accum1_source)
+        var mpm_island_accum1_error := mpm_island_accum1_spirv.get_stage_compile_error(RenderingDevice.SHADER_STAGE_COMPUTE)
+        if mpm_island_accum1_error != "":
+            push_error("MPM island_accum1 shader compile error: %s" % mpm_island_accum1_error)
+        else:
+            _mpm_island_accum1_shader_rid = _rd.shader_create_from_spirv(mpm_island_accum1_spirv)
+            if !_mpm_island_accum1_shader_rid.is_valid():
+                push_error("Failed to create MPM island_accum1 shader.")
+            else:
+                _mpm_island_accum1_pipeline_rid = _rd.compute_pipeline_create(_mpm_island_accum1_shader_rid)
+                if !_mpm_island_accum1_pipeline_rid.is_valid():
+                    push_error("Failed to create MPM island_accum1 pipeline.")
+
+    _mpm_island_apply_shader_rid = RID()
+    _mpm_island_apply_pipeline_rid = RID()
+    var mpm_island_apply_text := FileAccess.get_file_as_string("res://shaders/mpm_island_apply.glsl")
+    if !mpm_island_apply_text.is_empty():
+        var mpm_island_apply_source := RDShaderSource.new()
+        mpm_island_apply_source.language = RenderingDevice.SHADER_LANGUAGE_GLSL
+        mpm_island_apply_source.set_stage_source(RenderingDevice.SHADER_STAGE_COMPUTE, mpm_island_apply_text)
+        var mpm_island_apply_spirv := _rd.shader_compile_spirv_from_source(mpm_island_apply_source)
+        var mpm_island_apply_error := mpm_island_apply_spirv.get_stage_compile_error(RenderingDevice.SHADER_STAGE_COMPUTE)
+        if mpm_island_apply_error != "":
+            push_error("MPM island_apply shader compile error: %s" % mpm_island_apply_error)
+        else:
+            _mpm_island_apply_shader_rid = _rd.shader_create_from_spirv(mpm_island_apply_spirv)
+            if !_mpm_island_apply_shader_rid.is_valid():
+                push_error("Failed to create MPM island_apply shader.")
+            else:
+                _mpm_island_apply_pipeline_rid = _rd.compute_pipeline_create(_mpm_island_apply_shader_rid)
+                if !_mpm_island_apply_pipeline_rid.is_valid():
+                    push_error("Failed to create MPM island_apply pipeline.")
+
     var fmt := RDTextureFormat.new()
     fmt.width = width
     fmt.height = height
@@ -377,6 +794,94 @@ func _init_render_resources() -> void:
         push_error("Failed to create material properties buffer.")
         return
 
+    # MPM buffers (particles + Eulerian accumulation grid + static obstacles).
+    _atlas_static_rid = _rd.storage_buffer_create(_atlas_bytes)
+    if !_atlas_static_rid.is_valid():
+        push_error("Failed to create static atlas buffer.")
+        return
+    _rd.buffer_clear(_atlas_static_rid, 0, _atlas_bytes)
+
+    var max_p: int = maxi(1, mpm_max_particles)
+    var particle_vec4_bytes: int = max_p * 16
+    var particle_meta_bytes: int = max_p * 16
+    var particle_mat3_bytes: int = max_p * 48
+    _mpm_pos_mass_a_rid = _rd.storage_buffer_create(particle_vec4_bytes)
+    _mpm_pos_mass_b_rid = _rd.storage_buffer_create(particle_vec4_bytes)
+    _mpm_vel_vol_a_rid = _rd.storage_buffer_create(particle_vec4_bytes)
+    _mpm_vel_vol_b_rid = _rd.storage_buffer_create(particle_vec4_bytes)
+    _mpm_c_a_rid = _rd.storage_buffer_create(particle_mat3_bytes)
+    _mpm_c_b_rid = _rd.storage_buffer_create(particle_mat3_bytes)
+    _mpm_f_a_rid = _rd.storage_buffer_create(particle_mat3_bytes)
+    _mpm_f_b_rid = _rd.storage_buffer_create(particle_mat3_bytes)
+    _mpm_meta_rid = _rd.storage_buffer_create(particle_meta_bytes)
+    _mpm_particle_count_rid = _rd.storage_buffer_create(4, PackedInt32Array([0]).to_byte_array())
+    if !_mpm_pos_mass_a_rid.is_valid() or !_mpm_pos_mass_b_rid.is_valid() or !_mpm_vel_vol_a_rid.is_valid() or !_mpm_vel_vol_b_rid.is_valid() or !_mpm_c_a_rid.is_valid() or !_mpm_c_b_rid.is_valid() or !_mpm_f_a_rid.is_valid() or !_mpm_f_b_rid.is_valid() or !_mpm_meta_rid.is_valid() or !_mpm_particle_count_rid.is_valid():
+        push_error("Failed to create one or more MPM particle buffers.")
+        return
+    _rd.buffer_clear(_mpm_pos_mass_a_rid, 0, particle_vec4_bytes)
+    _rd.buffer_clear(_mpm_pos_mass_b_rid, 0, particle_vec4_bytes)
+    _rd.buffer_clear(_mpm_vel_vol_a_rid, 0, particle_vec4_bytes)
+    _rd.buffer_clear(_mpm_vel_vol_b_rid, 0, particle_vec4_bytes)
+    _rd.buffer_clear(_mpm_c_a_rid, 0, particle_mat3_bytes)
+    _rd.buffer_clear(_mpm_c_b_rid, 0, particle_mat3_bytes)
+    _rd.buffer_clear(_mpm_f_a_rid, 0, particle_mat3_bytes)
+    _rd.buffer_clear(_mpm_f_b_rid, 0, particle_mat3_bytes)
+    _rd.buffer_clear(_mpm_meta_rid, 0, particle_meta_bytes)
+
+    var total_cells := int(_atlas_bytes / 4)
+    var grid_bytes := total_cells * 16
+    _mpm_grid_accum_rid = _rd.storage_buffer_create(grid_bytes)
+    _mpm_grid_vel_rid = _rd.storage_buffer_create(grid_bytes)
+    if !_mpm_grid_accum_rid.is_valid() or !_mpm_grid_vel_rid.is_valid():
+        push_error("Failed to create MPM grid buffers.")
+        return
+    _rd.buffer_clear(_mpm_grid_accum_rid, 0, grid_bytes)
+    _rd.buffer_clear(_mpm_grid_vel_rid, 0, grid_bytes)
+
+    # MPM rigid/island/fracture buffers.
+    var rigid_map_bytes := total_cells * 4
+    _mpm_rigid_map_rid = _rd.storage_buffer_create(rigid_map_bytes)
+    if !_mpm_rigid_map_rid.is_valid():
+        push_error("Failed to create MPM rigid map buffer.")
+        return
+    _rd.buffer_clear(_mpm_rigid_map_rid, 0, rigid_map_bytes)
+
+    var cell_pos_bytes := total_cells * 16
+    _mpm_cell_pos_rid = _rd.storage_buffer_create(cell_pos_bytes)
+    if !_mpm_cell_pos_rid.is_valid():
+        push_error("Failed to create MPM cell position buffer.")
+        return
+    _rd.buffer_clear(_mpm_cell_pos_rid, 0, cell_pos_bytes)
+
+    var labels_bytes := max_p * 4
+    _mpm_labels_a_rid = _rd.storage_buffer_create(labels_bytes)
+    _mpm_labels_b_rid = _rd.storage_buffer_create(labels_bytes)
+    if !_mpm_labels_a_rid.is_valid() or !_mpm_labels_b_rid.is_valid():
+        push_error("Failed to create one or more MPM label buffers.")
+        return
+    _rd.buffer_clear(_mpm_labels_a_rid, 0, labels_bytes)
+    _rd.buffer_clear(_mpm_labels_b_rid, 0, labels_bytes)
+
+    var island_count := max_p + 1
+    var island_bytes := island_count * 16
+    _mpm_island_mass_mom_rid = _rd.storage_buffer_create(island_bytes)
+    _mpm_island_mass_com_rid = _rd.storage_buffer_create(island_bytes)
+    _mpm_island_com_mass_rid = _rd.storage_buffer_create(island_bytes)
+    _mpm_island_vel_rid = _rd.storage_buffer_create(island_bytes)
+    _mpm_island_L_rid = _rd.storage_buffer_create(island_bytes)
+    _mpm_island_I0_rid = _rd.storage_buffer_create(island_bytes)
+    _mpm_island_I1_rid = _rd.storage_buffer_create(island_bytes)
+    if !_mpm_island_mass_mom_rid.is_valid() or !_mpm_island_mass_com_rid.is_valid() or !_mpm_island_com_mass_rid.is_valid() or !_mpm_island_vel_rid.is_valid() or !_mpm_island_L_rid.is_valid() or !_mpm_island_I0_rid.is_valid() or !_mpm_island_I1_rid.is_valid():
+        push_error("Failed to create one or more MPM island buffers.")
+        return
+    _rd.buffer_clear(_mpm_island_mass_mom_rid, 0, island_bytes)
+    _rd.buffer_clear(_mpm_island_mass_com_rid, 0, island_bytes)
+    _rd.buffer_clear(_mpm_island_com_mass_rid, 0, island_bytes)
+    _rd.buffer_clear(_mpm_island_vel_rid, 0, island_bytes)
+    _rd.buffer_clear(_mpm_island_L_rid, 0, island_bytes)
+    _rd.buffer_clear(_mpm_island_I0_rid, 0, island_bytes)
+    _rd.buffer_clear(_mpm_island_I1_rid, 0, island_bytes)
+
     if diag_enabled and diag_log_buffers:
         _diag("buffers allocated atlas_bytes=%d indirection_bytes=%d occupancy_bytes=%d metrics_bytes=%d active_list_bytes=%d" % [
             _atlas_bytes, indirection_bytes, occupancy_bytes, _metrics_bytes, _active_list_bytes
@@ -442,6 +947,10 @@ func _init_render_resources() -> void:
     preview_occ_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
     preview_occ_uniform.binding = 9
     preview_occ_uniform.add_id(_preview_occ_rid)
+    var cell_pos_uniform := RDUniform.new()
+    cell_pos_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+    cell_pos_uniform.binding = 10
+    cell_pos_uniform.add_id(_mpm_cell_pos_rid)
 
     var light_uniform_a := RDUniform.new()
     light_uniform_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
@@ -454,7 +963,7 @@ func _init_render_resources() -> void:
     light_uniform_b.add_id(_light_b_rid)
 
     _uniform_set_a_light_a_rid = _rd.uniform_set_create(
-        [img_uniform, ubo_uniform, indirection_uniform, atlas_uniform_a, occupancy_uniform, metrics_uniform, light_uniform_a, preview_uniform, cursor_uniform, preview_occ_uniform],
+        [img_uniform, ubo_uniform, indirection_uniform, atlas_uniform_a, occupancy_uniform, metrics_uniform, light_uniform_a, preview_uniform, cursor_uniform, preview_occ_uniform, cell_pos_uniform],
         _shader_rid,
         0
     )
@@ -462,7 +971,7 @@ func _init_render_resources() -> void:
         push_error("Failed to create uniform set A (light A).")
         return
     _uniform_set_a_light_b_rid = _rd.uniform_set_create(
-        [img_uniform, ubo_uniform, indirection_uniform, atlas_uniform_a, occupancy_uniform, metrics_uniform, light_uniform_b, preview_uniform, cursor_uniform, preview_occ_uniform],
+        [img_uniform, ubo_uniform, indirection_uniform, atlas_uniform_a, occupancy_uniform, metrics_uniform, light_uniform_b, preview_uniform, cursor_uniform, preview_occ_uniform, cell_pos_uniform],
         _shader_rid,
         0
     )
@@ -470,7 +979,7 @@ func _init_render_resources() -> void:
         push_error("Failed to create uniform set A (light B).")
         return
     _uniform_set_b_light_a_rid = _rd.uniform_set_create(
-        [img_uniform, ubo_uniform, indirection_uniform, atlas_uniform_b, occupancy_uniform, metrics_uniform, light_uniform_a, preview_uniform, cursor_uniform, preview_occ_uniform],
+        [img_uniform, ubo_uniform, indirection_uniform, atlas_uniform_b, occupancy_uniform, metrics_uniform, light_uniform_a, preview_uniform, cursor_uniform, preview_occ_uniform, cell_pos_uniform],
         _shader_rid,
         0
     )
@@ -478,7 +987,7 @@ func _init_render_resources() -> void:
         push_error("Failed to create uniform set B (light A).")
         return
     _uniform_set_b_light_b_rid = _rd.uniform_set_create(
-        [img_uniform, ubo_uniform, indirection_uniform, atlas_uniform_b, occupancy_uniform, metrics_uniform, light_uniform_b, preview_uniform, cursor_uniform, preview_occ_uniform],
+        [img_uniform, ubo_uniform, indirection_uniform, atlas_uniform_b, occupancy_uniform, metrics_uniform, light_uniform_b, preview_uniform, cursor_uniform, preview_occ_uniform, cell_pos_uniform],
         _shader_rid,
         0
     )
@@ -754,6 +1263,754 @@ func _init_render_resources() -> void:
         if !_sim_uniform_set_ba.is_valid():
             push_error("Failed to create sim uniform set BA.")
 
+    # MPM uniform sets.
+    if _mpm_copy_static_shader_rid.is_valid():
+        var mpm_copy_ubo := RDUniform.new()
+        mpm_copy_ubo.uniform_type = RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER
+        mpm_copy_ubo.binding = 0
+        mpm_copy_ubo.add_id(_ubo_rid)
+
+        var mpm_static_uniform := RDUniform.new()
+        mpm_static_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_static_uniform.binding = 1
+        mpm_static_uniform.add_id(_atlas_static_rid)
+
+        var mpm_copy_out_a := RDUniform.new()
+        mpm_copy_out_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_copy_out_a.binding = 2
+        mpm_copy_out_a.add_id(_atlas_a_rid)
+        _mpm_copy_uniform_set_a = _rd.uniform_set_create([mpm_copy_ubo, mpm_static_uniform, mpm_copy_out_a], _mpm_copy_static_shader_rid, 0)
+
+        var mpm_copy_out_b := RDUniform.new()
+        mpm_copy_out_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_copy_out_b.binding = 2
+        mpm_copy_out_b.add_id(_atlas_b_rid)
+        _mpm_copy_uniform_set_b = _rd.uniform_set_create([mpm_copy_ubo, mpm_static_uniform, mpm_copy_out_b], _mpm_copy_static_shader_rid, 0)
+
+    if _mpm_init_particles_shader_rid.is_valid():
+        var mpm_init_meta := RDUniform.new()
+        mpm_init_meta.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_init_meta.binding = 0
+        mpm_init_meta.add_id(_mpm_meta_rid)
+        var mpm_init_count := RDUniform.new()
+        mpm_init_count.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_init_count.binding = 1
+        mpm_init_count.add_id(_mpm_particle_count_rid)
+        var mpm_init_c_a := RDUniform.new()
+        mpm_init_c_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_init_c_a.binding = 2
+        mpm_init_c_a.add_id(_mpm_c_a_rid)
+        var mpm_init_f_a := RDUniform.new()
+        mpm_init_f_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_init_f_a.binding = 3
+        mpm_init_f_a.add_id(_mpm_f_a_rid)
+        var mpm_init_c_b := RDUniform.new()
+        mpm_init_c_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_init_c_b.binding = 4
+        mpm_init_c_b.add_id(_mpm_c_b_rid)
+        var mpm_init_f_b := RDUniform.new()
+        mpm_init_f_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_init_f_b.binding = 5
+        mpm_init_f_b.add_id(_mpm_f_b_rid)
+        _mpm_init_uniform_set = _rd.uniform_set_create(
+            [mpm_init_meta, mpm_init_count, mpm_init_c_a, mpm_init_f_a, mpm_init_c_b, mpm_init_f_b],
+            _mpm_init_particles_shader_rid,
+            0
+        )
+
+    if _mpm_p2g_shader_rid.is_valid():
+        var mpm_ubo := RDUniform.new()
+        mpm_ubo.uniform_type = RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER
+        mpm_ubo.binding = 0
+        mpm_ubo.add_id(_ubo_rid)
+        var mpm_indirection := RDUniform.new()
+        mpm_indirection.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_indirection.binding = 1
+        mpm_indirection.add_id(_indirection_rid)
+        var mpm_meta := RDUniform.new()
+        mpm_meta.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_meta.binding = 6
+        mpm_meta.add_id(_mpm_meta_rid)
+        var mpm_count := RDUniform.new()
+        mpm_count.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_count.binding = 7
+        mpm_count.add_id(_mpm_particle_count_rid)
+        var mpm_grid_accum := RDUniform.new()
+        mpm_grid_accum.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_grid_accum.binding = 8
+        mpm_grid_accum.add_id(_mpm_grid_accum_rid)
+
+        var mpm_pos_a := RDUniform.new()
+        mpm_pos_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_pos_a.binding = 2
+        mpm_pos_a.add_id(_mpm_pos_mass_a_rid)
+        var mpm_vel_a := RDUniform.new()
+        mpm_vel_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_vel_a.binding = 3
+        mpm_vel_a.add_id(_mpm_vel_vol_a_rid)
+        var mpm_c_a := RDUniform.new()
+        mpm_c_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_c_a.binding = 4
+        mpm_c_a.add_id(_mpm_c_a_rid)
+        var mpm_f_a := RDUniform.new()
+        mpm_f_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_f_a.binding = 5
+        mpm_f_a.add_id(_mpm_f_a_rid)
+        _mpm_p2g_uniform_set_a = _rd.uniform_set_create([mpm_ubo, mpm_indirection, mpm_pos_a, mpm_vel_a, mpm_c_a, mpm_f_a, mpm_meta, mpm_count, mpm_grid_accum], _mpm_p2g_shader_rid, 0)
+
+        var mpm_pos_b := RDUniform.new()
+        mpm_pos_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_pos_b.binding = 2
+        mpm_pos_b.add_id(_mpm_pos_mass_b_rid)
+        var mpm_vel_b := RDUniform.new()
+        mpm_vel_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_vel_b.binding = 3
+        mpm_vel_b.add_id(_mpm_vel_vol_b_rid)
+        var mpm_c_b := RDUniform.new()
+        mpm_c_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_c_b.binding = 4
+        mpm_c_b.add_id(_mpm_c_b_rid)
+        var mpm_f_b := RDUniform.new()
+        mpm_f_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_f_b.binding = 5
+        mpm_f_b.add_id(_mpm_f_b_rid)
+        _mpm_p2g_uniform_set_b = _rd.uniform_set_create([mpm_ubo, mpm_indirection, mpm_pos_b, mpm_vel_b, mpm_c_b, mpm_f_b, mpm_meta, mpm_count, mpm_grid_accum], _mpm_p2g_shader_rid, 0)
+
+    if _mpm_grid_update_shader_rid.is_valid():
+        var mpm_grid_ubo := RDUniform.new()
+        mpm_grid_ubo.uniform_type = RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER
+        mpm_grid_ubo.binding = 0
+        mpm_grid_ubo.add_id(_ubo_rid)
+        var mpm_grid_static := RDUniform.new()
+        mpm_grid_static.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_grid_static.binding = 1
+        mpm_grid_static.add_id(_atlas_static_rid)
+        var mpm_grid_acc := RDUniform.new()
+        mpm_grid_acc.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_grid_acc.binding = 2
+        mpm_grid_acc.add_id(_mpm_grid_accum_rid)
+        var mpm_grid_vel := RDUniform.new()
+        mpm_grid_vel.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_grid_vel.binding = 3
+        mpm_grid_vel.add_id(_mpm_grid_vel_rid)
+        _mpm_grid_uniform_set = _rd.uniform_set_create([mpm_grid_ubo, mpm_grid_static, mpm_grid_acc, mpm_grid_vel], _mpm_grid_update_shader_rid, 0)
+
+    if _mpm_g2p_advect_shader_rid.is_valid():
+        var mpm_g2p_ubo := RDUniform.new()
+        mpm_g2p_ubo.uniform_type = RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER
+        mpm_g2p_ubo.binding = 0
+        mpm_g2p_ubo.add_id(_ubo_rid)
+        var mpm_g2p_indirection := RDUniform.new()
+        mpm_g2p_indirection.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_g2p_indirection.binding = 1
+        mpm_g2p_indirection.add_id(_indirection_rid)
+        var mpm_g2p_meta := RDUniform.new()
+        mpm_g2p_meta.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_g2p_meta.binding = 10
+        mpm_g2p_meta.add_id(_mpm_meta_rid)
+        var mpm_g2p_count := RDUniform.new()
+        mpm_g2p_count.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_g2p_count.binding = 11
+        mpm_g2p_count.add_id(_mpm_particle_count_rid)
+        var mpm_g2p_grid_vel := RDUniform.new()
+        mpm_g2p_grid_vel.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_g2p_grid_vel.binding = 12
+        mpm_g2p_grid_vel.add_id(_mpm_grid_vel_rid)
+        var mpm_g2p_static := RDUniform.new()
+        mpm_g2p_static.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_g2p_static.binding = 13
+        mpm_g2p_static.add_id(_atlas_static_rid)
+
+        var mpm_pos_in_a := RDUniform.new()
+        mpm_pos_in_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_pos_in_a.binding = 2
+        mpm_pos_in_a.add_id(_mpm_pos_mass_a_rid)
+        var mpm_vel_in_a := RDUniform.new()
+        mpm_vel_in_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_vel_in_a.binding = 3
+        mpm_vel_in_a.add_id(_mpm_vel_vol_a_rid)
+        var mpm_c_in_a := RDUniform.new()
+        mpm_c_in_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_c_in_a.binding = 4
+        mpm_c_in_a.add_id(_mpm_c_a_rid)
+        var mpm_f_in_a := RDUniform.new()
+        mpm_f_in_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_f_in_a.binding = 5
+        mpm_f_in_a.add_id(_mpm_f_a_rid)
+        var mpm_pos_out_b := RDUniform.new()
+        mpm_pos_out_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_pos_out_b.binding = 6
+        mpm_pos_out_b.add_id(_mpm_pos_mass_b_rid)
+        var mpm_vel_out_b := RDUniform.new()
+        mpm_vel_out_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_vel_out_b.binding = 7
+        mpm_vel_out_b.add_id(_mpm_vel_vol_b_rid)
+        var mpm_c_out_b := RDUniform.new()
+        mpm_c_out_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_c_out_b.binding = 8
+        mpm_c_out_b.add_id(_mpm_c_b_rid)
+        var mpm_f_out_b := RDUniform.new()
+        mpm_f_out_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_f_out_b.binding = 9
+        mpm_f_out_b.add_id(_mpm_f_b_rid)
+        _mpm_g2p_uniform_set_ab = _rd.uniform_set_create(
+            [mpm_g2p_ubo, mpm_g2p_indirection, mpm_pos_in_a, mpm_vel_in_a, mpm_c_in_a, mpm_f_in_a, mpm_pos_out_b, mpm_vel_out_b, mpm_c_out_b, mpm_f_out_b, mpm_g2p_meta, mpm_g2p_count, mpm_g2p_grid_vel, mpm_g2p_static],
+            _mpm_g2p_advect_shader_rid,
+            0
+        )
+
+        var mpm_pos_in_b := RDUniform.new()
+        mpm_pos_in_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_pos_in_b.binding = 2
+        mpm_pos_in_b.add_id(_mpm_pos_mass_b_rid)
+        var mpm_vel_in_b := RDUniform.new()
+        mpm_vel_in_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_vel_in_b.binding = 3
+        mpm_vel_in_b.add_id(_mpm_vel_vol_b_rid)
+        var mpm_c_in_b := RDUniform.new()
+        mpm_c_in_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_c_in_b.binding = 4
+        mpm_c_in_b.add_id(_mpm_c_b_rid)
+        var mpm_f_in_b := RDUniform.new()
+        mpm_f_in_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_f_in_b.binding = 5
+        mpm_f_in_b.add_id(_mpm_f_b_rid)
+        var mpm_pos_out_a := RDUniform.new()
+        mpm_pos_out_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_pos_out_a.binding = 6
+        mpm_pos_out_a.add_id(_mpm_pos_mass_a_rid)
+        var mpm_vel_out_a := RDUniform.new()
+        mpm_vel_out_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_vel_out_a.binding = 7
+        mpm_vel_out_a.add_id(_mpm_vel_vol_a_rid)
+        var mpm_c_out_a := RDUniform.new()
+        mpm_c_out_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_c_out_a.binding = 8
+        mpm_c_out_a.add_id(_mpm_c_a_rid)
+        var mpm_f_out_a := RDUniform.new()
+        mpm_f_out_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_f_out_a.binding = 9
+        mpm_f_out_a.add_id(_mpm_f_a_rid)
+        _mpm_g2p_uniform_set_ba = _rd.uniform_set_create(
+            [mpm_g2p_ubo, mpm_g2p_indirection, mpm_pos_in_b, mpm_vel_in_b, mpm_c_in_b, mpm_f_in_b, mpm_pos_out_a, mpm_vel_out_a, mpm_c_out_a, mpm_f_out_a, mpm_g2p_meta, mpm_g2p_count, mpm_g2p_grid_vel, mpm_g2p_static],
+            _mpm_g2p_advect_shader_rid,
+            0
+        )
+
+    if _mpm_grid_to_atlas_shader_rid.is_valid():
+        var mpm_atlas_ubo := RDUniform.new()
+        mpm_atlas_ubo.uniform_type = RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER
+        mpm_atlas_ubo.binding = 0
+        mpm_atlas_ubo.add_id(_ubo_rid)
+        var mpm_atlas_static := RDUniform.new()
+        mpm_atlas_static.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_atlas_static.binding = 1
+        mpm_atlas_static.add_id(_atlas_static_rid)
+        var mpm_atlas_grid := RDUniform.new()
+        mpm_atlas_grid.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_atlas_grid.binding = 2
+        mpm_atlas_grid.add_id(_mpm_grid_vel_rid)
+
+        var mpm_atlas_out_a := RDUniform.new()
+        mpm_atlas_out_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_atlas_out_a.binding = 3
+        mpm_atlas_out_a.add_id(_atlas_a_rid)
+        _mpm_grid_to_atlas_uniform_set_a = _rd.uniform_set_create(
+            [mpm_atlas_ubo, mpm_atlas_static, mpm_atlas_grid, mpm_atlas_out_a],
+            _mpm_grid_to_atlas_shader_rid,
+            0
+        )
+
+        var mpm_atlas_out_b := RDUniform.new()
+        mpm_atlas_out_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_atlas_out_b.binding = 3
+        mpm_atlas_out_b.add_id(_atlas_b_rid)
+        _mpm_grid_to_atlas_uniform_set_b = _rd.uniform_set_create(
+            [mpm_atlas_ubo, mpm_atlas_static, mpm_atlas_grid, mpm_atlas_out_b],
+            _mpm_grid_to_atlas_shader_rid,
+            0
+        )
+
+    if _mpm_particles_to_atlas_shader_rid.is_valid():
+        var mpm_pta_ubo := RDUniform.new()
+        mpm_pta_ubo.uniform_type = RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER
+        mpm_pta_ubo.binding = 0
+        mpm_pta_ubo.add_id(_ubo_rid)
+        var mpm_pta_ind := RDUniform.new()
+        mpm_pta_ind.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_pta_ind.binding = 1
+        mpm_pta_ind.add_id(_indirection_rid)
+        var mpm_pta_meta := RDUniform.new()
+        mpm_pta_meta.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_pta_meta.binding = 3
+        mpm_pta_meta.add_id(_mpm_meta_rid)
+        var mpm_pta_count := RDUniform.new()
+        mpm_pta_count.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_pta_count.binding = 4
+        mpm_pta_count.add_id(_mpm_particle_count_rid)
+        var mpm_pta_cell_pos := RDUniform.new()
+        mpm_pta_cell_pos.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_pta_cell_pos.binding = 6
+        mpm_pta_cell_pos.add_id(_mpm_cell_pos_rid)
+
+        var mpm_pta_pos_a := RDUniform.new()
+        mpm_pta_pos_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_pta_pos_a.binding = 2
+        mpm_pta_pos_a.add_id(_mpm_pos_mass_a_rid)
+        var mpm_pta_out_a := RDUniform.new()
+        mpm_pta_out_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_pta_out_a.binding = 5
+        mpm_pta_out_a.add_id(_atlas_a_rid)
+        _mpm_particles_to_atlas_uniform_set_a = _rd.uniform_set_create(
+            [mpm_pta_ubo, mpm_pta_ind, mpm_pta_pos_a, mpm_pta_meta, mpm_pta_count, mpm_pta_out_a, mpm_pta_cell_pos],
+            _mpm_particles_to_atlas_shader_rid,
+            0
+        )
+
+        var mpm_pta_pos_b := RDUniform.new()
+        mpm_pta_pos_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_pta_pos_b.binding = 2
+        mpm_pta_pos_b.add_id(_mpm_pos_mass_b_rid)
+        var mpm_pta_out_b := RDUniform.new()
+        mpm_pta_out_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_pta_out_b.binding = 5
+        mpm_pta_out_b.add_id(_atlas_b_rid)
+        _mpm_particles_to_atlas_uniform_set_b = _rd.uniform_set_create(
+            [mpm_pta_ubo, mpm_pta_ind, mpm_pta_pos_b, mpm_pta_meta, mpm_pta_count, mpm_pta_out_b, mpm_pta_cell_pos],
+            _mpm_particles_to_atlas_shader_rid,
+            0
+        )
+
+    if _mpm_build_rigid_map_shader_rid.is_valid():
+        var mpm_rm_ubo := RDUniform.new()
+        mpm_rm_ubo.uniform_type = RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER
+        mpm_rm_ubo.binding = 0
+        mpm_rm_ubo.add_id(_ubo_rid)
+        var mpm_rm_ind := RDUniform.new()
+        mpm_rm_ind.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_rm_ind.binding = 1
+        mpm_rm_ind.add_id(_indirection_rid)
+        var mpm_rm_meta := RDUniform.new()
+        mpm_rm_meta.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_rm_meta.binding = 3
+        mpm_rm_meta.add_id(_mpm_meta_rid)
+        var mpm_rm_count := RDUniform.new()
+        mpm_rm_count.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_rm_count.binding = 4
+        mpm_rm_count.add_id(_mpm_particle_count_rid)
+        var mpm_rm_out := RDUniform.new()
+        mpm_rm_out.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_rm_out.binding = 5
+        mpm_rm_out.add_id(_mpm_rigid_map_rid)
+
+        var mpm_rm_pos_a := RDUniform.new()
+        mpm_rm_pos_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_rm_pos_a.binding = 2
+        mpm_rm_pos_a.add_id(_mpm_pos_mass_a_rid)
+        _mpm_rigid_map_set_a = _rd.uniform_set_create(
+            [mpm_rm_ubo, mpm_rm_ind, mpm_rm_pos_a, mpm_rm_meta, mpm_rm_count, mpm_rm_out],
+            _mpm_build_rigid_map_shader_rid,
+            0
+        )
+
+        var mpm_rm_pos_b := RDUniform.new()
+        mpm_rm_pos_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_rm_pos_b.binding = 2
+        mpm_rm_pos_b.add_id(_mpm_pos_mass_b_rid)
+        _mpm_rigid_map_set_b = _rd.uniform_set_create(
+            [mpm_rm_ubo, mpm_rm_ind, mpm_rm_pos_b, mpm_rm_meta, mpm_rm_count, mpm_rm_out],
+            _mpm_build_rigid_map_shader_rid,
+            0
+        )
+
+    if _mpm_update_bonds_shader_rid.is_valid():
+        var mpm_bonds_ubo := RDUniform.new()
+        mpm_bonds_ubo.uniform_type = RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER
+        mpm_bonds_ubo.binding = 0
+        mpm_bonds_ubo.add_id(_ubo_rid)
+        var mpm_bonds_ind := RDUniform.new()
+        mpm_bonds_ind.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_bonds_ind.binding = 1
+        mpm_bonds_ind.add_id(_indirection_rid)
+        var mpm_bonds_meta := RDUniform.new()
+        mpm_bonds_meta.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_bonds_meta.binding = 4
+        mpm_bonds_meta.add_id(_mpm_meta_rid)
+        var mpm_bonds_count := RDUniform.new()
+        mpm_bonds_count.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_bonds_count.binding = 5
+        mpm_bonds_count.add_id(_mpm_particle_count_rid)
+        var mpm_bonds_rigid := RDUniform.new()
+        mpm_bonds_rigid.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_bonds_rigid.binding = 6
+        mpm_bonds_rigid.add_id(_mpm_rigid_map_rid)
+
+        var mpm_bonds_pos_a := RDUniform.new()
+        mpm_bonds_pos_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_bonds_pos_a.binding = 2
+        mpm_bonds_pos_a.add_id(_mpm_pos_mass_a_rid)
+        var mpm_bonds_f_a := RDUniform.new()
+        mpm_bonds_f_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_bonds_f_a.binding = 3
+        mpm_bonds_f_a.add_id(_mpm_f_a_rid)
+        _mpm_update_bonds_set_a = _rd.uniform_set_create(
+            [mpm_bonds_ubo, mpm_bonds_ind, mpm_bonds_pos_a, mpm_bonds_f_a, mpm_bonds_meta, mpm_bonds_count, mpm_bonds_rigid],
+            _mpm_update_bonds_shader_rid,
+            0
+        )
+
+        var mpm_bonds_pos_b := RDUniform.new()
+        mpm_bonds_pos_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_bonds_pos_b.binding = 2
+        mpm_bonds_pos_b.add_id(_mpm_pos_mass_b_rid)
+        var mpm_bonds_f_b := RDUniform.new()
+        mpm_bonds_f_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_bonds_f_b.binding = 3
+        mpm_bonds_f_b.add_id(_mpm_f_b_rid)
+        _mpm_update_bonds_set_b = _rd.uniform_set_create(
+            [mpm_bonds_ubo, mpm_bonds_ind, mpm_bonds_pos_b, mpm_bonds_f_b, mpm_bonds_meta, mpm_bonds_count, mpm_bonds_rigid],
+            _mpm_update_bonds_shader_rid,
+            0
+        )
+
+    if _mpm_ccl_init_shader_rid.is_valid():
+        var mpm_ccl_meta := RDUniform.new()
+        mpm_ccl_meta.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_ccl_meta.binding = 0
+        mpm_ccl_meta.add_id(_mpm_meta_rid)
+        var mpm_ccl_count := RDUniform.new()
+        mpm_ccl_count.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_ccl_count.binding = 1
+        mpm_ccl_count.add_id(_mpm_particle_count_rid)
+
+        var mpm_ccl_out_a := RDUniform.new()
+        mpm_ccl_out_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_ccl_out_a.binding = 2
+        mpm_ccl_out_a.add_id(_mpm_labels_a_rid)
+        _mpm_ccl_init_set_a = _rd.uniform_set_create(
+            [mpm_ccl_meta, mpm_ccl_count, mpm_ccl_out_a],
+            _mpm_ccl_init_shader_rid,
+            0
+        )
+
+        var mpm_ccl_out_b := RDUniform.new()
+        mpm_ccl_out_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_ccl_out_b.binding = 2
+        mpm_ccl_out_b.add_id(_mpm_labels_b_rid)
+        _mpm_ccl_init_set_b = _rd.uniform_set_create(
+            [mpm_ccl_meta, mpm_ccl_count, mpm_ccl_out_b],
+            _mpm_ccl_init_shader_rid,
+            0
+        )
+
+    if _mpm_ccl_propagate_shader_rid.is_valid():
+        var mpm_prop_ubo := RDUniform.new()
+        mpm_prop_ubo.uniform_type = RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER
+        mpm_prop_ubo.binding = 0
+        mpm_prop_ubo.add_id(_ubo_rid)
+        var mpm_prop_ind := RDUniform.new()
+        mpm_prop_ind.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_prop_ind.binding = 1
+        mpm_prop_ind.add_id(_indirection_rid)
+        var mpm_prop_meta := RDUniform.new()
+        mpm_prop_meta.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_prop_meta.binding = 3
+        mpm_prop_meta.add_id(_mpm_meta_rid)
+        var mpm_prop_count := RDUniform.new()
+        mpm_prop_count.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_prop_count.binding = 4
+        mpm_prop_count.add_id(_mpm_particle_count_rid)
+        var mpm_prop_rigid := RDUniform.new()
+        mpm_prop_rigid.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_prop_rigid.binding = 5
+        mpm_prop_rigid.add_id(_mpm_rigid_map_rid)
+
+        var mpm_prop_pos_a := RDUniform.new()
+        mpm_prop_pos_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_prop_pos_a.binding = 2
+        mpm_prop_pos_a.add_id(_mpm_pos_mass_a_rid)
+        var mpm_prop_pos_b := RDUniform.new()
+        mpm_prop_pos_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_prop_pos_b.binding = 2
+        mpm_prop_pos_b.add_id(_mpm_pos_mass_b_rid)
+
+        var mpm_prop_lab_in_a := RDUniform.new()
+        mpm_prop_lab_in_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_prop_lab_in_a.binding = 6
+        mpm_prop_lab_in_a.add_id(_mpm_labels_a_rid)
+        var mpm_prop_lab_out_b := RDUniform.new()
+        mpm_prop_lab_out_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_prop_lab_out_b.binding = 7
+        mpm_prop_lab_out_b.add_id(_mpm_labels_b_rid)
+        _mpm_ccl_prop_set_a_ab = _rd.uniform_set_create(
+            [mpm_prop_ubo, mpm_prop_ind, mpm_prop_pos_a, mpm_prop_meta, mpm_prop_count, mpm_prop_rigid, mpm_prop_lab_in_a, mpm_prop_lab_out_b],
+            _mpm_ccl_propagate_shader_rid,
+            0
+        )
+        var mpm_prop_lab_in_b := RDUniform.new()
+        mpm_prop_lab_in_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_prop_lab_in_b.binding = 6
+        mpm_prop_lab_in_b.add_id(_mpm_labels_b_rid)
+        var mpm_prop_lab_out_a := RDUniform.new()
+        mpm_prop_lab_out_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_prop_lab_out_a.binding = 7
+        mpm_prop_lab_out_a.add_id(_mpm_labels_a_rid)
+        _mpm_ccl_prop_set_a_ba = _rd.uniform_set_create(
+            [mpm_prop_ubo, mpm_prop_ind, mpm_prop_pos_a, mpm_prop_meta, mpm_prop_count, mpm_prop_rigid, mpm_prop_lab_in_b, mpm_prop_lab_out_a],
+            _mpm_ccl_propagate_shader_rid,
+            0
+        )
+
+        var mpm_prop_lab_in_a2 := RDUniform.new()
+        mpm_prop_lab_in_a2.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_prop_lab_in_a2.binding = 6
+        mpm_prop_lab_in_a2.add_id(_mpm_labels_a_rid)
+        var mpm_prop_lab_out_b2 := RDUniform.new()
+        mpm_prop_lab_out_b2.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_prop_lab_out_b2.binding = 7
+        mpm_prop_lab_out_b2.add_id(_mpm_labels_b_rid)
+        _mpm_ccl_prop_set_b_ab = _rd.uniform_set_create(
+            [mpm_prop_ubo, mpm_prop_ind, mpm_prop_pos_b, mpm_prop_meta, mpm_prop_count, mpm_prop_rigid, mpm_prop_lab_in_a2, mpm_prop_lab_out_b2],
+            _mpm_ccl_propagate_shader_rid,
+            0
+        )
+        var mpm_prop_lab_in_b2 := RDUniform.new()
+        mpm_prop_lab_in_b2.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_prop_lab_in_b2.binding = 6
+        mpm_prop_lab_in_b2.add_id(_mpm_labels_b_rid)
+        var mpm_prop_lab_out_a2 := RDUniform.new()
+        mpm_prop_lab_out_a2.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_prop_lab_out_a2.binding = 7
+        mpm_prop_lab_out_a2.add_id(_mpm_labels_a_rid)
+        _mpm_ccl_prop_set_b_ba = _rd.uniform_set_create(
+            [mpm_prop_ubo, mpm_prop_ind, mpm_prop_pos_b, mpm_prop_meta, mpm_prop_count, mpm_prop_rigid, mpm_prop_lab_in_b2, mpm_prop_lab_out_a2],
+            _mpm_ccl_propagate_shader_rid,
+            0
+        )
+
+    if _mpm_ccl_write_shader_rid.is_valid():
+        var mpm_write_meta := RDUniform.new()
+        mpm_write_meta.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_write_meta.binding = 0
+        mpm_write_meta.add_id(_mpm_meta_rid)
+        var mpm_write_count := RDUniform.new()
+        mpm_write_count.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_write_count.binding = 1
+        mpm_write_count.add_id(_mpm_particle_count_rid)
+
+        var mpm_write_lab_a := RDUniform.new()
+        mpm_write_lab_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_write_lab_a.binding = 2
+        mpm_write_lab_a.add_id(_mpm_labels_a_rid)
+        _mpm_ccl_write_set_a = _rd.uniform_set_create(
+            [mpm_write_meta, mpm_write_count, mpm_write_lab_a],
+            _mpm_ccl_write_shader_rid,
+            0
+        )
+
+        var mpm_write_lab_b := RDUniform.new()
+        mpm_write_lab_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_write_lab_b.binding = 2
+        mpm_write_lab_b.add_id(_mpm_labels_b_rid)
+        _mpm_ccl_write_set_b = _rd.uniform_set_create(
+            [mpm_write_meta, mpm_write_count, mpm_write_lab_b],
+            _mpm_ccl_write_shader_rid,
+            0
+        )
+
+    if _mpm_island_accum0_shader_rid.is_valid():
+        var mpm_ia0_meta := RDUniform.new()
+        mpm_ia0_meta.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_ia0_meta.binding = 2
+        mpm_ia0_meta.add_id(_mpm_meta_rid)
+        var mpm_ia0_count := RDUniform.new()
+        mpm_ia0_count.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_ia0_count.binding = 3
+        mpm_ia0_count.add_id(_mpm_particle_count_rid)
+        var mpm_ia0_mm := RDUniform.new()
+        mpm_ia0_mm.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_ia0_mm.binding = 4
+        mpm_ia0_mm.add_id(_mpm_island_mass_mom_rid)
+        var mpm_ia0_mc := RDUniform.new()
+        mpm_ia0_mc.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_ia0_mc.binding = 5
+        mpm_ia0_mc.add_id(_mpm_island_mass_com_rid)
+
+        var mpm_ia0_pos_a := RDUniform.new()
+        mpm_ia0_pos_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_ia0_pos_a.binding = 0
+        mpm_ia0_pos_a.add_id(_mpm_pos_mass_a_rid)
+        var mpm_ia0_vel_a := RDUniform.new()
+        mpm_ia0_vel_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_ia0_vel_a.binding = 1
+        mpm_ia0_vel_a.add_id(_mpm_vel_vol_a_rid)
+        _mpm_island_accum0_set_a = _rd.uniform_set_create(
+            [mpm_ia0_pos_a, mpm_ia0_vel_a, mpm_ia0_meta, mpm_ia0_count, mpm_ia0_mm, mpm_ia0_mc],
+            _mpm_island_accum0_shader_rid,
+            0
+        )
+
+        var mpm_ia0_pos_b := RDUniform.new()
+        mpm_ia0_pos_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_ia0_pos_b.binding = 0
+        mpm_ia0_pos_b.add_id(_mpm_pos_mass_b_rid)
+        var mpm_ia0_vel_b := RDUniform.new()
+        mpm_ia0_vel_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_ia0_vel_b.binding = 1
+        mpm_ia0_vel_b.add_id(_mpm_vel_vol_b_rid)
+        _mpm_island_accum0_set_b = _rd.uniform_set_create(
+            [mpm_ia0_pos_b, mpm_ia0_vel_b, mpm_ia0_meta, mpm_ia0_count, mpm_ia0_mm, mpm_ia0_mc],
+            _mpm_island_accum0_shader_rid,
+            0
+        )
+
+    if _mpm_island_finalize_shader_rid.is_valid():
+        var mpm_if_mm := RDUniform.new()
+        mpm_if_mm.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_if_mm.binding = 0
+        mpm_if_mm.add_id(_mpm_island_mass_mom_rid)
+        var mpm_if_mc := RDUniform.new()
+        mpm_if_mc.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_if_mc.binding = 1
+        mpm_if_mc.add_id(_mpm_island_mass_com_rid)
+        var mpm_if_cm := RDUniform.new()
+        mpm_if_cm.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_if_cm.binding = 2
+        mpm_if_cm.add_id(_mpm_island_com_mass_rid)
+        var mpm_if_v := RDUniform.new()
+        mpm_if_v.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_if_v.binding = 3
+        mpm_if_v.add_id(_mpm_island_vel_rid)
+        _mpm_island_finalize_set = _rd.uniform_set_create(
+            [mpm_if_mm, mpm_if_mc, mpm_if_cm, mpm_if_v],
+            _mpm_island_finalize_shader_rid,
+            0
+        )
+
+    if _mpm_island_accum1_shader_rid.is_valid():
+        var mpm_ia1_meta := RDUniform.new()
+        mpm_ia1_meta.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_ia1_meta.binding = 2
+        mpm_ia1_meta.add_id(_mpm_meta_rid)
+        var mpm_ia1_count := RDUniform.new()
+        mpm_ia1_count.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_ia1_count.binding = 3
+        mpm_ia1_count.add_id(_mpm_particle_count_rid)
+        var mpm_ia1_cm := RDUniform.new()
+        mpm_ia1_cm.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_ia1_cm.binding = 4
+        mpm_ia1_cm.add_id(_mpm_island_com_mass_rid)
+        var mpm_ia1_v := RDUniform.new()
+        mpm_ia1_v.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_ia1_v.binding = 5
+        mpm_ia1_v.add_id(_mpm_island_vel_rid)
+        var mpm_ia1_L := RDUniform.new()
+        mpm_ia1_L.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_ia1_L.binding = 6
+        mpm_ia1_L.add_id(_mpm_island_L_rid)
+        var mpm_ia1_I0 := RDUniform.new()
+        mpm_ia1_I0.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_ia1_I0.binding = 7
+        mpm_ia1_I0.add_id(_mpm_island_I0_rid)
+        var mpm_ia1_I1 := RDUniform.new()
+        mpm_ia1_I1.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_ia1_I1.binding = 8
+        mpm_ia1_I1.add_id(_mpm_island_I1_rid)
+
+        var mpm_ia1_pos_a := RDUniform.new()
+        mpm_ia1_pos_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_ia1_pos_a.binding = 0
+        mpm_ia1_pos_a.add_id(_mpm_pos_mass_a_rid)
+        var mpm_ia1_vel_a := RDUniform.new()
+        mpm_ia1_vel_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_ia1_vel_a.binding = 1
+        mpm_ia1_vel_a.add_id(_mpm_vel_vol_a_rid)
+        _mpm_island_accum1_set_a = _rd.uniform_set_create(
+            [mpm_ia1_pos_a, mpm_ia1_vel_a, mpm_ia1_meta, mpm_ia1_count, mpm_ia1_cm, mpm_ia1_v, mpm_ia1_L, mpm_ia1_I0, mpm_ia1_I1],
+            _mpm_island_accum1_shader_rid,
+            0
+        )
+
+        var mpm_ia1_pos_b := RDUniform.new()
+        mpm_ia1_pos_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_ia1_pos_b.binding = 0
+        mpm_ia1_pos_b.add_id(_mpm_pos_mass_b_rid)
+        var mpm_ia1_vel_b := RDUniform.new()
+        mpm_ia1_vel_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_ia1_vel_b.binding = 1
+        mpm_ia1_vel_b.add_id(_mpm_vel_vol_b_rid)
+        _mpm_island_accum1_set_b = _rd.uniform_set_create(
+            [mpm_ia1_pos_b, mpm_ia1_vel_b, mpm_ia1_meta, mpm_ia1_count, mpm_ia1_cm, mpm_ia1_v, mpm_ia1_L, mpm_ia1_I0, mpm_ia1_I1],
+            _mpm_island_accum1_shader_rid,
+            0
+        )
+
+    if _mpm_island_apply_shader_rid.is_valid():
+        var mpm_iap_meta := RDUniform.new()
+        mpm_iap_meta.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_iap_meta.binding = 3
+        mpm_iap_meta.add_id(_mpm_meta_rid)
+        var mpm_iap_count := RDUniform.new()
+        mpm_iap_count.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_iap_count.binding = 4
+        mpm_iap_count.add_id(_mpm_particle_count_rid)
+        var mpm_iap_cm := RDUniform.new()
+        mpm_iap_cm.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_iap_cm.binding = 5
+        mpm_iap_cm.add_id(_mpm_island_com_mass_rid)
+        var mpm_iap_v := RDUniform.new()
+        mpm_iap_v.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_iap_v.binding = 6
+        mpm_iap_v.add_id(_mpm_island_vel_rid)
+        var mpm_iap_L := RDUniform.new()
+        mpm_iap_L.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_iap_L.binding = 7
+        mpm_iap_L.add_id(_mpm_island_L_rid)
+        var mpm_iap_I0 := RDUniform.new()
+        mpm_iap_I0.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_iap_I0.binding = 8
+        mpm_iap_I0.add_id(_mpm_island_I0_rid)
+        var mpm_iap_I1 := RDUniform.new()
+        mpm_iap_I1.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_iap_I1.binding = 9
+        mpm_iap_I1.add_id(_mpm_island_I1_rid)
+
+        var mpm_iap_vel_a := RDUniform.new()
+        mpm_iap_vel_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_iap_vel_a.binding = 0
+        mpm_iap_vel_a.add_id(_mpm_vel_vol_a_rid)
+        var mpm_iap_c_a := RDUniform.new()
+        mpm_iap_c_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_iap_c_a.binding = 1
+        mpm_iap_c_a.add_id(_mpm_c_a_rid)
+        var mpm_iap_pos_a := RDUniform.new()
+        mpm_iap_pos_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_iap_pos_a.binding = 2
+        mpm_iap_pos_a.add_id(_mpm_pos_mass_a_rid)
+        _mpm_island_apply_set_a = _rd.uniform_set_create(
+            [mpm_iap_vel_a, mpm_iap_c_a, mpm_iap_pos_a, mpm_iap_meta, mpm_iap_count, mpm_iap_cm, mpm_iap_v, mpm_iap_L, mpm_iap_I0, mpm_iap_I1],
+            _mpm_island_apply_shader_rid,
+            0
+        )
+
+        var mpm_iap_vel_b := RDUniform.new()
+        mpm_iap_vel_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_iap_vel_b.binding = 0
+        mpm_iap_vel_b.add_id(_mpm_vel_vol_b_rid)
+        var mpm_iap_c_b := RDUniform.new()
+        mpm_iap_c_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_iap_c_b.binding = 1
+        mpm_iap_c_b.add_id(_mpm_c_b_rid)
+        var mpm_iap_pos_b := RDUniform.new()
+        mpm_iap_pos_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_iap_pos_b.binding = 2
+        mpm_iap_pos_b.add_id(_mpm_pos_mass_b_rid)
+        _mpm_island_apply_set_b = _rd.uniform_set_create(
+            [mpm_iap_vel_b, mpm_iap_c_b, mpm_iap_pos_b, mpm_iap_meta, mpm_iap_count, mpm_iap_cm, mpm_iap_v, mpm_iap_L, mpm_iap_I0, mpm_iap_I1],
+            _mpm_island_apply_shader_rid,
+            0
+        )
+
     _display_texture = _create_display_texture()
     if _display_texture == null:
         push_error("Failed to create GPU display texture.")
@@ -794,8 +2051,15 @@ func _process(_delta: float) -> void:
         var required_max := dist_to_center + diag_half + voxel_size * 4.0
         if required_max > effective_max_distance:
             effective_max_distance = required_max
+
+    var dt: float = 0.0
+    var debug_w := float(_sim_frame % 4)
+    if sim_enabled and sim_mode == 1:
+        var substeps: int = maxi(1, mpm_substeps)
+        dt = maxf(0.0, mpm_dt) / float(substeps)
+        debug_w = float(mpm_gravity_strength)
     var params := PackedFloat32Array([
-        grid_extent, grid_extent, grid_extent, 0.0,
+        grid_extent, grid_extent, grid_extent, dt,
         origin.x, origin.y, origin.z, 0.0,
         pos.x, pos.y, pos.z, 0.0,
         basis.x.x, basis.x.y, basis.x.z, 0.0,
@@ -804,7 +2068,7 @@ func _process(_delta: float) -> void:
         float(width), float(height), tan_half_fov, aspect,
         voxel_size, effective_max_distance, 0.8, 0.25,
         brick_grid, brick_grid, brick_grid, float(chunk_size),
-        gravity.x, gravity.y, gravity.z, float(_sim_frame % 4),
+        gravity.x, gravity.y, gravity.z, debug_w,
         world_basis.x.x, world_basis.x.y, world_basis.x.z, 0.0,
         world_basis.y.x, world_basis.y.y, world_basis.y.z, 0.0,
         world_basis.z.x, world_basis.z.y, world_basis.z.z, 0.0
@@ -813,10 +2077,15 @@ func _process(_delta: float) -> void:
     _update_params(bytes)
     _debug_log_snapshot(pos, basis, world_extent)
     _reset_metrics()
-    _dispatch_occupancy()
-    _dispatch_active_list()
-    _dispatch_active_dispatch()
-    _dispatch_sim(grid_extent_i)
+    if sim_enabled and sim_mode == 1:
+        _dispatch_mpm()
+        _dispatch_occupancy()
+    else:
+        _dispatch_occupancy()
+        if sim_enabled and sim_mode == 0:
+            _dispatch_active_list()
+            _dispatch_active_dispatch()
+            _dispatch_sim(grid_extent_i)
     _dispatch_light(grid_extent_i)
     _dispatch_compute()
     _readback_metrics()
@@ -840,6 +2109,8 @@ func _prime_active_list() -> void:
 
 func _dispatch_sim(_grid_extent: int) -> void:
     if !sim_enabled:
+        return
+    if sim_mode != 0:
         return
     if !_sim_pipeline_rid.is_valid():
         return
@@ -871,6 +2142,178 @@ func _dispatch_sim(_grid_extent: int) -> void:
     _rd.compute_list_dispatch_indirect(list, _sim_dispatch_rid, 0)
     _rd.compute_list_end()
     _atlas_use_a = !use_a
+
+func _dispatch_mpm() -> void:
+    if !_mpm_p2g_pipeline_rid.is_valid() or !_mpm_grid_update_pipeline_rid.is_valid() or !_mpm_g2p_advect_pipeline_rid.is_valid():
+        return
+    if !_mpm_grid_uniform_set.is_valid():
+        return
+    var every: int = sim_every
+    if every < 1:
+        every = 1
+    _sim_frame += 1
+    if _sim_frame % every != 0:
+        return
+
+    var max_p: int = maxi(1, mpm_max_particles)
+    var particle_groups := int(ceil(float(max_p) / 128.0))
+    var total_cells := int(_atlas_bytes / 4)
+    var grid_groups := int(ceil(float(total_cells) / 256.0))
+    var grid_bytes := total_cells * 16
+    var substeps: int = maxi(1, mpm_substeps)
+    var rigid_map_bytes := total_cells * 4
+    var cell_pos_bytes := total_cells * 16
+    var island_count := max_p + 1
+    var island_groups := int(ceil(float(island_count) / 256.0))
+    var island_bytes := island_count * 16
+
+    for _s in range(substeps):
+        if mpm_rigid_enabled and _mpm_island_accum0_pipeline_rid.is_valid() and _mpm_island_finalize_pipeline_rid.is_valid() and _mpm_island_accum1_pipeline_rid.is_valid() and _mpm_island_apply_pipeline_rid.is_valid():
+            var accum0_set := _mpm_island_accum0_set_a if _mpm_particles_use_a else _mpm_island_accum0_set_b
+            var accum1_set := _mpm_island_accum1_set_a if _mpm_particles_use_a else _mpm_island_accum1_set_b
+            var apply_set := _mpm_island_apply_set_a if _mpm_particles_use_a else _mpm_island_apply_set_b
+            if accum0_set.is_valid() and accum1_set.is_valid() and apply_set.is_valid() and _mpm_island_finalize_set.is_valid():
+                _rd.buffer_clear(_mpm_island_mass_mom_rid, 0, island_bytes)
+                _rd.buffer_clear(_mpm_island_mass_com_rid, 0, island_bytes)
+                _rd.buffer_clear(_mpm_island_L_rid, 0, island_bytes)
+                _rd.buffer_clear(_mpm_island_I0_rid, 0, island_bytes)
+                _rd.buffer_clear(_mpm_island_I1_rid, 0, island_bytes)
+
+                var list_ia0 := _rd.compute_list_begin()
+                _rd.compute_list_bind_compute_pipeline(list_ia0, _mpm_island_accum0_pipeline_rid)
+                _rd.compute_list_bind_uniform_set(list_ia0, accum0_set, 0)
+                _rd.compute_list_dispatch(list_ia0, particle_groups, 1, 1)
+                _rd.compute_list_end()
+
+                var list_if := _rd.compute_list_begin()
+                _rd.compute_list_bind_compute_pipeline(list_if, _mpm_island_finalize_pipeline_rid)
+                _rd.compute_list_bind_uniform_set(list_if, _mpm_island_finalize_set, 0)
+                _rd.compute_list_dispatch(list_if, island_groups, 1, 1)
+                _rd.compute_list_end()
+
+                var list_ia1 := _rd.compute_list_begin()
+                _rd.compute_list_bind_compute_pipeline(list_ia1, _mpm_island_accum1_pipeline_rid)
+                _rd.compute_list_bind_uniform_set(list_ia1, accum1_set, 0)
+                _rd.compute_list_dispatch(list_ia1, particle_groups, 1, 1)
+                _rd.compute_list_end()
+
+                var list_iap := _rd.compute_list_begin()
+                _rd.compute_list_bind_compute_pipeline(list_iap, _mpm_island_apply_pipeline_rid)
+                _rd.compute_list_bind_uniform_set(list_iap, apply_set, 0)
+                _rd.compute_list_dispatch(list_iap, particle_groups, 1, 1)
+                _rd.compute_list_end()
+
+        if _mpm_grid_accum_rid.is_valid():
+            _rd.buffer_clear(_mpm_grid_accum_rid, 0, grid_bytes)
+        if _mpm_grid_vel_rid.is_valid():
+            _rd.buffer_clear(_mpm_grid_vel_rid, 0, grid_bytes)
+
+        var p2g_set := _mpm_p2g_uniform_set_a if _mpm_particles_use_a else _mpm_p2g_uniform_set_b
+        if p2g_set.is_valid():
+            var list := _rd.compute_list_begin()
+            _rd.compute_list_bind_compute_pipeline(list, _mpm_p2g_pipeline_rid)
+            _rd.compute_list_bind_uniform_set(list, p2g_set, 0)
+            _rd.compute_list_dispatch(list, particle_groups, 1, 1)
+            _rd.compute_list_end()
+
+        var list_grid := _rd.compute_list_begin()
+        _rd.compute_list_bind_compute_pipeline(list_grid, _mpm_grid_update_pipeline_rid)
+        _rd.compute_list_bind_uniform_set(list_grid, _mpm_grid_uniform_set, 0)
+        _rd.compute_list_dispatch(list_grid, grid_groups, 1, 1)
+        _rd.compute_list_end()
+
+        var g2p_set := _mpm_g2p_uniform_set_ab if _mpm_particles_use_a else _mpm_g2p_uniform_set_ba
+        if g2p_set.is_valid():
+            var list_g2p := _rd.compute_list_begin()
+            _rd.compute_list_bind_compute_pipeline(list_g2p, _mpm_g2p_advect_pipeline_rid)
+            _rd.compute_list_bind_uniform_set(list_g2p, g2p_set, 0)
+            _rd.compute_list_dispatch(list_g2p, particle_groups, 1, 1)
+            _rd.compute_list_end()
+
+        _mpm_particles_use_a = !_mpm_particles_use_a
+
+    if mpm_fracture_enabled and _mpm_build_rigid_map_pipeline_rid.is_valid() and _mpm_update_bonds_pipeline_rid.is_valid() and _mpm_ccl_init_pipeline_rid.is_valid() and _mpm_ccl_propagate_pipeline_rid.is_valid() and _mpm_ccl_write_pipeline_rid.is_valid():
+        if _mpm_rigid_map_rid.is_valid():
+            _rd.buffer_clear(_mpm_rigid_map_rid, 0, rigid_map_bytes)
+
+        var rm_set := _mpm_rigid_map_set_a if _mpm_particles_use_a else _mpm_rigid_map_set_b
+        if rm_set.is_valid():
+            var list_rm := _rd.compute_list_begin()
+            _rd.compute_list_bind_compute_pipeline(list_rm, _mpm_build_rigid_map_pipeline_rid)
+            _rd.compute_list_bind_uniform_set(list_rm, rm_set, 0)
+            _rd.compute_list_dispatch(list_rm, particle_groups, 1, 1)
+            _rd.compute_list_end()
+
+        var bonds_set := _mpm_update_bonds_set_a if _mpm_particles_use_a else _mpm_update_bonds_set_b
+        if bonds_set.is_valid():
+            var list_bonds := _rd.compute_list_begin()
+            _rd.compute_list_bind_compute_pipeline(list_bonds, _mpm_update_bonds_pipeline_rid)
+            _rd.compute_list_bind_uniform_set(list_bonds, bonds_set, 0)
+            _rd.compute_list_dispatch(list_bonds, particle_groups, 1, 1)
+            _rd.compute_list_end()
+
+        if _mpm_ccl_init_set_a.is_valid():
+            var list_ci := _rd.compute_list_begin()
+            _rd.compute_list_bind_compute_pipeline(list_ci, _mpm_ccl_init_pipeline_rid)
+            _rd.compute_list_bind_uniform_set(list_ci, _mpm_ccl_init_set_a, 0)
+            _rd.compute_list_dispatch(list_ci, particle_groups, 1, 1)
+            _rd.compute_list_end()
+
+        var use_labels_a := true
+        var iters := maxi(0, mpm_ccl_iterations)
+        for _i in range(iters):
+            var prop_set: RID = RID()
+            if _mpm_particles_use_a:
+                prop_set = _mpm_ccl_prop_set_a_ab if use_labels_a else _mpm_ccl_prop_set_a_ba
+            else:
+                prop_set = _mpm_ccl_prop_set_b_ab if use_labels_a else _mpm_ccl_prop_set_b_ba
+            if prop_set.is_valid():
+                var list_cp := _rd.compute_list_begin()
+                _rd.compute_list_bind_compute_pipeline(list_cp, _mpm_ccl_propagate_pipeline_rid)
+                _rd.compute_list_bind_uniform_set(list_cp, prop_set, 0)
+                _rd.compute_list_dispatch(list_cp, particle_groups, 1, 1)
+                _rd.compute_list_end()
+                use_labels_a = !use_labels_a
+
+        var write_set := _mpm_ccl_write_set_a if use_labels_a else _mpm_ccl_write_set_b
+        if write_set.is_valid():
+            var list_cw := _rd.compute_list_begin()
+            _rd.compute_list_bind_compute_pipeline(list_cw, _mpm_ccl_write_pipeline_rid)
+            _rd.compute_list_bind_uniform_set(list_cw, write_set, 0)
+            _rd.compute_list_dispatch(list_cw, particle_groups, 1, 1)
+            _rd.compute_list_end()
+
+    var atlas_target_a := _mpm_particles_use_a
+    if _mpm_copy_static_pipeline_rid.is_valid():
+        var copy_set := _mpm_copy_uniform_set_a if atlas_target_a else _mpm_copy_uniform_set_b
+        if copy_set.is_valid():
+            var list_copy := _rd.compute_list_begin()
+            _rd.compute_list_bind_compute_pipeline(list_copy, _mpm_copy_static_pipeline_rid)
+            _rd.compute_list_bind_uniform_set(list_copy, copy_set, 0)
+            _rd.compute_list_dispatch(list_copy, grid_groups, 1, 1)
+            _rd.compute_list_end()
+
+    if _mpm_cell_pos_rid.is_valid():
+        _rd.buffer_clear(_mpm_cell_pos_rid, 0, cell_pos_bytes)
+
+    if _mpm_particles_to_atlas_pipeline_rid.is_valid():
+        var to_atlas_set := _mpm_particles_to_atlas_uniform_set_a if atlas_target_a else _mpm_particles_to_atlas_uniform_set_b
+        if to_atlas_set.is_valid():
+            var list_atlas := _rd.compute_list_begin()
+            _rd.compute_list_bind_compute_pipeline(list_atlas, _mpm_particles_to_atlas_pipeline_rid)
+            _rd.compute_list_bind_uniform_set(list_atlas, to_atlas_set, 0)
+            _rd.compute_list_dispatch(list_atlas, particle_groups, 1, 1)
+            _rd.compute_list_end()
+    elif _mpm_grid_to_atlas_pipeline_rid.is_valid():
+        var to_atlas_set2 := _mpm_grid_to_atlas_uniform_set_a if atlas_target_a else _mpm_grid_to_atlas_uniform_set_b
+        if to_atlas_set2.is_valid():
+            var list_atlas2 := _rd.compute_list_begin()
+            _rd.compute_list_bind_compute_pipeline(list_atlas2, _mpm_grid_to_atlas_pipeline_rid)
+            _rd.compute_list_bind_uniform_set(list_atlas2, to_atlas_set2, 0)
+            _rd.compute_list_dispatch(list_atlas2, grid_groups, 1, 1)
+            _rd.compute_list_end()
+
+    _atlas_use_a = atlas_target_a
 
 func _reset_metrics() -> void:
     if !_metrics_rid.is_valid():
@@ -1161,8 +2604,6 @@ func set_voxel_entries(entries: Array, allocate_all_bricks: bool = false) -> voi
         var gx := int(pos.x)
         var gy := int(pos.y)
         var gz := int(pos.z)
-        if mat_id == 1:
-            print("VoxelRenderer entries | sand pos=%s" % str(Vector3i(gx, gy, gz)))
         if gx < 0 or gy < 0 or gz < 0 or gx >= grid_extent or gy >= grid_extent or gz >= grid_extent:
             continue
         if !((gx & 1) == (gy & 1) and (gy & 1) == (gz & 1)):
@@ -1183,8 +2624,6 @@ func set_voxel_entries(entries: Array, allocate_all_bricks: bool = false) -> voi
                 seed_val = 1
             seeds[local_index] = seed_val
         occupancy[brick_index] = 1
-        if mat_id == 1:
-            print("VoxelRenderer entries | wrote sand local_index=%d atlas_val=%d" % [local_index, atlas[local_index]])
         if !allocate_all_bricks:
             indirection[brick_index] = brick_index + 1
 
@@ -1212,6 +2651,175 @@ func set_voxel_entries(entries: Array, allocate_all_bricks: bool = false) -> voi
         _diag("set_voxel_entries entries=%d allocate_all=%s grid=%d chunk=%d atlas_bytes=%d" % [
             entries.size(), str(allocate_all_bricks), brick_grid, chunk_size, _atlas_bytes
         ])
+
+func set_voxel_entries_mpm(entries: Array) -> void:
+    if _rd == null:
+        return
+    _active_list_ready = false
+
+    var brick_grid := chunk_grid
+    var brick_count := brick_grid * brick_grid * brick_grid
+    var cell_count := brick_count * chunk_size * chunk_size * chunk_size
+    var grid_extent := brick_grid * chunk_size
+
+    # MPM uses a full grid indirection so particles can move into empty space anywhere.
+    var indirection := PackedInt32Array()
+    indirection.resize(brick_count)
+    for i in range(brick_count):
+        indirection[i] = i + 1
+
+    var static_atlas := PackedInt32Array()
+    static_atlas.resize(cell_count)
+    for i in range(cell_count):
+        static_atlas[i] = 0
+
+    var atlas_init := PackedInt32Array()
+    atlas_init.resize(cell_count)
+    for i in range(cell_count):
+        atlas_init[i] = 0
+
+    var pos_mass := PackedFloat32Array()
+    var vel_vol := PackedFloat32Array()
+    var meta := PackedInt32Array()
+    var count := 0
+    var max_p: int = maxi(1, mpm_max_particles)
+
+    # Mass is also stored in materials.json. Use that if available.
+    var mass_by_id: Dictionary = {
+        1: 1.6,
+        2: 1.0,
+        3: 0.05,
+        8: 3.0,
+        9: 3.0
+    }
+    if !material_data_path.is_empty() and FileAccess.file_exists(material_data_path):
+        var mat_text := FileAccess.get_file_as_string(material_data_path)
+        if !mat_text.is_empty():
+            var parsed: Variant = JSON.parse_string(mat_text)
+            if typeof(parsed) == TYPE_DICTIONARY:
+                var parsed_dict: Dictionary = parsed
+                var mats: Array = parsed_dict.get("materials", [])
+                if typeof(mats) == TYPE_ARRAY:
+                    for item in mats:
+                        if typeof(item) != TYPE_DICTIONARY:
+                            continue
+                        var id := int(item.get("id", -1))
+                        if id <= 0:
+                            continue
+                        mass_by_id[id] = float(item.get("mass", 1.0))
+
+    for entry in entries:
+        var pos = entry.get("pos", Vector3.ZERO)
+        var mat_id = int(entry.get("material", 1))
+        if mat_id <= 0:
+            continue
+        var gx := int(pos.x)
+        var gy := int(pos.y)
+        var gz := int(pos.z)
+        if gx < 0 or gy < 0 or gz < 0 or gx >= grid_extent or gy >= grid_extent or gz >= grid_extent:
+            continue
+        if !((gx & 1) == (gy & 1) and (gy & 1) == (gz & 1)):
+            continue
+        var bx := gx / chunk_size
+        var by := gy / chunk_size
+        var bz := gz / chunk_size
+        var lx := gx - bx * chunk_size
+        var ly := gy - by * chunk_size
+        var lz := gz - bz * chunk_size
+        var brick_index := bx + by * brick_grid + bz * brick_grid * brick_grid
+        var base_offset := brick_index * chunk_size * chunk_size * chunk_size
+        var local_index := base_offset + lx + ly * chunk_size + lz * chunk_size * chunk_size
+
+        if mat_id == 8 or mat_id == 9:
+            static_atlas[local_index] = mat_id
+            atlas_init[local_index] = mat_id
+            continue
+
+        if count >= max_p:
+            continue
+        var p_mass: float = float(mass_by_id.get(mat_id, 1.0))
+        # pos_mass vec4
+        pos_mass.append(float(gx))
+        pos_mass.append(float(gy))
+        pos_mass.append(float(gz))
+        pos_mass.append(p_mass) # mass
+        # vel_vol vec4
+        vel_vol.append(0.0)
+        vel_vol.append(0.0)
+        vel_vol.append(0.0)
+        vel_vol.append(1.0) # volume
+        # meta uvec4 packed as int32
+        meta.append(mat_id)
+        meta.append(0) # flags
+        meta.append(0) # bond_mask
+        meta.append(0) # island_id
+
+        # Seed the render atlas so it shows immediately (no overlap handling).
+        if atlas_init[local_index] == 0:
+            atlas_init[local_index] = mat_id
+        count += 1
+
+    var ind_bytes := indirection.to_byte_array()
+    _rd.buffer_update(_indirection_rid, 0, ind_bytes.size(), ind_bytes)
+    _indirection_cpu = indirection
+
+    var static_bytes := static_atlas.to_byte_array()
+    if _atlas_static_rid.is_valid():
+        _rd.buffer_update(_atlas_static_rid, 0, static_bytes.size(), static_bytes)
+
+    # Upload initial render atlas (static + initial particle snaps).
+    var atlas_bytes := atlas_init.to_byte_array()
+    if _atlas_a_rid.is_valid():
+        _rd.buffer_update(_atlas_a_rid, 0, atlas_bytes.size(), atlas_bytes)
+    if _atlas_b_rid.is_valid():
+        _rd.buffer_update(_atlas_b_rid, 0, atlas_bytes.size(), atlas_bytes)
+    _atlas_use_a = true
+
+    # Upload particle buffers (A and B start identical).
+    var pos_bytes := pos_mass.to_byte_array()
+    var vel_bytes := vel_vol.to_byte_array()
+    if _mpm_pos_mass_a_rid.is_valid() and pos_bytes.size() > 0:
+        _rd.buffer_update(_mpm_pos_mass_a_rid, 0, pos_bytes.size(), pos_bytes)
+    if _mpm_pos_mass_b_rid.is_valid() and pos_bytes.size() > 0:
+        _rd.buffer_update(_mpm_pos_mass_b_rid, 0, pos_bytes.size(), pos_bytes)
+    if _mpm_vel_vol_a_rid.is_valid() and vel_bytes.size() > 0:
+        _rd.buffer_update(_mpm_vel_vol_a_rid, 0, vel_bytes.size(), vel_bytes)
+    if _mpm_vel_vol_b_rid.is_valid() and vel_bytes.size() > 0:
+        _rd.buffer_update(_mpm_vel_vol_b_rid, 0, vel_bytes.size(), vel_bytes)
+    var meta_bytes := meta.to_byte_array()
+    if _mpm_meta_rid.is_valid() and meta_bytes.size() > 0:
+        _rd.buffer_update(_mpm_meta_rid, 0, meta_bytes.size(), meta_bytes)
+    if _mpm_particle_count_rid.is_valid():
+        var count_bytes := PackedInt32Array([count]).to_byte_array()
+        _rd.buffer_update(_mpm_particle_count_rid, 0, count_bytes.size(), count_bytes)
+
+    # Reset deformation state and initialize F=I on the GPU (C=0).
+    var particle_mat3_bytes: int = max_p * 48
+    if _mpm_c_a_rid.is_valid():
+        _rd.buffer_clear(_mpm_c_a_rid, 0, particle_mat3_bytes)
+    if _mpm_c_b_rid.is_valid():
+        _rd.buffer_clear(_mpm_c_b_rid, 0, particle_mat3_bytes)
+    if _mpm_f_a_rid.is_valid():
+        _rd.buffer_clear(_mpm_f_a_rid, 0, particle_mat3_bytes)
+    if _mpm_f_b_rid.is_valid():
+        _rd.buffer_clear(_mpm_f_b_rid, 0, particle_mat3_bytes)
+    if _mpm_init_particles_pipeline_rid.is_valid() and _mpm_init_uniform_set.is_valid() and count > 0:
+        var groups := int(ceil(float(count) / 128.0))
+        var init_list := _rd.compute_list_begin()
+        _rd.compute_list_bind_compute_pipeline(init_list, _mpm_init_particles_pipeline_rid)
+        _rd.compute_list_bind_uniform_set(init_list, _mpm_init_uniform_set, 0)
+        _rd.compute_list_dispatch(init_list, groups, 1, 1)
+        _rd.compute_list_end()
+
+    _mpm_particles_use_a = true
+
+    if _light_a_rid.is_valid():
+        _rd.buffer_clear(_light_a_rid, 0, _atlas_bytes)
+    if _light_b_rid.is_valid():
+        _rd.buffer_clear(_light_b_rid, 0, _atlas_bytes)
+
+    if diag_enabled:
+        _diag("set_voxel_entries_mpm entries=%d particles=%d grid_extent=%d" % [entries.size(), count, grid_extent])
 
 func _load_voxel_entries(grid_extent: int) -> Array:
     if voxel_data_path.is_empty():
@@ -1250,6 +2858,7 @@ func _load_material_props() -> PackedByteArray:
         1: {"mass": 1.6, "friction": 0.7, "cohesion": 0.4, "resistance": 0.6, "drag": 0.35, "support_bonus": 0.25, "lateral_bias": -0.15, "gravity_bias": 1.2},
         2: {"mass": 1.0, "friction": 0.05, "cohesion": 0.1, "resistance": 0.1, "drag": 0.15, "support_bonus": 0.15, "lateral_bias": 0.2, "gravity_bias": 1.0},
         3: {"mass": 0.05, "friction": 0.0, "cohesion": 0.0, "resistance": 0.0, "drag": 0.01, "support_bonus": 0.0, "lateral_bias": 0.0, "gravity_bias": 0.0},
+        4: {"mass": 4.0, "friction": 1.0, "cohesion": 1.5, "resistance": 8.0, "drag": 0.2, "support_bonus": 0.0, "lateral_bias": -0.5, "gravity_bias": 0.0},
         8: {"mass": 3.0, "friction": 10.0, "cohesion": 2.0, "resistance": 10.0, "drag": 2.0, "support_bonus": 0.0, "lateral_bias": -1.0, "gravity_bias": 0.0},
         9: {"mass": 3.0, "friction": 10.0, "cohesion": 2.0, "resistance": 10.0, "drag": 2.0, "support_bonus": 0.0, "lateral_bias": -1.0, "gravity_bias": 0.0}
     }
@@ -1330,6 +2939,247 @@ func _debug_render_thread_ping(frame_id: int) -> void:
         frame_id,
         str(main_thread),
         str(rd_valid)
+    ])
+
+func debug_mpm_hourglass_metrics(
+        sand_id: int,
+        center: float,
+        half: float,
+        bulb_radius: float,
+        neck_radius: float,
+        wall_thickness: int,
+        shell_padding: float,
+        inner_wall: float,
+        every: int = 60
+    ) -> void:
+    if _rd == null:
+        return
+    if sim_mode != 1:
+        return
+    if every < 1:
+        every = 1
+    if _debug_frame % every != 0:
+        return
+    RenderingServer.call_on_render_thread(Callable(self, "_debug_mpm_hourglass_metrics_on_render_thread").bind(
+        _debug_frame,
+        sand_id,
+        center,
+        half,
+        bulb_radius,
+        neck_radius,
+        wall_thickness,
+        shell_padding,
+        inner_wall
+    ))
+
+func _debug_mpm_hourglass_metrics_on_render_thread(
+        frame_id: int,
+        sand_id: int,
+        center: float,
+        half: float,
+        bulb_radius: float,
+        neck_radius: float,
+        wall_thickness: int,
+        shell_padding: float,
+        inner_wall: float
+    ) -> void:
+    if _rd == null or !_mpm_particle_count_rid.is_valid() or !_mpm_meta_rid.is_valid():
+        return
+    var count_bytes := _rd.buffer_get_data(_mpm_particle_count_rid, 0, 4)
+    if count_bytes.size() < 4:
+        return
+    var count_vals := count_bytes.to_int32_array()
+    if count_vals.size() == 0:
+        return
+    var count := maxi(0, int(count_vals[0]))
+    if count <= 0:
+        print("MPM hourglass | frame=%d particles=0" % frame_id)
+        return
+
+    var pos_rid: RID = _mpm_pos_mass_a_rid if _mpm_particles_use_a else _mpm_pos_mass_b_rid
+    var vel_rid: RID = _mpm_vel_vol_a_rid if _mpm_particles_use_a else _mpm_vel_vol_b_rid
+    if !pos_rid.is_valid() or !vel_rid.is_valid():
+        return
+
+    var bytes_per_particle := 16 # vec4
+    var max_bytes := count * bytes_per_particle
+    var pos_bytes := _rd.buffer_get_data(pos_rid, 0, max_bytes)
+    var vel_bytes := _rd.buffer_get_data(vel_rid, 0, max_bytes)
+    var meta_bytes := _rd.buffer_get_data(_mpm_meta_rid, 0, max_bytes)
+    if pos_bytes.size() < max_bytes or vel_bytes.size() < max_bytes or meta_bytes.size() < max_bytes:
+        return
+
+    var pos_vals := pos_bytes.to_float32_array()
+    var vel_vals := vel_bytes.to_float32_array()
+    var meta_vals := meta_bytes.to_int32_array()
+    if pos_vals.size() < count * 4 or vel_vals.size() < count * 4 or meta_vals.size() < count * 4:
+        return
+
+    var grid_extent: int = chunk_grid * chunk_size
+    var cap_min := float(wall_thickness)
+    var cap_max := float(grid_extent - wall_thickness)
+    var safe_half := maxf(half, 1.0)
+
+    var sand_count := 0
+    var sand_escaped := 0
+    var sand_penetrating := 0
+    var sand_cap := 0
+    var sand_in_glass_cell := 0
+    var sand_mass_total := 0.0
+    var sand_unique_cells := 0
+    var sand_max_per_cell := 0
+    var y_min := 1e9
+    var y_max := -1e9
+    var max_speed := 0.0
+    var sum_speed := 0.0
+    var cell_counts := {}
+
+    for i in range(count):
+        var mat_id := meta_vals[i * 4 + 0]
+        if mat_id != sand_id:
+            continue
+        sand_count += 1
+
+        var x := pos_vals[i * 4 + 0]
+        var y := pos_vals[i * 4 + 1]
+        var z := pos_vals[i * 4 + 2]
+        sand_mass_total += pos_vals[i * 4 + 3]
+        y_min = minf(y_min, y)
+        y_max = maxf(y_max, y)
+
+        var vx := vel_vals[i * 4 + 0]
+        var vy := vel_vals[i * 4 + 1]
+        var vz := vel_vals[i * 4 + 2]
+        var speed := sqrt(vx * vx + vy * vy + vz * vz)
+        sum_speed += speed
+        max_speed = maxf(max_speed, speed)
+
+        # Quantize to BCC cell for "how many voxels should be visible" estimates.
+        var cx := int(round(x * 0.5)) * 2
+        var cy := int(round(y * 0.5)) * 2
+        var cz := int(round(z * 0.5)) * 2
+        # Choose even/odd lattice by checking the closest parity point.
+        var ox := int(round((x - 1.0) * 0.5)) * 2 + 1
+        var oy := int(round((y - 1.0) * 0.5)) * 2 + 1
+        var oz := int(round((z - 1.0) * 0.5)) * 2 + 1
+        var de2 := (x - float(cx)) * (x - float(cx)) + (y - float(cy)) * (y - float(cy)) + (z - float(cz)) * (z - float(cz))
+        var do2 := (x - float(ox)) * (x - float(ox)) + (y - float(oy)) * (y - float(oy)) + (z - float(oz)) * (z - float(oz))
+        var sx := cx
+        var sy := cy
+        var sz := cz
+        if do2 < de2:
+            sx = ox
+            sy = oy
+            sz = oz
+        sx = clampi(sx, 0, grid_extent - 1)
+        sy = clampi(sy, 0, grid_extent - 1)
+        sz = clampi(sz, 0, grid_extent - 1)
+        var key := sx + sy * grid_extent + sz * grid_extent * grid_extent
+        var prev := int(cell_counts.get(key, 0))
+        var next := prev + 1
+        cell_counts[key] = next
+        sand_max_per_cell = maxi(sand_max_per_cell, next)
+
+        var cap := (y < cap_min) or (y >= cap_max)
+        if cap:
+            sand_cap += 1
+            sand_penetrating += 1
+            continue
+
+        var dx := x - center
+        var dz := z - center
+        var r := sqrt(dx * dx + dz * dz)
+        var t := absf(y - center) / safe_half
+        t = clamp(t, 0.0, 1.0)
+        var radius := neck_radius + (bulb_radius - neck_radius) * t
+        var shell_inner := radius - inner_wall
+        var shell_outer := radius + shell_padding
+
+        var eps_outer := 0.25
+        var eps_inner := 0.15
+        if r > shell_outer + eps_outer:
+            sand_escaped += 1
+        elif r >= shell_inner - eps_inner:
+            sand_penetrating += 1
+
+        # Detect particles snapping into glass shell cells (these won't render because atlas keeps static glass).
+        var cdx := float(sx) - center
+        var cdz := float(sz) - center
+        var cr := sqrt(cdx * cdx + cdz * cdz)
+        var ct := absf(float(sy) - center) / safe_half
+        ct = clamp(ct, 0.0, 1.0)
+        var cradius := neck_radius + (bulb_radius - neck_radius) * ct
+        var cshell_inner := cradius - inner_wall
+        var cshell_outer := cradius + shell_padding
+        var ccap := (sy < int(wall_thickness)) or (sy >= grid_extent - int(wall_thickness))
+        var glass_cell := (cr >= cshell_inner and cr <= cshell_outer) or (ccap and cr <= (bulb_radius + shell_padding))
+        if glass_cell:
+            sand_in_glass_cell += 1
+
+    var avg_speed := 0.0
+    if sand_count > 0:
+        avg_speed = sum_speed / float(sand_count)
+        sand_unique_cells = cell_counts.size()
+        var y_min_i := int(y_min) if y_min < 1e8 else -1
+        var y_max_i := int(y_max) if y_max > -1e8 else -1
+
+        # Render voxelization metrics: how many dynamic sand voxels actually made it into the atlas this frame.
+        # This helps distinguish "true" mass loss from multiple particles landing in the same cell (render collapse).
+        var rendered_total := -1
+        var rendered_sand := -1
+        var rendered_sand_outside := -1
+        if _mpm_cell_pos_rid.is_valid() and _atlas_bytes > 0:
+            var total_cells: int = int(_atlas_bytes / 4)
+            var cp_bytes := _rd.buffer_get_data(_mpm_cell_pos_rid)
+            var atlas_rid2: RID = _atlas_a_rid if _atlas_use_a else _atlas_b_rid
+            if cp_bytes.size() >= total_cells * 16 and atlas_rid2.is_valid():
+                var atlas_bytes := _rd.buffer_get_data(atlas_rid2)
+                if atlas_bytes.size() >= total_cells * 4:
+                    var cp_vals := cp_bytes.to_float32_array()
+                    var atlas_vals := atlas_bytes.to_int32_array()
+                    if cp_vals.size() >= total_cells * 4 and atlas_vals.size() >= total_cells:
+                        var dyn_total := 0
+                        var dyn_sand := 0
+                        var dyn_sand_outside2 := 0
+                        for ci in range(total_cells):
+                            if cp_vals[ci * 4 + 3] > 0.5:
+                                dyn_total += 1
+                                if atlas_vals[ci] == sand_id:
+                                    dyn_sand += 1
+                                    # Count dynamic sand voxels that ended up outside the hourglass shell.
+                                    var rx := cp_vals[ci * 4 + 0]
+                                    var ry := cp_vals[ci * 4 + 1]
+                                    var rz := cp_vals[ci * 4 + 2]
+                                    var ddx := rx - center
+                                    var ddz := rz - center
+                                    var rr := sqrt(ddx * ddx + ddz * ddz)
+                                    var tt := absf(ry - center) / safe_half
+                                    tt = clamp(tt, 0.0, 1.0)
+                                    var rradius := neck_radius + (bulb_radius - neck_radius) * tt
+                                    var shell_outer2 := rradius + shell_padding
+                                    if rr > shell_outer2 + 0.25:
+                                        dyn_sand_outside2 += 1
+                        rendered_total = dyn_total
+                        rendered_sand = dyn_sand
+                        rendered_sand_outside = dyn_sand_outside2
+
+        print("MPM hourglass | frame=%d sand=%d mass=%.2f unique=%d max_per_cell=%d rendered_sand=%d rendered_total=%d rendered_outside=%d in_glass_cell=%d escaped=%d penetrating=%d cap=%d v_avg=%.3f v_max=%.3f y_min=%d y_max=%d" % [
+            frame_id,
+            sand_count,
+            sand_mass_total,
+            sand_unique_cells,
+            sand_max_per_cell,
+            rendered_sand,
+            rendered_total,
+            rendered_sand_outside,
+            sand_in_glass_cell,
+            sand_escaped,
+            sand_penetrating,
+            sand_cap,
+        avg_speed,
+        max_speed,
+        y_min_i,
+        y_max_i
     ])
 
 func _bcc_parity(cell: Vector3i) -> bool:
@@ -1848,6 +3698,8 @@ func _create_display_texture() -> Texture2D:
 func _exit_tree() -> void:
     if _rd == null:
         return
+    if _display_material != null:
+        _display_material.set_shader_parameter("compute_tex", null)
     if _uniform_set_a_light_a_rid.is_valid():
         _rd.free_rid(_uniform_set_a_light_a_rid)
     if _uniform_set_a_light_b_rid.is_valid():
@@ -1864,6 +3716,68 @@ func _exit_tree() -> void:
         _rd.free_rid(_sim_uniform_set_ab)
     if _sim_uniform_set_ba.is_valid():
         _rd.free_rid(_sim_uniform_set_ba)
+    if _mpm_copy_uniform_set_a.is_valid():
+        _rd.free_rid(_mpm_copy_uniform_set_a)
+    if _mpm_copy_uniform_set_b.is_valid():
+        _rd.free_rid(_mpm_copy_uniform_set_b)
+    if _mpm_init_uniform_set.is_valid():
+        _rd.free_rid(_mpm_init_uniform_set)
+    if _mpm_p2g_uniform_set_a.is_valid():
+        _rd.free_rid(_mpm_p2g_uniform_set_a)
+    if _mpm_p2g_uniform_set_b.is_valid():
+        _rd.free_rid(_mpm_p2g_uniform_set_b)
+    if _mpm_grid_uniform_set.is_valid():
+        _rd.free_rid(_mpm_grid_uniform_set)
+    if _mpm_g2p_uniform_set_ab.is_valid():
+        _rd.free_rid(_mpm_g2p_uniform_set_ab)
+    if _mpm_g2p_uniform_set_ba.is_valid():
+        _rd.free_rid(_mpm_g2p_uniform_set_ba)
+    if _mpm_grid_to_atlas_uniform_set_a.is_valid():
+        _rd.free_rid(_mpm_grid_to_atlas_uniform_set_a)
+    if _mpm_grid_to_atlas_uniform_set_b.is_valid():
+        _rd.free_rid(_mpm_grid_to_atlas_uniform_set_b)
+    if _mpm_particles_to_atlas_uniform_set_a.is_valid():
+        _rd.free_rid(_mpm_particles_to_atlas_uniform_set_a)
+    if _mpm_particles_to_atlas_uniform_set_b.is_valid():
+        _rd.free_rid(_mpm_particles_to_atlas_uniform_set_b)
+    if _mpm_rigid_map_set_a.is_valid():
+        _rd.free_rid(_mpm_rigid_map_set_a)
+    if _mpm_rigid_map_set_b.is_valid():
+        _rd.free_rid(_mpm_rigid_map_set_b)
+    if _mpm_update_bonds_set_a.is_valid():
+        _rd.free_rid(_mpm_update_bonds_set_a)
+    if _mpm_update_bonds_set_b.is_valid():
+        _rd.free_rid(_mpm_update_bonds_set_b)
+    if _mpm_ccl_init_set_a.is_valid():
+        _rd.free_rid(_mpm_ccl_init_set_a)
+    if _mpm_ccl_init_set_b.is_valid():
+        _rd.free_rid(_mpm_ccl_init_set_b)
+    if _mpm_ccl_prop_set_a_ab.is_valid():
+        _rd.free_rid(_mpm_ccl_prop_set_a_ab)
+    if _mpm_ccl_prop_set_a_ba.is_valid():
+        _rd.free_rid(_mpm_ccl_prop_set_a_ba)
+    if _mpm_ccl_prop_set_b_ab.is_valid():
+        _rd.free_rid(_mpm_ccl_prop_set_b_ab)
+    if _mpm_ccl_prop_set_b_ba.is_valid():
+        _rd.free_rid(_mpm_ccl_prop_set_b_ba)
+    if _mpm_ccl_write_set_a.is_valid():
+        _rd.free_rid(_mpm_ccl_write_set_a)
+    if _mpm_ccl_write_set_b.is_valid():
+        _rd.free_rid(_mpm_ccl_write_set_b)
+    if _mpm_island_accum0_set_a.is_valid():
+        _rd.free_rid(_mpm_island_accum0_set_a)
+    if _mpm_island_accum0_set_b.is_valid():
+        _rd.free_rid(_mpm_island_accum0_set_b)
+    if _mpm_island_finalize_set.is_valid():
+        _rd.free_rid(_mpm_island_finalize_set)
+    if _mpm_island_accum1_set_a.is_valid():
+        _rd.free_rid(_mpm_island_accum1_set_a)
+    if _mpm_island_accum1_set_b.is_valid():
+        _rd.free_rid(_mpm_island_accum1_set_b)
+    if _mpm_island_apply_set_a.is_valid():
+        _rd.free_rid(_mpm_island_apply_set_a)
+    if _mpm_island_apply_set_b.is_valid():
+        _rd.free_rid(_mpm_island_apply_set_b)
     if _active_list_uniform_set_rid.is_valid():
         _rd.free_rid(_active_list_uniform_set_rid)
     if _active_dispatch_uniform_set_rid.is_valid():
@@ -1886,6 +3800,8 @@ func _exit_tree() -> void:
         _rd.free_rid(_atlas_a_rid)
     if _atlas_b_rid.is_valid():
         _rd.free_rid(_atlas_b_rid)
+    if _atlas_static_rid.is_valid():
+        _rd.free_rid(_atlas_static_rid)
     if _seed_a_rid.is_valid():
         _rd.free_rid(_seed_a_rid)
     if _seed_b_rid.is_valid():
@@ -1912,6 +3828,52 @@ func _exit_tree() -> void:
         _rd.free_rid(_sim_dispatch_rid)
     if _material_props_rid.is_valid():
         _rd.free_rid(_material_props_rid)
+    if _mpm_pos_mass_a_rid.is_valid():
+        _rd.free_rid(_mpm_pos_mass_a_rid)
+    if _mpm_pos_mass_b_rid.is_valid():
+        _rd.free_rid(_mpm_pos_mass_b_rid)
+    if _mpm_vel_vol_a_rid.is_valid():
+        _rd.free_rid(_mpm_vel_vol_a_rid)
+    if _mpm_vel_vol_b_rid.is_valid():
+        _rd.free_rid(_mpm_vel_vol_b_rid)
+    if _mpm_c_a_rid.is_valid():
+        _rd.free_rid(_mpm_c_a_rid)
+    if _mpm_c_b_rid.is_valid():
+        _rd.free_rid(_mpm_c_b_rid)
+    if _mpm_f_a_rid.is_valid():
+        _rd.free_rid(_mpm_f_a_rid)
+    if _mpm_f_b_rid.is_valid():
+        _rd.free_rid(_mpm_f_b_rid)
+    if _mpm_meta_rid.is_valid():
+        _rd.free_rid(_mpm_meta_rid)
+    if _mpm_particle_count_rid.is_valid():
+        _rd.free_rid(_mpm_particle_count_rid)
+    if _mpm_grid_accum_rid.is_valid():
+        _rd.free_rid(_mpm_grid_accum_rid)
+    if _mpm_grid_vel_rid.is_valid():
+        _rd.free_rid(_mpm_grid_vel_rid)
+    if _mpm_rigid_map_rid.is_valid():
+        _rd.free_rid(_mpm_rigid_map_rid)
+    if _mpm_cell_pos_rid.is_valid():
+        _rd.free_rid(_mpm_cell_pos_rid)
+    if _mpm_labels_a_rid.is_valid():
+        _rd.free_rid(_mpm_labels_a_rid)
+    if _mpm_labels_b_rid.is_valid():
+        _rd.free_rid(_mpm_labels_b_rid)
+    if _mpm_island_mass_mom_rid.is_valid():
+        _rd.free_rid(_mpm_island_mass_mom_rid)
+    if _mpm_island_mass_com_rid.is_valid():
+        _rd.free_rid(_mpm_island_mass_com_rid)
+    if _mpm_island_com_mass_rid.is_valid():
+        _rd.free_rid(_mpm_island_com_mass_rid)
+    if _mpm_island_vel_rid.is_valid():
+        _rd.free_rid(_mpm_island_vel_rid)
+    if _mpm_island_L_rid.is_valid():
+        _rd.free_rid(_mpm_island_L_rid)
+    if _mpm_island_I0_rid.is_valid():
+        _rd.free_rid(_mpm_island_I0_rid)
+    if _mpm_island_I1_rid.is_valid():
+        _rd.free_rid(_mpm_island_I1_rid)
     if _pipeline_rid.is_valid():
         _rd.free_rid(_pipeline_rid)
     if _shader_rid.is_valid():
@@ -1936,3 +3898,67 @@ func _exit_tree() -> void:
         _rd.free_rid(_active_dispatch_pipeline_rid)
     if _active_dispatch_shader_rid.is_valid():
         _rd.free_rid(_active_dispatch_shader_rid)
+    if _mpm_copy_static_pipeline_rid.is_valid():
+        _rd.free_rid(_mpm_copy_static_pipeline_rid)
+    if _mpm_copy_static_shader_rid.is_valid():
+        _rd.free_rid(_mpm_copy_static_shader_rid)
+    if _mpm_init_particles_pipeline_rid.is_valid():
+        _rd.free_rid(_mpm_init_particles_pipeline_rid)
+    if _mpm_init_particles_shader_rid.is_valid():
+        _rd.free_rid(_mpm_init_particles_shader_rid)
+    if _mpm_p2g_pipeline_rid.is_valid():
+        _rd.free_rid(_mpm_p2g_pipeline_rid)
+    if _mpm_p2g_shader_rid.is_valid():
+        _rd.free_rid(_mpm_p2g_shader_rid)
+    if _mpm_grid_update_pipeline_rid.is_valid():
+        _rd.free_rid(_mpm_grid_update_pipeline_rid)
+    if _mpm_grid_update_shader_rid.is_valid():
+        _rd.free_rid(_mpm_grid_update_shader_rid)
+    if _mpm_g2p_advect_pipeline_rid.is_valid():
+        _rd.free_rid(_mpm_g2p_advect_pipeline_rid)
+    if _mpm_g2p_advect_shader_rid.is_valid():
+        _rd.free_rid(_mpm_g2p_advect_shader_rid)
+    if _mpm_grid_to_atlas_pipeline_rid.is_valid():
+        _rd.free_rid(_mpm_grid_to_atlas_pipeline_rid)
+    if _mpm_grid_to_atlas_shader_rid.is_valid():
+        _rd.free_rid(_mpm_grid_to_atlas_shader_rid)
+    if _mpm_particles_to_atlas_pipeline_rid.is_valid():
+        _rd.free_rid(_mpm_particles_to_atlas_pipeline_rid)
+    if _mpm_particles_to_atlas_shader_rid.is_valid():
+        _rd.free_rid(_mpm_particles_to_atlas_shader_rid)
+    if _mpm_build_rigid_map_pipeline_rid.is_valid():
+        _rd.free_rid(_mpm_build_rigid_map_pipeline_rid)
+    if _mpm_build_rigid_map_shader_rid.is_valid():
+        _rd.free_rid(_mpm_build_rigid_map_shader_rid)
+    if _mpm_update_bonds_pipeline_rid.is_valid():
+        _rd.free_rid(_mpm_update_bonds_pipeline_rid)
+    if _mpm_update_bonds_shader_rid.is_valid():
+        _rd.free_rid(_mpm_update_bonds_shader_rid)
+    if _mpm_ccl_init_pipeline_rid.is_valid():
+        _rd.free_rid(_mpm_ccl_init_pipeline_rid)
+    if _mpm_ccl_init_shader_rid.is_valid():
+        _rd.free_rid(_mpm_ccl_init_shader_rid)
+    if _mpm_ccl_propagate_pipeline_rid.is_valid():
+        _rd.free_rid(_mpm_ccl_propagate_pipeline_rid)
+    if _mpm_ccl_propagate_shader_rid.is_valid():
+        _rd.free_rid(_mpm_ccl_propagate_shader_rid)
+    if _mpm_ccl_write_pipeline_rid.is_valid():
+        _rd.free_rid(_mpm_ccl_write_pipeline_rid)
+    if _mpm_ccl_write_shader_rid.is_valid():
+        _rd.free_rid(_mpm_ccl_write_shader_rid)
+    if _mpm_island_accum0_pipeline_rid.is_valid():
+        _rd.free_rid(_mpm_island_accum0_pipeline_rid)
+    if _mpm_island_accum0_shader_rid.is_valid():
+        _rd.free_rid(_mpm_island_accum0_shader_rid)
+    if _mpm_island_finalize_pipeline_rid.is_valid():
+        _rd.free_rid(_mpm_island_finalize_pipeline_rid)
+    if _mpm_island_finalize_shader_rid.is_valid():
+        _rd.free_rid(_mpm_island_finalize_shader_rid)
+    if _mpm_island_accum1_pipeline_rid.is_valid():
+        _rd.free_rid(_mpm_island_accum1_pipeline_rid)
+    if _mpm_island_accum1_shader_rid.is_valid():
+        _rd.free_rid(_mpm_island_accum1_shader_rid)
+    if _mpm_island_apply_pipeline_rid.is_valid():
+        _rd.free_rid(_mpm_island_apply_pipeline_rid)
+    if _mpm_island_apply_shader_rid.is_valid():
+        _rd.free_rid(_mpm_island_apply_shader_rid)

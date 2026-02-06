@@ -45,6 +45,10 @@ layout(set = 0, binding = 9, std430) readonly buffer PreviewOcc {
     uint data[];
 } preview_occ;
 
+layout(set = 0, binding = 10, std430) readonly buffer CellPos {
+    vec4 data[];
+} cell_pos;
+
 const uint GLASS_MATERIAL = 8u;
 const uint INVISIBLE_MATERIAL = 9u;
 const uint PREVIEW_MATERIAL = 10u;
@@ -355,7 +359,12 @@ void main() {
                         bool preview_cell = (cell_val == 0u && preview_val != 0u && cursor_val == 0u);
                         bool cursor_cell = (cell_val == 0u && cursor_val != 0u);
                         vec3 cell_center = u.origin.xyz + vec3(cell) * u.misc.x;
-                        vec3 rc = ro - cell_center;
+                        vec3 center = cell_center;
+                        vec4 ppos = cell_pos.data[atlas_index];
+                        if (ppos.w > 0.5 && !glass_cell && !preview_cell && !cursor_cell) {
+                            center = u.origin.xyz + ppos.xyz * u.misc.x;
+                        }
+                        vec3 rc = ro - center;
                         float a = u.misc.x;
                         float t_cell_min = -1e9;
                         float t_cell_max = 1e9;
@@ -382,7 +391,7 @@ void main() {
                                     break;
                                 }
                                 vec3 p = ro + rd * t_voxel;
-                                vec3 lp = (p - cell_center) / a;
+                                vec3 lp = (p - center) / a;
                                 float d = sdf_truncated_octahedron(lp) * a;     
                                 if (d < 0.0) {
                                     if (glass_cell || preview_cell || cursor_cell) {
