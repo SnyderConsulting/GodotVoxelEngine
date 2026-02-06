@@ -10,6 +10,7 @@ extends Node
 @export var brush_value_path: NodePath
 @export var sand_material_id: int = 1
 @export var water_material_id: int = 2
+@export var hub_scene: String = "res://scenes/ProtoHub.tscn"
 @export var spawn_interval: float = 0.02
 @export var brush_radius: int = 1
 @export var max_voxels_per_spawn: int = 256
@@ -65,6 +66,9 @@ func _late_init() -> void:
         _renderer.set_voxel_entries([], true)
 
 func _process(delta: float) -> void:
+    if Input.is_action_just_pressed("ui_cancel"):
+        get_tree().change_scene_to_file(hub_scene)
+        return
     if _renderer == null or _camera == null:
         return
     _debug_frame += 1
@@ -91,7 +95,7 @@ func _set_material(mat_id: int) -> void:
     _current_material = mat_id
     if _overlay:
         var name := "Sand" if mat_id == sand_material_id else "Water"
-        _overlay.text = "Paint Mode\nMaterial: %s" % name
+        _overlay.text = "Paint Mode\nMaterial: %s\nEsc: hub" % name
 
 func _on_brush_changed(value: float) -> void:
     brush_radius = int(round(value))
