@@ -43,6 +43,7 @@ layout(set = 0, binding = 9, std430) readonly buffer IslandI1 {
 } island_I1;
 
 const uint STONE_MATERIAL = 4u;
+const uint FLAG_STATIC = 1u << 1;
 const float FP_SCALE = 10000.0;
 const float SLEEP_V2 = 1e-4;
 const float SLEEP_W2 = 1e-4;
@@ -62,6 +63,11 @@ void main() {
         return;
     }
     if (meta.data[p].x != STONE_MATERIAL) {
+        return;
+    }
+    if ((meta.data[p].y & FLAG_STATIC) != 0u) {
+        vel_vol.data[p].xyz = vec3(0.0);
+        c_buf.data[p] = mat3(0.0);
         return;
     }
     uint island = meta.data[p].w;

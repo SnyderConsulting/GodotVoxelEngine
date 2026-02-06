@@ -65,6 +65,10 @@ layout(set = 0, binding = 13, std430) readonly buffer StaticAtlas {
     uint data[];
 } static_atlas;
 
+const uint FLAG_STATIC = 1u << 1;
+// Inflate static solids slightly for collision to reduce leaking through thin voxel shells.
+const float STATIC_COLLISION_MARGIN = 0.03;
+
 uint idx_brick(ivec3 b) {
     return uint(b.x) + uint(b.y) * uint(u.brick_info.x)
         + uint(b.z) * uint(u.brick_info.x) * uint(u.brick_info.y);
@@ -161,7 +165,7 @@ bool query_static_sdf(vec3 x, out float dist, out vec3 normal) {
         if (static_atlas.data[si] == 0u) {
             continue;
         }
-        float d = sdf_truncated_octahedron(x - vec3(c));
+        float d = sdf_truncated_octahedron(x - vec3(c)) - STATIC_COLLISION_MARGIN;
         if (d < best_d) {
             best_d = d;
             best_cell = c;
@@ -363,10 +367,19 @@ void main() {
         return;
     }
     uint material_id = meta.data[p].x;
+    uint flags = meta.data[p].y;
     if (material_id == 0u) {
         pos_mass_out.data[p] = pos_mass_in.data[p];
         vel_vol_out.data[p] = vel_vol_in.data[p];
         c_out.data[p] = c_in.data[p];
+        f_out.data[p] = f_in.data[p];
+        return;
+    }
+    if ((flags & FLAG_STATIC) != 0u) {
+        // Static/bedrock particles participate in topology (bonds/CCL) but do not advect.
+        pos_mass_out.data[p] = pos_mass_in.data[p];
+        vel_vol_out.data[p] = vec4(0.0, 0.0, 0.0, vel_vol_in.data[p].w);
+        c_out.data[p] = mat3(0.0);
         f_out.data[p] = f_in.data[p];
         return;
     }
@@ -437,19 +450,51 @@ void main() {
     }
 
     // Collision-aware advection (micro-steps) to reduce tunneling through thin glass.
+    // Uses conservative step clamping based on the static SDF at the current position.
     const int COLLIDE_STEPS = 8;
+    const float SKIN = 0.02;
     float dtc = dt / float(COLLIDE_STEPS);
     vec3 x_step = x;
     bool hard_hit = false;
     for (int s = 0; s < COLLIDE_STEPS; s++) {
         vec3 x_prev = x_step;
-        vec3 x_try = x_step + v * dtc;
+        vec3 dx = v * dtc;
+        float step_len = length(dx);
+        vec3 dir = (step_len > 1e-6) ? (dx / step_len) : vec3(0.0);
+
+        // Conservative advancement: limit displacement so we don't cross the SDF surface in one step.
+        float sd0 = 0.0;
+        vec3 n0 = vec3(0.0, 1.0, 0.0);
+        if (step_len > 1e-6 && query_static_sdf(x_step, sd0, n0)) {
+            if (sd0 < SKIN) {
+                // Already contacting/inside: push out and remove normal velocity.
+                x_step = x_step + (SKIN - sd0) * n0;
+                x_step = clamp(x_step, minp, maxp);
+                float vn0 = dot(v, n0);
+                if (vn0 < 0.0) {
+                    v = v - vn0 * n0;
+                }
+                vec3 vt0 = v - dot(v, n0) * n0;
+                v = v - vt0 * clamp(mu, 0.0, 0.95);
+                C = mat3(0.0);
+                // Small extra damping at contact to reduce jitter.
+                v *= 0.85;
+                continue;
+            }
+            float max_step = max(0.0, sd0 - SKIN);
+            if (step_len > max_step) {
+                step_len = max_step;
+                dx = dir * step_len;
+            }
+        }
+
+        vec3 x_try = x_step + dx;
         x_try = clamp(x_try, minp, maxp);
 
         float sd = 0.0;
         vec3 n = vec3(0.0, 1.0, 0.0);
-        if (query_static_sdf(x_try, sd, n) && sd < 0.0) {
-            x_try = x_try - sd * n;
+        if (query_static_sdf(x_try, sd, n) && sd < SKIN) {
+            x_try = x_try + (SKIN - sd) * n;
 
             float vn = dot(v, n);
             if (vn < 0.0) {
@@ -459,6 +504,7 @@ void main() {
             vec3 vt = v - dot(v, n) * n;
             v = v - vt * clamp(mu, 0.0, 0.95);
             C = mat3(0.0);
+            v *= 0.9;
         } else {
             // Discrete fallback.
             ivec3 cell = snap_to_bcc(x_try);

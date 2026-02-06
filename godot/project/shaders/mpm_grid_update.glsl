@@ -34,6 +34,13 @@ bool bcc_parity(ivec3 cell) {
     return ((cell.x & 1) == (cell.y & 1)) && ((cell.y & 1) == (cell.z & 1));
 }
 
+bool in_bounds(ivec3 p) {
+    return p.x >= 0 && p.y >= 0 && p.z >= 0
+        && p.x < int(u.grid_info.x)
+        && p.y < int(u.grid_info.y)
+        && p.z < int(u.grid_info.z);
+}
+
 ivec3 brick_from_index(uint brick_index) {
     uint bx = brick_index % uint(u.brick_info.x);
     uint by = (brick_index / uint(u.brick_info.x)) % uint(u.brick_info.y);
@@ -51,6 +58,25 @@ ivec3 cell_from_atlas_index(uint atlas_index) {
     uint lz = local_index / (brick_size * brick_size);
     ivec3 brick = brick_from_index(brick_index);
     return brick * int(brick_size) + ivec3(int(lx), int(ly), int(lz));
+}
+
+uint atlas_index_for_cell_direct(ivec3 cell) {
+    int brick_size = int(u.brick_info.w);
+    ivec3 brick = cell / brick_size;
+    if (brick.x < 0 || brick.y < 0 || brick.z < 0
+        || brick.x >= int(u.brick_info.x)
+        || brick.y >= int(u.brick_info.y)
+        || brick.z >= int(u.brick_info.z)) {
+        return 0xffffffffu;
+    }
+    uint brick_index = uint(brick.x)
+        + uint(brick.y) * uint(u.brick_info.x)
+        + uint(brick.z) * uint(u.brick_info.x) * uint(u.brick_info.y);
+    ivec3 local = cell - brick * brick_size;
+    uint local_index = uint(local.x)
+        + uint(local.y) * uint(brick_size)
+        + uint(local.z) * uint(brick_size * brick_size);
+    return brick_index * uint(brick_size * brick_size * brick_size) + local_index;
 }
 
 void main() {
@@ -94,8 +120,46 @@ void main() {
     v += gdir * gmag * dt;
 
     // Static solid nodes: zero velocity.
-    if (static_atlas.data[idx] != 0u) {
+    bool is_static_node = static_atlas.data[idx] != 0u;
+    if (is_static_node) {
         v = vec3(0.0);
+    } else {
+        // Boundary condition: prevent grid velocity from flowing into neighboring static voxels.
+        // This reduces tunneling and "pressure leaks" compared to only testing particles.
+        ivec3 neigh[14] = ivec3[14](
+            ivec3(2, 0, 0),
+            ivec3(-2, 0, 0),
+            ivec3(0, 2, 0),
+            ivec3(0, -2, 0),
+            ivec3(0, 0, 2),
+            ivec3(0, 0, -2),
+            ivec3(1, 1, 1),
+            ivec3(1, 1, -1),
+            ivec3(1, -1, 1),
+            ivec3(1, -1, -1),
+            ivec3(-1, 1, 1),
+            ivec3(-1, 1, -1),
+            ivec3(-1, -1, 1),
+            ivec3(-1, -1, -1)
+        );
+        for (int i = 0; i < 14; i++) {
+            ivec3 nc = cell + neigh[i];
+            if (!in_bounds(nc) || !bcc_parity(nc)) {
+                continue;
+            }
+            uint ni = atlas_index_for_cell_direct(nc);
+            if (ni == 0xffffffffu) {
+                continue;
+            }
+            if (static_atlas.data[ni] == 0u) {
+                continue;
+            }
+            vec3 fn = normalize(vec3(neigh[i]));
+            float toward = dot(v, fn);
+            if (toward > 0.0) {
+                v -= toward * fn;
+            }
+        }
     }
 
     // World bounds collision (axis-aligned grid AABB).

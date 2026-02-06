@@ -2411,6 +2411,8 @@ func _readback_metrics() -> void:
 func _readback_metrics_on_render_thread() -> void:
     if _rd == null or !_metrics_rid.is_valid():
         return
+    if !debug_logging and !diag_enabled:
+        return
     var bytes := _rd.buffer_get_data(_metrics_rid)
     var ints := bytes.to_int32_array()
     if ints.size() < 4:
@@ -2420,7 +2422,8 @@ func _readback_metrics_on_render_thread() -> void:
     var step_count := ints[2]
     var occupied_bricks := ints[3]
     var active_bricks := -1
-    if _active_count_rid.is_valid():
+    # active_bricks only has meaning for the legacy CA path (sim_mode==0).
+    if sim_mode == 0 and _active_count_rid.is_valid():
         var active_bytes := _rd.buffer_get_data(_active_count_rid, 0, 4)
         if active_bytes.size() >= 4:
             var active_vals := active_bytes.to_int32_array()
@@ -2713,6 +2716,7 @@ func set_voxel_entries_mpm(entries: Array) -> void:
     for entry in entries:
         var pos = entry.get("pos", Vector3.ZERO)
         var mat_id = int(entry.get("material", 1))
+        var flags = int(entry.get("flags", 0))
         if mat_id <= 0:
             continue
         var gx := int(pos.x)
@@ -2752,7 +2756,7 @@ func set_voxel_entries_mpm(entries: Array) -> void:
         vel_vol.append(1.0) # volume
         # meta uvec4 packed as int32
         meta.append(mat_id)
-        meta.append(0) # flags
+        meta.append(flags) # flags (bitmask; e.g., static bedrock)
         meta.append(0) # bond_mask
         meta.append(0) # island_id
 
@@ -3281,7 +3285,7 @@ func _mpm_set_static_cell(cell: Vector3i, material: int) -> void:
     if _atlas_b_rid.is_valid():
         _rd.buffer_update(_atlas_b_rid, offset, bytes.size(), bytes)
 
-func mpm_spawn_cells(cells: Array, material: int, velocity: Vector3 = Vector3.ZERO, volume: float = 1.0) -> int:
+func mpm_spawn_cells(cells: Array, material: int, velocity: Vector3 = Vector3.ZERO, volume: float = 1.0, flags: int = 0) -> int:
     if _rd == null:
         return 0
     if sim_mode != 1:
@@ -3348,7 +3352,7 @@ func mpm_spawn_cells(cells: Array, material: int, velocity: Vector3 = Vector3.ZE
         vel_f[i * 4 + 3] = vol_val
 
         meta_i[i * 4 + 0] = material
-        meta_i[i * 4 + 1] = 0 # flags
+        meta_i[i * 4 + 1] = flags # flags
         meta_i[i * 4 + 2] = 0 # bond_mask
         meta_i[i * 4 + 3] = 0 # island_id
 
@@ -3386,8 +3390,8 @@ func mpm_spawn_cells(cells: Array, material: int, velocity: Vector3 = Vector3.ZE
     _mpm_particle_count_cpu = new_count
     return n
 
-func mpm_spawn_particle(cell: Vector3i, material: int, velocity: Vector3 = Vector3.ZERO) -> bool:
-    return mpm_spawn_cells([cell], material, velocity, 1.0) > 0
+func mpm_spawn_particle(cell: Vector3i, material: int, velocity: Vector3 = Vector3.ZERO, flags: int = 0) -> bool:
+    return mpm_spawn_cells([cell], material, velocity, 1.0, flags) > 0
 
 func set_voxel_at(cell: Vector3i, material: int) -> void:
     if _rd == null:

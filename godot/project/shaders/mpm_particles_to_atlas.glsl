@@ -105,7 +105,7 @@ bool is_solid(uint mat_id) {
     return mat_id == GLASS_MATERIAL || mat_id == INVISIBLE_MATERIAL;
 }
 
-bool try_claim_cell(ivec3 cell, uint mat_id) {
+bool try_claim_cell(ivec3 cell, uint mat_id, vec3 render_pos) {
     if (!in_bounds(cell) || !bcc_parity(cell)) {
         return false;
     }
@@ -115,8 +115,10 @@ bool try_claim_cell(ivec3 cell, uint mat_id) {
     }
     uint prev = atomicCompSwap(atlas_out.data[ci], 0u, mat_id);
     if (prev == 0u) {
-        // Snap the rendered voxel center to its chosen BCC cell to keep raymarch cell lookup consistent.
-        cell_pos.data[ci] = vec4(vec3(cell), 1.0);
+        // Render center in grid-space coordinates. Ideally this is the particle's continuous position.
+        // When we "spill" into neighboring cells due to contention, use the claimed cell center to
+        // keep the raymarch cell lookup roughly aligned.
+        cell_pos.data[ci] = vec4(render_pos, 1.0);
         return true;
     }
     return false;
@@ -156,7 +158,7 @@ void main() {
     );
 
     // First try the nearest BCC cell.
-    if (try_claim_cell(base, mat_id)) {
+    if (try_claim_cell(base, mat_id, x)) {
         return;
     }
 
@@ -165,7 +167,8 @@ void main() {
     int start = int(h % 14u);
     for (int k = 0; k < 14; k++) {
         int i = (start + k) % 14;
-        if (try_claim_cell(base + neigh[i], mat_id)) {
+        ivec3 c = base + neigh[i];
+        if (try_claim_cell(c, mat_id, vec3(c))) {
             return;
         }
     }
@@ -174,8 +177,8 @@ void main() {
     // As a last resort, do a bounded random-walk search that explores further out without
     // stepping into static solids. This is render-only and aims to preserve the perception of
     // conserved mass even when the underlying continuum particles compress.
-    const int WALK_LEN = 10;
-    const int WALK_TRIES = 128;
+    const int WALK_LEN = 5;
+    const int WALK_TRIES = 96;
     uint walk_seed = h ^ 0x9E3779B9u;
     for (int t = 0; t < WALK_TRIES; t++) {
         ivec3 c = base;
@@ -203,7 +206,7 @@ void main() {
         if (!ok) {
             continue;
         }
-        if (try_claim_cell(c, mat_id)) {
+        if (try_claim_cell(c, mat_id, vec3(c))) {
             return;
         }
     }

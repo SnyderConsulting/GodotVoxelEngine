@@ -44,5 +44,11 @@ text = "Plinko: Glass + Sand"
 [node name="PaintButton" type="Button" parent="Margin/VBox"]
 text = "Paint: Sand + Water"
 
+[node name="StonePillarButton" type="Button" parent="Margin/VBox"]
+text = "Stone Pillar: Rigid + Fracture"
+
+[node name="JellyButton" type="Button" parent="Margin/VBox"]
+text = "Jelly: Stone Stability"
+
 [node name="Hint" type="Label" parent="Margin/VBox"]
 text = "Tip: Run a scene directly to skip this menu."
