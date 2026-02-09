@@ -1,0 +1,84 @@
+{
+  "engine": "godot/engine-src/bin/godot.macos.editor.x86_64",
+  "project": "godot/project",
+  "defaults": {
+    "stats_every": 10,
+    "startup_timeout_s": 12.0,
+    "stats_timeout_s": 12.0,
+    "run_duration_s": 6.0,
+    "sample_points_s": [1.0, 3.0, 6.0],
+    "checks": {
+      "nan_max": 0,
+      "total_mass_loss_frac_max": 0.02
+    }
+  },
+  "scenes": [
+    {
+      "name": "hourglass",
+      "scene": "res://scenes/HourglassTest.tscn",
+      "run_duration_s": 8.0,
+      "sample_points_s": [1.0, 4.0, 8.0],
+      "checks": {
+        "nan_max": 0,
+        "total_mass_loss_frac_max": 0.02
+      },
+      "material_checks": [
+        { "mat_id": 1, "mass_loss_frac_max": 0.03, "overlap_static_max": 500, "avg_speed_final_max": 10.0 }
+      ]
+    },
+    {
+      "name": "water_equilibrium",
+      "scene": "res://scenes/WaterEquilibriumTest.tscn",
+      "run_duration_s": 6.0,
+      "sample_points_s": [1.0, 3.0, 6.0],
+      "checks": {
+        "nan_max": 0,
+        "total_mass_loss_frac_max": 0.02
+      },
+      "material_checks": [
+        { "mat_id": 2, "mass_loss_frac_max": 0.03, "overlap_static_max": 200, "avg_speed_final_max": 5.0 }
+      ]
+    },
+    {
+      "name": "water_sand_equilibrium",
+      "scene": "res://scenes/WaterSandEquilibriumTest.tscn",
+      "run_duration_s": 6.0,
+      "sample_points_s": [1.0, 3.0, 6.0],
+      "checks": {
+        "nan_max": 0,
+        "total_mass_loss_frac_max": 0.02
+      },
+      "material_checks": [
+        { "mat_id": 1, "mass_loss_frac_max": 0.03, "overlap_static_max": 400, "avg_speed_final_max": 10.0 },
+        { "mat_id": 2, "mass_loss_frac_max": 0.03, "overlap_static_max": 400, "avg_speed_final_max": 10.0 }
+      ]
+    },
+    {
+      "name": "stone_pillar",
+      "scene": "res://scenes/StonePillarTest.tscn",
+      "run_duration_s": 6.0,
+      "sample_points_s": [1.0, 3.0, 6.0],
+      "checks": {
+        "nan_max": 0,
+        "total_mass_loss_frac_max": 0.02
+      },
+      "material_checks": [
+        { "mat_id": 4, "mass_loss_frac_max": 0.03, "overlap_static_max": 400, "avg_speed_final_max": 10.0 }
+      ]
+    },
+    {
+      "name": "jelly",
+      "scene": "res://scenes/JellyTest.tscn",
+      "run_duration_s": 6.0,
+      "sample_points_s": [1.0, 3.0, 6.0],
+      "checks": {
+        "nan_max": 0,
+        "total_mass_loss_frac_max": 0.02
+      },
+      "material_checks": [
+        { "mat_id": 4, "mass_loss_frac_max": 0.03, "overlap_static_max": 400, "avg_speed_final_max": 10.0 }
+      ]
+    }
+  ]
+}
+

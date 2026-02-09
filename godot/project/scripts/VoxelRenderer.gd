@@ -36,6 +36,8 @@ extends Node
 @export var mpm_rigid_enabled: bool = true
 @export var mpm_fracture_enabled: bool = true
 @export var mpm_ccl_iterations: int = 12
+@export var mpm_stats_enabled: bool = false
+@export var mpm_stats_every: int = 30
 @export var diag_enabled: bool = false
 @export var diag_every: int = 60
 @export var diag_log_buffers: bool = false
@@ -86,6 +88,10 @@ var _mpm_island_accum1_shader_rid: RID
 var _mpm_island_accum1_pipeline_rid: RID
 var _mpm_island_apply_shader_rid: RID
 var _mpm_island_apply_pipeline_rid: RID
+var _mpm_stats_init_shader_rid: RID
+var _mpm_stats_init_pipeline_rid: RID
+var _mpm_stats_shader_rid: RID
+var _mpm_stats_pipeline_rid: RID
 var _texture_rid: RID
 var _ubo_rid: RID
 var _indirection_rid: RID
@@ -128,6 +134,7 @@ var _mpm_island_vel_rid: RID
 var _mpm_island_L_rid: RID
 var _mpm_island_I0_rid: RID
 var _mpm_island_I1_rid: RID
+var _mpm_stats_rid: RID
 var _preview_cells: Array = []
 var _cursor_cell := Vector3i(-1, -1, -1)
 var _preview_occ_bricks: PackedInt32Array = PackedInt32Array()
@@ -170,6 +177,9 @@ var _mpm_island_accum1_set_a: RID
 var _mpm_island_accum1_set_b: RID
 var _mpm_island_apply_set_a: RID
 var _mpm_island_apply_set_b: RID
+var _mpm_stats_init_set: RID
+var _mpm_stats_set_a: RID
+var _mpm_stats_set_b: RID
 var _active_list_uniform_set_rid: RID
 var _active_dispatch_uniform_set_rid: RID
 var _light_uniform_set_a_ab: RID
@@ -178,6 +188,7 @@ var _light_uniform_set_b_ab: RID
 var _light_uniform_set_b_ba: RID
 var _occupancy_bytes := 0
 var _metrics_bytes := 0
+var _mpm_stats_bytes := 0
 var _atlas_bytes := 0
 var _active_list_bytes := 0
 var _active_count_bytes := 0
@@ -189,6 +200,8 @@ var _camera: Camera3D
 var _render_ready := false
 var _use_global_rd := false
 var _metrics_frame := 0
+var _mpm_stats_frame := 0
+var _mpm_stats_last_readback := 0
 var _debug_frame := 0
 var _debug_probe_frame := 0
 var _sim_frame := 0
@@ -201,11 +214,30 @@ var _rng := RandomNumberGenerator.new()
 var _mpm_particles_use_a := true
 var _mpm_particle_count_cpu: int = 0
 var _material_mass_by_id: Dictionary = {}
+var mpm_last_stats_frame: int = 0
+var mpm_last_stats_raw: PackedInt32Array = PackedInt32Array()
+var mpm_last_stats: Dictionary = {}
 
 func _diag(msg: String) -> void:
     if !diag_enabled:
         return
     print("VoxelRenderer diag | frame=%d %s" % [_debug_frame, msg])
+
+func mpm_get_last_stats_frame() -> int:
+    return mpm_last_stats_frame
+
+func mpm_get_last_stats_raw() -> Array:
+    # Automation server serializes Packed*Arrays inconsistently across builds.
+    # Return a plain Array[int] for reliable JSON transport.
+    var out: Array = []
+    var n := mpm_last_stats_raw.size()
+    out.resize(n)
+    for i in range(n):
+        out[i] = int(mpm_last_stats_raw[i])
+    return out
+
+func mpm_get_last_stats() -> Dictionary:
+    return mpm_last_stats
 
 func _ready() -> void:
     _diag("ready start width=%d height=%d chunk_size=%d chunk_grid=%d lattice=%.3f" % [
@@ -689,6 +721,46 @@ func _init_render_resources() -> void:
                 if !_mpm_island_apply_pipeline_rid.is_valid():
                     push_error("Failed to create MPM island_apply pipeline.")
 
+    _mpm_stats_init_shader_rid = RID()
+    _mpm_stats_init_pipeline_rid = RID()
+    var mpm_stats_init_text := FileAccess.get_file_as_string("res://shaders/mpm_stats_init.glsl")
+    if !mpm_stats_init_text.is_empty():
+        var mpm_stats_init_source := RDShaderSource.new()
+        mpm_stats_init_source.language = RenderingDevice.SHADER_LANGUAGE_GLSL
+        mpm_stats_init_source.set_stage_source(RenderingDevice.SHADER_STAGE_COMPUTE, mpm_stats_init_text)
+        var mpm_stats_init_spirv := _rd.shader_compile_spirv_from_source(mpm_stats_init_source)
+        var mpm_stats_init_error := mpm_stats_init_spirv.get_stage_compile_error(RenderingDevice.SHADER_STAGE_COMPUTE)
+        if mpm_stats_init_error != "":
+            push_error("MPM stats_init shader compile error: %s" % mpm_stats_init_error)
+        else:
+            _mpm_stats_init_shader_rid = _rd.shader_create_from_spirv(mpm_stats_init_spirv)
+            if !_mpm_stats_init_shader_rid.is_valid():
+                push_error("Failed to create MPM stats_init shader.")
+            else:
+                _mpm_stats_init_pipeline_rid = _rd.compute_pipeline_create(_mpm_stats_init_shader_rid)
+                if !_mpm_stats_init_pipeline_rid.is_valid():
+                    push_error("Failed to create MPM stats_init pipeline.")
+
+    _mpm_stats_shader_rid = RID()
+    _mpm_stats_pipeline_rid = RID()
+    var mpm_stats_text := FileAccess.get_file_as_string("res://shaders/mpm_stats.glsl")
+    if !mpm_stats_text.is_empty():
+        var mpm_stats_source := RDShaderSource.new()
+        mpm_stats_source.language = RenderingDevice.SHADER_LANGUAGE_GLSL
+        mpm_stats_source.set_stage_source(RenderingDevice.SHADER_STAGE_COMPUTE, mpm_stats_text)
+        var mpm_stats_spirv := _rd.shader_compile_spirv_from_source(mpm_stats_source)
+        var mpm_stats_error := mpm_stats_spirv.get_stage_compile_error(RenderingDevice.SHADER_STAGE_COMPUTE)
+        if mpm_stats_error != "":
+            push_error("MPM stats shader compile error: %s" % mpm_stats_error)
+        else:
+            _mpm_stats_shader_rid = _rd.shader_create_from_spirv(mpm_stats_spirv)
+            if !_mpm_stats_shader_rid.is_valid():
+                push_error("Failed to create MPM stats shader.")
+            else:
+                _mpm_stats_pipeline_rid = _rd.compute_pipeline_create(_mpm_stats_shader_rid)
+                if !_mpm_stats_pipeline_rid.is_valid():
+                    push_error("Failed to create MPM stats pipeline.")
+
     var fmt := RDTextureFormat.new()
     fmt.width = width
     fmt.height = height
@@ -764,6 +836,13 @@ func _init_render_resources() -> void:
     if !_metrics_rid.is_valid():
         push_error("Failed to create metrics buffer.")
         return
+
+    # MPM stats buffer (small int SSBO used for autonomous regression tests).
+    _mpm_stats_bytes = 1024
+    _mpm_stats_rid = _rd.storage_buffer_create(_mpm_stats_bytes)
+    if !_mpm_stats_rid.is_valid():
+        push_error("Failed to create MPM stats buffer (mpm_stats disabled).")
+        _mpm_stats_bytes = 0
 
     _active_list_bytes = brick_count * 4
     _active_count_bytes = 4
@@ -2013,6 +2092,68 @@ func _init_render_resources() -> void:
             0
         )
 
+    # MPM stats uniform sets (optional).
+    if _mpm_stats_init_shader_rid.is_valid() and _mpm_stats_rid.is_valid():
+        var mpm_stats_init_out := RDUniform.new()
+        mpm_stats_init_out.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_stats_init_out.binding = 0
+        mpm_stats_init_out.add_id(_mpm_stats_rid)
+        _mpm_stats_init_set = _rd.uniform_set_create([mpm_stats_init_out], _mpm_stats_init_shader_rid, 0)
+
+    if _mpm_stats_shader_rid.is_valid() and _mpm_stats_rid.is_valid():
+        var mpm_stats_ubo := RDUniform.new()
+        mpm_stats_ubo.uniform_type = RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER
+        mpm_stats_ubo.binding = 0
+        mpm_stats_ubo.add_id(_ubo_rid)
+        var mpm_stats_ind := RDUniform.new()
+        mpm_stats_ind.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_stats_ind.binding = 1
+        mpm_stats_ind.add_id(_indirection_rid)
+        var mpm_stats_static := RDUniform.new()
+        mpm_stats_static.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_stats_static.binding = 2
+        mpm_stats_static.add_id(_atlas_static_rid)
+        var mpm_stats_meta := RDUniform.new()
+        mpm_stats_meta.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_stats_meta.binding = 5
+        mpm_stats_meta.add_id(_mpm_meta_rid)
+        var mpm_stats_count := RDUniform.new()
+        mpm_stats_count.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_stats_count.binding = 6
+        mpm_stats_count.add_id(_mpm_particle_count_rid)
+        var mpm_stats_out := RDUniform.new()
+        mpm_stats_out.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_stats_out.binding = 7
+        mpm_stats_out.add_id(_mpm_stats_rid)
+
+        var mpm_stats_pos_a := RDUniform.new()
+        mpm_stats_pos_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_stats_pos_a.binding = 3
+        mpm_stats_pos_a.add_id(_mpm_pos_mass_a_rid)
+        var mpm_stats_vel_a := RDUniform.new()
+        mpm_stats_vel_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_stats_vel_a.binding = 4
+        mpm_stats_vel_a.add_id(_mpm_vel_vol_a_rid)
+        _mpm_stats_set_a = _rd.uniform_set_create(
+            [mpm_stats_ubo, mpm_stats_ind, mpm_stats_static, mpm_stats_pos_a, mpm_stats_vel_a, mpm_stats_meta, mpm_stats_count, mpm_stats_out],
+            _mpm_stats_shader_rid,
+            0
+        )
+
+        var mpm_stats_pos_b := RDUniform.new()
+        mpm_stats_pos_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_stats_pos_b.binding = 3
+        mpm_stats_pos_b.add_id(_mpm_pos_mass_b_rid)
+        var mpm_stats_vel_b := RDUniform.new()
+        mpm_stats_vel_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_stats_vel_b.binding = 4
+        mpm_stats_vel_b.add_id(_mpm_vel_vol_b_rid)
+        _mpm_stats_set_b = _rd.uniform_set_create(
+            [mpm_stats_ubo, mpm_stats_ind, mpm_stats_static, mpm_stats_pos_b, mpm_stats_vel_b, mpm_stats_meta, mpm_stats_count, mpm_stats_out],
+            _mpm_stats_shader_rid,
+            0
+        )
+
     _display_texture = _create_display_texture()
     if _display_texture == null:
         push_error("Failed to create GPU display texture.")
@@ -2091,6 +2232,7 @@ func _process(_delta: float) -> void:
     _dispatch_light(grid_extent_i)
     _dispatch_compute()
     _readback_metrics()
+    _readback_mpm_stats()
     _debug_request_probe()
 
 func _update_params(bytes: PackedByteArray) -> void:
@@ -2315,6 +2457,27 @@ func _dispatch_mpm() -> void:
             _rd.compute_list_dispatch(list_atlas2, grid_groups, 1, 1)
             _rd.compute_list_end()
 
+    # Optional stats pass for autonomous regression testing.
+    if mpm_stats_enabled and _mpm_stats_rid.is_valid() and _mpm_stats_init_pipeline_rid.is_valid() and _mpm_stats_pipeline_rid.is_valid():
+        _mpm_stats_frame += 1
+        var stats_every: int = mpm_stats_every
+        if stats_every < 1:
+            stats_every = 1
+        if _mpm_stats_frame % stats_every == 0:
+            if _mpm_stats_init_set.is_valid():
+                var list_si := _rd.compute_list_begin()
+                _rd.compute_list_bind_compute_pipeline(list_si, _mpm_stats_init_pipeline_rid)
+                _rd.compute_list_bind_uniform_set(list_si, _mpm_stats_init_set, 0)
+                _rd.compute_list_dispatch(list_si, 1, 1, 1)
+                _rd.compute_list_end()
+            var stats_set := _mpm_stats_set_a if _mpm_particles_use_a else _mpm_stats_set_b
+            if stats_set.is_valid():
+                var list_s := _rd.compute_list_begin()
+                _rd.compute_list_bind_compute_pipeline(list_s, _mpm_stats_pipeline_rid)
+                _rd.compute_list_bind_uniform_set(list_s, stats_set, 0)
+                _rd.compute_list_dispatch(list_s, particle_groups, 1, 1)
+                _rd.compute_list_end()
+
     _atlas_use_a = atlas_target_a
 
 func _reset_metrics() -> void:
@@ -2451,6 +2614,105 @@ func _readback_metrics_on_render_thread() -> void:
         full_group_count,
         str(main_thread)
     ])
+
+func _readback_mpm_stats() -> void:
+    if !mpm_stats_enabled:
+        return
+    if sim_mode != 1 or !sim_enabled:
+        return
+    var every: int = mpm_stats_every
+    if every < 1:
+        every = 1
+    if _mpm_stats_frame == 0 or (_mpm_stats_frame % every) != 0:
+        return
+    if _mpm_stats_frame == _mpm_stats_last_readback:
+        return
+    _mpm_stats_last_readback = _mpm_stats_frame
+    if !_mpm_stats_rid.is_valid():
+        return
+    RenderingServer.call_on_render_thread(Callable(self, "_readback_mpm_stats_on_render_thread"))
+
+func _readback_mpm_stats_on_render_thread() -> void:
+    if _rd == null or !_mpm_stats_rid.is_valid():
+        return
+    var bytes := _rd.buffer_get_data(_mpm_stats_rid)
+    var ints := bytes.to_int32_array()
+    call_deferred("_apply_mpm_stats_ints", ints)
+
+func _apply_mpm_stats_ints(ints: PackedInt32Array) -> void:
+    if ints.size() < 8:
+        return
+    mpm_last_stats_raw = ints
+    mpm_last_stats_frame += 1
+
+    var out := {}
+    out["version"] = ints[0]
+    out["particle_count"] = ints[1]
+    out["active"] = ints[2]
+    out["inactive"] = ints[3]
+    out["nan"] = ints[4]
+
+    const IDX_BASE := 5
+    const MAT_SLOTS := 16
+    const SLOT_STRIDE := 14
+
+    var slots: Array = []
+    slots.resize(MAT_SLOTS)
+    for mat_id in range(MAT_SLOTS):
+        var base := IDX_BASE + mat_id * SLOT_STRIDE
+        if base + (SLOT_STRIDE - 1) >= ints.size():
+            break
+        var count := ints[base + 0]
+        var mass_fixed := ints[base + 1]
+        var sum_speed := ints[base + 2]
+        var max_speed := ints[base + 3]
+        var overlap_static := ints[base + 4]
+
+        var min_x := ints[base + 5]
+        var min_y := ints[base + 6]
+        var min_z := ints[base + 7]
+        var max_x := ints[base + 8]
+        var max_y := ints[base + 9]
+        var max_z := ints[base + 10]
+
+        var sum_mx := ints[base + 11]
+        var sum_my := ints[base + 12]
+        var sum_mz := ints[base + 13]
+
+        var mass := float(mass_fixed) / 10000.0
+        var avg_speed := 0.0
+        if count > 0:
+            avg_speed = (float(sum_speed) / 100.0) / float(count)
+        var max_speed_f := float(max_speed) / 1000.0
+
+        var com := Vector3.ZERO
+        if mass_fixed != 0:
+            # sum_mx = sum(m*x)*100, mass_fixed = sum(m)*10000 => com = sum_mx*100/mass_fixed
+            com = Vector3(
+                float(sum_mx) * 100.0 / float(mass_fixed),
+                float(sum_my) * 100.0 / float(mass_fixed),
+                float(sum_mz) * 100.0 / float(mass_fixed)
+            )
+
+        var bbox_valid := (count > 0 and min_x != 2147483647 and max_x != -2147483647)
+        var bbox_min := Vector3(float(min_x) / 1000.0, float(min_y) / 1000.0, float(min_z) / 1000.0)
+        var bbox_max := Vector3(float(max_x) / 1000.0, float(max_y) / 1000.0, float(max_z) / 1000.0)
+
+        slots[mat_id] = {
+            "mat_id": mat_id,
+            "count": count,
+            "mass": mass,
+            "avg_speed": avg_speed,
+            "max_speed": max_speed_f,
+            "overlap_static": overlap_static,
+            "com": com,
+            "bbox_valid": bbox_valid,
+            "bbox_min": bbox_min,
+            "bbox_max": bbox_max,
+        }
+
+    out["slots"] = slots
+    mpm_last_stats = out
 
 func _dispatch_compute() -> void:
     if !_render_ready or !_pipeline_rid.is_valid():
@@ -3947,6 +4209,12 @@ func _exit_tree() -> void:
         _rd.free_rid(_mpm_island_apply_set_a)
     if _mpm_island_apply_set_b.is_valid():
         _rd.free_rid(_mpm_island_apply_set_b)
+    if _mpm_stats_init_set.is_valid():
+        _rd.free_rid(_mpm_stats_init_set)
+    if _mpm_stats_set_a.is_valid():
+        _rd.free_rid(_mpm_stats_set_a)
+    if _mpm_stats_set_b.is_valid():
+        _rd.free_rid(_mpm_stats_set_b)
     if _active_list_uniform_set_rid.is_valid():
         _rd.free_rid(_active_list_uniform_set_rid)
     if _active_dispatch_uniform_set_rid.is_valid():
@@ -3989,6 +4257,8 @@ func _exit_tree() -> void:
         _rd.free_rid(_occupancy_rid)
     if _metrics_rid.is_valid():
         _rd.free_rid(_metrics_rid)
+    if _mpm_stats_rid.is_valid():
+        _rd.free_rid(_mpm_stats_rid)
     if _active_list_rid.is_valid():
         _rd.free_rid(_active_list_rid)
     if _active_count_rid.is_valid():
@@ -4131,3 +4401,11 @@ func _exit_tree() -> void:
         _rd.free_rid(_mpm_island_apply_pipeline_rid)
     if _mpm_island_apply_shader_rid.is_valid():
         _rd.free_rid(_mpm_island_apply_shader_rid)
+    if _mpm_stats_init_pipeline_rid.is_valid():
+        _rd.free_rid(_mpm_stats_init_pipeline_rid)
+    if _mpm_stats_init_shader_rid.is_valid():
+        _rd.free_rid(_mpm_stats_init_shader_rid)
+    if _mpm_stats_pipeline_rid.is_valid():
+        _rd.free_rid(_mpm_stats_pipeline_rid)
+    if _mpm_stats_shader_rid.is_valid():
+        _rd.free_rid(_mpm_stats_shader_rid)
