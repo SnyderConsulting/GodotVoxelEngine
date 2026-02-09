@@ -2,6 +2,8 @@
 
 This document summarizes the *current* in-engine technical setup of VoxLand for the physics research team. It describes what is implemented today in Godot without requiring access to the project source.
 
+> Note (2026-02-09): This document was written for the legacy CA-style voxel simulation path. The active physics work and automated regression suite now target the MLS-MPM pipeline (`godot/project/shaders/mpm_*.glsl`) orchestrated by `godot/project/scripts/VoxelRenderer.gd`. For the up-to-date MPM design and acceptance tests, see `docs/Technical_Specification_VoxLand_Unified_BCC_Physics_Engine.md` and `docs/test-suite.md`.
+
 Implementation location: the voxel renderer/simulation/light passes are implemented in the engine module at `godot/engine-src/modules/voxels` (project scripts orchestrate scenes and UI; compute lives in the module).
 
 ## 1) Core Pipeline Overview

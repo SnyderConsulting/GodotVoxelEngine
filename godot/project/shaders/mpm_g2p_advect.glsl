@@ -201,10 +201,22 @@ void material_params(uint material_id, out float shear_relax, out float damping,
         return;
     }
     if (material_id == 4u) { // stone
-        shear_relax = 0.0;
-        damping = 0.9995;
-        j_min = 0.80;
-        j_max = 1.20;
+        // When fracture is disabled, keep stone near-rigid by aggressively removing shear
+        // and tightly clamping volume changes. This prevents the classic MPM "melting/jitter"
+        // artifact in the stability/jelly test.
+        // fracture_enabled is encoded as u.world_rot_x.w (shared Params UBO slot).
+        bool do_fracture = (u.world_rot_x.w > 0.5);
+        if (!do_fracture) {
+            shear_relax = 1.0;
+            damping = 0.9995;
+            j_min = 0.98;
+            j_max = 1.02;
+        } else {
+            shear_relax = 0.0;
+            damping = 0.9995;
+            j_min = 0.80;
+            j_max = 1.20;
+        }
         return;
     }
     shear_relax = 0.0;

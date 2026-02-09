@@ -29,7 +29,9 @@ def _send_json_line(sock: socket.socket, obj: dict) -> dict:
 class AutomationClient:
     def __init__(self, host: str, port: int, token: str, timeout_s: float = 2.0):
         self._sock = socket.create_connection((host, port), timeout=timeout_s)
-        self._sock.settimeout(5.0)
+        # Calls can block for multiple frames if the GPU stalls or the engine is busy.
+        # Prefer a larger timeout + retries over flaking the whole suite.
+        self._sock.settimeout(30.0)
         self._id = 1
         if token:
             resp = _send_json_line(self._sock, {"id": 0, "method": "auth", "params": {"token": token}})
@@ -46,10 +48,18 @@ class AutomationClient:
         if params is None:
             params = {}
         self._id += 1
-        resp = _send_json_line(self._sock, {"id": self._id, "method": method, "params": params})
-        if not resp.get("ok"):
-            raise RuntimeError(f"automation error: {resp.get('error')}")
-        return resp
+        last_exc: Optional[Exception] = None
+        for _attempt in range(2):
+            try:
+                resp = _send_json_line(self._sock, {"id": self._id, "method": method, "params": params})
+                if not resp.get("ok"):
+                    raise RuntimeError(f"automation error: {resp.get('error')}")
+                return resp
+            except socket.timeout as e:
+                # Transient stalls happen on macOS/MoltenVK; retry once.
+                last_exc = e
+                time.sleep(0.1)
+        raise last_exc  # type: ignore[misc]
 
 
 def _walk_dump(node: dict, fn) -> None:
@@ -74,6 +84,20 @@ def _find_paths(tree_dump: dict) -> Tuple[Optional[str], Optional[str]]:
 
     _walk_dump(tree_dump, scan)
     return voxel_path, orbit_path
+
+
+def _find_first_path_by_name(tree_dump: dict, name: str) -> Optional[str]:
+    found: Optional[str] = None
+
+    def scan(n: dict) -> None:
+        nonlocal found
+        if found is not None:
+            return
+        if n.get("name") == name:
+            found = n.get("path")
+
+    _walk_dump(tree_dump, scan)
+    return found
 
 
 def _find_free_port(host: str = "127.0.0.1") -> int:
@@ -193,6 +217,36 @@ def _eval_scene(scene_cfg: Dict[str, Any], baseline: Dict[str, Any], final: Dict
             continue
         b = _slot(baseline, mat_id)
         f = _slot(final, mat_id)
+
+        if "count_min" in mc:
+            cmin = int(mc["count_min"])
+            if int(f.get("count", 0)) < cmin:
+                failures.append(f"mat={mat_id} count {f.get('count')} < {cmin}")
+
+        if "mass_min" in mc:
+            mmin = float(mc["mass_min"])
+            if float(f.get("mass", 0.0)) < mmin:
+                failures.append(f"mat={mat_id} mass {f.get('mass'):.4f} < {mmin:.4f}")
+
+        if "count_delta_min" in mc:
+            dmin = int(mc["count_delta_min"])
+            dc = int(f.get("count", 0)) - int(b.get("count", 0))
+            if dc < dmin:
+                failures.append(f"mat={mat_id} count_delta {dc} < {dmin}")
+
+        if "mass_delta_min" in mc:
+            dmin = float(mc["mass_delta_min"])
+            dm = float(f.get("mass", 0.0)) - float(b.get("mass", 0.0))
+            if dm < dmin:
+                failures.append(f"mat={mat_id} mass_delta {dm:.4f} < {dmin:.4f}")
+
+        if "com_y_drop_min" in mc:
+            dmin = float(mc["com_y_drop_min"])
+            by = float((b.get("com") or (0.0, 0.0, 0.0))[1])
+            fy = float((f.get("com") or (0.0, 0.0, 0.0))[1])
+            drop = by - fy
+            if drop < dmin:
+                failures.append(f"mat={mat_id} com_y_drop {drop:.4f} < {dmin:.4f}")
 
         if "mass_loss_frac_max" in mc:
             frac_max = float(mc["mass_loss_frac_max"])
@@ -388,6 +442,26 @@ def main() -> int:
                 cli.call("set", {"path": voxel_path, "property": "mpm_stats_enabled", "value": True})
                 cli.call("set", {"path": voxel_path, "property": "mpm_stats_every", "value": int(s.get("stats_every", stats_every))})
 
+                # Apply deterministic per-suite/per-scene overrides (so test outcomes don't depend on scene defaults).
+                overrides: Dict[str, Any] = {}
+                overrides.update(defaults.get("renderer_overrides", {}) or {})
+                overrides.update(s.get("renderer_overrides", {}) or {})
+                for prop, val in overrides.items():
+                    cli.call("set", {"path": voxel_path, "property": prop, "value": val})
+
+                reset_cfg = s.get("reset") or {}
+                reset_name = str(reset_cfg.get("node_name") or "")
+                reset_method = str(reset_cfg.get("method") or "")
+                if reset_name and reset_method:
+                    # Stop sim, reset the scenario, then start sim so baseline stats represent the intended initial condition.
+                    cli.call("set", {"path": voxel_path, "property": "sim_enabled", "value": False})
+                    dump = cli.call("dump_node_tree", {"path": "/root", "max_depth": 6, "max_children": 256}).get("result") or {}
+                    reset_path = _find_first_path_by_name(dump, reset_name)
+                    if not reset_path:
+                        raise RuntimeError(f"could not find reset node by name={reset_name}")
+                    cli.call("call", {"path": reset_path, "method": reset_method, "args": []})
+                    cli.call("set", {"path": voxel_path, "property": "sim_enabled", "value": True})
+
                 # First sample.
                 frame0 = _wait_for_stats(cli, voxel_path, min_frame=0, timeout_s=stats_timeout_s)
                 baseline = _fetch_stats(cli, voxel_path)
@@ -445,12 +519,20 @@ def main() -> int:
             failures.append(str(e))
         finally:
             try:
-                proc.wait(timeout=5.0)
+                proc.wait(timeout=15.0)
             except Exception:
                 try:
-                    proc.kill()
+                    proc.terminate()
+                    proc.wait(timeout=3.0)
+                except Exception:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
                 except Exception:
                     pass
+            # Avoid rapid-fire Vulkan device bring-up/tear-down between scenes on macOS.
+            time.sleep(0.25)
 
         result = {
             "name": name,

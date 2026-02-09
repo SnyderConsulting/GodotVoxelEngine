@@ -154,6 +154,17 @@ Standard voxel rendering snaps to the grid. To visualize the physics fidelity:
    * Union these SDFs in the raymarcher.  
    * *Optimization:* Only update the Grid-based SDF structure (Brickmap) when a particle moves more than 0.5 units from its previous cell center.
 
+### **4.4 Dispatch Safety (Bounds)**
+
+Several kernels dispatch in fixed workgroup sizes (e.g. `local_size_x = 256`) and may not include explicit bounds checks. In those cases, you must ensure one of:
+
+* **Pad SSBO allocations** to the dispatch-rounded element count (recommended when the extra elements are small and always "empty").  
+* **Add explicit bounds checks** by passing the relevant element count into the shader.
+
+**Why this matters:** an out-of-bounds access in any compute stage can corrupt unrelated GPU buffers and present as "physics instability" (extreme velocities, apparent mass loss, COM drifting against gravity, etc.).
+
+Concrete example in this codebase: the rigid-island finalize stage (`mpm_island_finalize.glsl`) uses `local_size_x = 256` and relies on the island buffers being sized to `ceil(island_count / 256) * 256` elements.
+
 ## **5\. Acceptance Test Cases**
 
 ### **Test A: The Hourglass (Granular Flow)**

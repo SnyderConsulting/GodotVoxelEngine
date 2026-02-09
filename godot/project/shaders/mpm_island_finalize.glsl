@@ -22,7 +22,9 @@ const float FP_SCALE = 10000.0;
 
 void main() {
     uint i = gl_GlobalInvocationID.x;
-    // Buffers are sized by the script; out-of-range dispatch is OK.
+    // NOTE: This shader intentionally has no bounds check.
+    // The caller must pad the island SSBO allocations to cover the rounded-up dispatch size
+    // (e.g. ceil(island_count / 256) * 256). Otherwise this will go out-of-bounds and corrupt GPU memory.
     ivec4 mm = island_mass_mom.data[i];
     int m_fixed = mm.x;
     if (m_fixed <= 0) {
@@ -38,4 +40,3 @@ void main() {
     island_com_mass.data[i] = vec4(com, mass);
     island_vel.data[i] = vec4(vcom, 0.0);
 }
-

@@ -96,6 +96,16 @@ func _build_scene() -> void:
     _base_y = int(grid_extent * 0.55)
     var base_z: int = center - (pillar_thickness_cells * 2) / 2
 
+    # Ensure the pillar lives on valid BCC lattice points (even-even-even or odd-odd-odd).
+    # We step by 2 in each dimension, so fixing the base parity is sufficient.
+    var parity: int = base_x & 1
+    if (_base_y & 1) != parity:
+        _base_y -= 1
+    if (base_z & 1) != parity:
+        base_z -= 1
+    _base_y = clampi(_base_y, 0, grid_extent - 1)
+    base_z = clampi(base_z, 0, grid_extent - 1)
+
     for i in range(pillar_length_cells):
         for ty in range(pillar_thickness_cells):
             for tz in range(pillar_thickness_cells):
@@ -135,4 +145,3 @@ func _drop_weight() -> void:
                 var c := Vector3i(_tip_cell.x + dx * 2, spawn_y + dy * 2, _tip_cell.z + dz * 2)
                 cells.append(c)
     renderer.mpm_spawn_cells(cells, weight_material_id, Vector3.ZERO, 1.0, 0)
-

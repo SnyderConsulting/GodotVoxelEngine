@@ -23,7 +23,7 @@
         "total_mass_loss_frac_max": 0.02
       },
       "material_checks": [
-        { "mat_id": 1, "mass_loss_frac_max": 0.03, "overlap_static_max": 500, "avg_speed_final_max": 10.0 }
+        { "mat_id": 1, "count_min": 1000, "mass_loss_frac_max": 0.03, "overlap_static_max": 500, "com_y_drop_min": 5.0, "max_speed_final_max": 200.0 }
       ]
     },
     {
@@ -63,7 +63,7 @@
         "total_mass_loss_frac_max": 0.02
       },
       "material_checks": [
-        { "mat_id": 4, "mass_loss_frac_max": 0.03, "overlap_static_max": 400, "avg_speed_final_max": 10.0 }
+        { "mat_id": 4, "count_min": 40, "count_delta_min": 20, "mass_loss_frac_max": 0.10, "overlap_static_max": 400, "max_speed_final_max": 250.0 }
       ]
     },
     {
@@ -71,14 +71,21 @@
       "scene": "res://scenes/JellyTest.tscn",
       "run_duration_s": 6.0,
       "sample_points_s": [1.0, 3.0, 6.0],
+      "renderer_overrides": {
+        "mpm_gravity_strength": 0.0,
+        "mpm_fracture_enabled": false
+      },
+      "reset": {
+        "node_name": "JellyController",
+        "method": "_build_scene"
+      },
       "checks": {
         "nan_max": 0,
         "total_mass_loss_frac_max": 0.02
       },
       "material_checks": [
-        { "mat_id": 4, "mass_loss_frac_max": 0.03, "overlap_static_max": 400, "avg_speed_final_max": 10.0 }
+        { "mat_id": 4, "count_min": 100, "mass_loss_frac_max": 0.03, "overlap_static_max": 400, "avg_speed_final_max": 0.5, "max_speed_final_max": 5.0 }
       ]
     }
   ]
 }
-

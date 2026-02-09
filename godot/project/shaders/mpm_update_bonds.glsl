@@ -150,51 +150,62 @@ void main() {
         }
     }
 
-    // Persist bonds across frames: initialize once, then only remove (no healing).
+    // Implementation note: fracture_enabled is passed via an otherwise-unused UBO slot.
+    // We encode it as u.world_rot_x.w to avoid changing the shared Params layout.
+    bool do_fracture = (u.world_rot_x.w > 0.5);
+
+    // Persist bonds across frames for fracture, but allow healing when fracture is disabled.
     uint flags = meta.data[p].y;
     uint mask = 0u;
-    if ((flags & FLAG_BONDS_INIT) == 0u) {
+    if (!do_fracture) {
         mask = occ_mask;
         flags |= FLAG_BONDS_INIT;
     } else {
-        mask = meta.data[p].z & occ_mask;
+        if ((flags & FLAG_BONDS_INIT) == 0u) {
+            mask = occ_mask;
+            flags |= FLAG_BONDS_INIT;
+        } else {
+            mask = meta.data[p].z & occ_mask;
+        }
     }
 
-    // Fracture: break bonds under tensile stress along each face normal.
-    mat3 F = f_in.data[p];
-    float J = determinant(F);
-    if (!(J > 0.0) || abs(J) < 1e-6) {
-        F = mat3(1.0);
-        J = 1.0;
-    }
-    // Neo-Hookean Cauchy stress.
-    const float mu = 55.0;
-    const float lambda = 95.0;
-    mat3 FinvT = transpose(inverse(F));
-    float logJ = log(max(J, 1e-6));
-    mat3 P = mu * (F - FinvT) + lambda * logJ * FinvT;
-    mat3 sigma = (P * transpose(F)) / max(J, 1e-6);
+    if (do_fracture) {
+        // Fracture: break bonds under tensile stress along each face normal.
+        mat3 F = f_in.data[p];
+        float J = determinant(F);
+        if (!(J > 0.0) || abs(J) < 1e-6) {
+            F = mat3(1.0);
+            J = 1.0;
+        }
+        // Neo-Hookean Cauchy stress.
+        const float mu = 55.0;
+        const float lambda = 95.0;
+        mat3 FinvT = transpose(inverse(F));
+        float logJ = log(max(J, 1e-6));
+        mat3 P = mu * (F - FinvT) + lambda * logJ * FinvT;
+        mat3 sigma = (P * transpose(F)) / max(J, 1e-6);
 
-    const float TENSILE = 120.0;
-    for (int i = 0; i < 8; i++) {
-        if ((mask & (1u << uint(i))) == 0u) {
-            continue;
+        const float TENSILE = 120.0;
+        for (int i = 0; i < 8; i++) {
+            if ((mask & (1u << uint(i))) == 0u) {
+                continue;
+            }
+            vec3 n = normalize(vec3(diag_offsets[i]));
+            float s = dot(n, sigma * n);
+            if (s > TENSILE) {
+                mask &= ~(1u << uint(i));
+            }
         }
-        vec3 n = normalize(vec3(diag_offsets[i]));
-        float s = dot(n, sigma * n);
-        if (s > TENSILE) {
-            mask &= ~(1u << uint(i));
-        }
-    }
-    for (int i = 0; i < 6; i++) {
-        uint bit = 1u << uint(8 + i);
-        if ((mask & bit) == 0u) {
-            continue;
-        }
-        vec3 n = normalize(vec3(axis_offsets[i]));
-        float s = dot(n, sigma * n);
-        if (s > TENSILE) {
-            mask &= ~bit;
+        for (int i = 0; i < 6; i++) {
+            uint bit = 1u << uint(8 + i);
+            if ((mask & bit) == 0u) {
+                continue;
+            }
+            vec3 n = normalize(vec3(axis_offsets[i]));
+            float s = dot(n, sigma * n);
+            if (s > TENSILE) {
+                mask &= ~bit;
+            }
         }
     }
 

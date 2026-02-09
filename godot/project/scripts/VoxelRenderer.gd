@@ -213,6 +213,7 @@ var _indirection_cpu: PackedInt32Array = PackedInt32Array()
 var _rng := RandomNumberGenerator.new()
 var _mpm_particles_use_a := true
 var _mpm_particle_count_cpu: int = 0
+var _mpm_islands_ready := false
 var _material_mass_by_id: Dictionary = {}
 var mpm_last_stats_frame: int = 0
 var mpm_last_stats_raw: PackedInt32Array = PackedInt32Array()
@@ -944,7 +945,10 @@ func _init_render_resources() -> void:
     _rd.buffer_clear(_mpm_labels_b_rid, 0, labels_bytes)
 
     var island_count := max_p + 1
-    var island_bytes := island_count * 16
+    # island_finalize.glsl dispatches in 256-wide groups without a bounds check.
+    # Pad the buffers so "extra" invocations stay in-bounds.
+    var island_groups := int(ceil(float(island_count) / 256.0))
+    var island_bytes := island_groups * 256 * 16
     _mpm_island_mass_mom_rid = _rd.storage_buffer_create(island_bytes)
     _mpm_island_mass_com_rid = _rd.storage_buffer_create(island_bytes)
     _mpm_island_com_mass_rid = _rd.storage_buffer_create(island_bytes)
@@ -2197,6 +2201,9 @@ func _process(_delta: float) -> void:
 
     var dt: float = 0.0
     var debug_w := float(_sim_frame % 4)
+    # Implementation detail: some MPM shaders need to branch on fracture enabled/disabled
+    # without changing the shared Params UBO layout. We encode it in world_rot_x.w.
+    var fracture_flag := 1.0 if mpm_fracture_enabled else 0.0
     if sim_enabled and sim_mode == 1:
         var substeps: int = maxi(1, mpm_substeps)
         dt = maxf(0.0, mpm_dt) / float(substeps)
@@ -2212,7 +2219,7 @@ func _process(_delta: float) -> void:
         voxel_size, effective_max_distance, 0.8, 0.25,
         brick_grid, brick_grid, brick_grid, float(chunk_size),
         gravity.x, gravity.y, gravity.z, debug_w,
-        world_basis.x.x, world_basis.x.y, world_basis.x.z, 0.0,
+        world_basis.x.x, world_basis.x.y, world_basis.x.z, fracture_flag,
         world_basis.y.x, world_basis.y.y, world_basis.y.z, 0.0,
         world_basis.z.x, world_basis.z.y, world_basis.z.z, 0.0
     ])
@@ -2309,7 +2316,19 @@ func _dispatch_mpm() -> void:
     var cell_pos_bytes := total_cells * 16
     var island_count := max_p + 1
     var island_groups := int(ceil(float(island_count) / 256.0))
-    var island_bytes := island_count * 16
+    var island_bytes := island_groups * 256 * 16
+
+    var islands_ok := (
+        mpm_rigid_enabled
+        and _mpm_build_rigid_map_pipeline_rid.is_valid()
+        and _mpm_update_bonds_pipeline_rid.is_valid()
+        and _mpm_ccl_init_pipeline_rid.is_valid()
+        and _mpm_ccl_propagate_pipeline_rid.is_valid()
+        and _mpm_ccl_write_pipeline_rid.is_valid()
+    )
+    if islands_ok and !_mpm_islands_ready:
+        _dispatch_mpm_islands(particle_groups, rigid_map_bytes)
+        _mpm_islands_ready = true
 
     for _s in range(substeps):
         if mpm_rigid_enabled and _mpm_island_accum0_pipeline_rid.is_valid() and _mpm_island_finalize_pipeline_rid.is_valid() and _mpm_island_accum1_pipeline_rid.is_valid() and _mpm_island_apply_pipeline_rid.is_valid():
@@ -2376,56 +2395,8 @@ func _dispatch_mpm() -> void:
 
         _mpm_particles_use_a = !_mpm_particles_use_a
 
-    if mpm_fracture_enabled and _mpm_build_rigid_map_pipeline_rid.is_valid() and _mpm_update_bonds_pipeline_rid.is_valid() and _mpm_ccl_init_pipeline_rid.is_valid() and _mpm_ccl_propagate_pipeline_rid.is_valid() and _mpm_ccl_write_pipeline_rid.is_valid():
-        if _mpm_rigid_map_rid.is_valid():
-            _rd.buffer_clear(_mpm_rigid_map_rid, 0, rigid_map_bytes)
-
-        var rm_set := _mpm_rigid_map_set_a if _mpm_particles_use_a else _mpm_rigid_map_set_b
-        if rm_set.is_valid():
-            var list_rm := _rd.compute_list_begin()
-            _rd.compute_list_bind_compute_pipeline(list_rm, _mpm_build_rigid_map_pipeline_rid)
-            _rd.compute_list_bind_uniform_set(list_rm, rm_set, 0)
-            _rd.compute_list_dispatch(list_rm, particle_groups, 1, 1)
-            _rd.compute_list_end()
-
-        var bonds_set := _mpm_update_bonds_set_a if _mpm_particles_use_a else _mpm_update_bonds_set_b
-        if bonds_set.is_valid():
-            var list_bonds := _rd.compute_list_begin()
-            _rd.compute_list_bind_compute_pipeline(list_bonds, _mpm_update_bonds_pipeline_rid)
-            _rd.compute_list_bind_uniform_set(list_bonds, bonds_set, 0)
-            _rd.compute_list_dispatch(list_bonds, particle_groups, 1, 1)
-            _rd.compute_list_end()
-
-        if _mpm_ccl_init_set_a.is_valid():
-            var list_ci := _rd.compute_list_begin()
-            _rd.compute_list_bind_compute_pipeline(list_ci, _mpm_ccl_init_pipeline_rid)
-            _rd.compute_list_bind_uniform_set(list_ci, _mpm_ccl_init_set_a, 0)
-            _rd.compute_list_dispatch(list_ci, particle_groups, 1, 1)
-            _rd.compute_list_end()
-
-        var use_labels_a := true
-        var iters := maxi(0, mpm_ccl_iterations)
-        for _i in range(iters):
-            var prop_set: RID = RID()
-            if _mpm_particles_use_a:
-                prop_set = _mpm_ccl_prop_set_a_ab if use_labels_a else _mpm_ccl_prop_set_a_ba
-            else:
-                prop_set = _mpm_ccl_prop_set_b_ab if use_labels_a else _mpm_ccl_prop_set_b_ba
-            if prop_set.is_valid():
-                var list_cp := _rd.compute_list_begin()
-                _rd.compute_list_bind_compute_pipeline(list_cp, _mpm_ccl_propagate_pipeline_rid)
-                _rd.compute_list_bind_uniform_set(list_cp, prop_set, 0)
-                _rd.compute_list_dispatch(list_cp, particle_groups, 1, 1)
-                _rd.compute_list_end()
-                use_labels_a = !use_labels_a
-
-        var write_set := _mpm_ccl_write_set_a if use_labels_a else _mpm_ccl_write_set_b
-        if write_set.is_valid():
-            var list_cw := _rd.compute_list_begin()
-            _rd.compute_list_bind_compute_pipeline(list_cw, _mpm_ccl_write_pipeline_rid)
-            _rd.compute_list_bind_uniform_set(list_cw, write_set, 0)
-            _rd.compute_list_dispatch(list_cw, particle_groups, 1, 1)
-            _rd.compute_list_end()
+    if islands_ok and mpm_fracture_enabled:
+        _dispatch_mpm_islands(particle_groups, rigid_map_bytes)
 
     var atlas_target_a := _mpm_particles_use_a
     if _mpm_copy_static_pipeline_rid.is_valid():
@@ -2479,6 +2450,64 @@ func _dispatch_mpm() -> void:
                 _rd.compute_list_end()
 
     _atlas_use_a = atlas_target_a
+
+func _dispatch_mpm_islands(particle_groups: int, rigid_map_bytes: int) -> void:
+    if _rd == null:
+        return
+    if !_mpm_build_rigid_map_pipeline_rid.is_valid() or !_mpm_update_bonds_pipeline_rid.is_valid():
+        return
+    if !_mpm_ccl_init_pipeline_rid.is_valid() or !_mpm_ccl_propagate_pipeline_rid.is_valid() or !_mpm_ccl_write_pipeline_rid.is_valid():
+        return
+
+    if _mpm_rigid_map_rid.is_valid():
+        _rd.buffer_clear(_mpm_rigid_map_rid, 0, rigid_map_bytes)
+
+    var rm_set := _mpm_rigid_map_set_a if _mpm_particles_use_a else _mpm_rigid_map_set_b
+    if rm_set.is_valid():
+        var list_rm := _rd.compute_list_begin()
+        _rd.compute_list_bind_compute_pipeline(list_rm, _mpm_build_rigid_map_pipeline_rid)
+        _rd.compute_list_bind_uniform_set(list_rm, rm_set, 0)
+        _rd.compute_list_dispatch(list_rm, particle_groups, 1, 1)
+        _rd.compute_list_end()
+
+    var bonds_set := _mpm_update_bonds_set_a if _mpm_particles_use_a else _mpm_update_bonds_set_b
+    if bonds_set.is_valid():
+        var list_bonds := _rd.compute_list_begin()
+        _rd.compute_list_bind_compute_pipeline(list_bonds, _mpm_update_bonds_pipeline_rid)
+        _rd.compute_list_bind_uniform_set(list_bonds, bonds_set, 0)
+        _rd.compute_list_dispatch(list_bonds, particle_groups, 1, 1)
+        _rd.compute_list_end()
+
+    if _mpm_ccl_init_set_a.is_valid():
+        var list_ci := _rd.compute_list_begin()
+        _rd.compute_list_bind_compute_pipeline(list_ci, _mpm_ccl_init_pipeline_rid)
+        _rd.compute_list_bind_uniform_set(list_ci, _mpm_ccl_init_set_a, 0)
+        _rd.compute_list_dispatch(list_ci, particle_groups, 1, 1)
+        _rd.compute_list_end()
+
+    var use_labels_a := true
+    var iters := maxi(0, mpm_ccl_iterations)
+    for _i in range(iters):
+        var prop_set: RID = RID()
+        if _mpm_particles_use_a:
+            prop_set = _mpm_ccl_prop_set_a_ab if use_labels_a else _mpm_ccl_prop_set_a_ba
+        else:
+            prop_set = _mpm_ccl_prop_set_b_ab if use_labels_a else _mpm_ccl_prop_set_b_ba
+        if prop_set.is_valid():
+            var list_cp := _rd.compute_list_begin()
+            _rd.compute_list_bind_compute_pipeline(list_cp, _mpm_ccl_propagate_pipeline_rid)
+            _rd.compute_list_bind_uniform_set(list_cp, prop_set, 0)
+            _rd.compute_list_dispatch(list_cp, particle_groups, 1, 1)
+            _rd.compute_list_end()
+            use_labels_a = !use_labels_a
+
+    var write_set := _mpm_ccl_write_set_a if use_labels_a else _mpm_ccl_write_set_b
+    if write_set.is_valid():
+        var list_cw := _rd.compute_list_begin()
+        _rd.compute_list_bind_compute_pipeline(list_cw, _mpm_ccl_write_pipeline_rid)
+        _rd.compute_list_bind_uniform_set(list_cw, write_set, 0)
+        _rd.compute_list_dispatch(list_cw, particle_groups, 1, 1)
+        _rd.compute_list_end()
 
 func _reset_metrics() -> void:
     if !_metrics_rid.is_valid():
@@ -2923,6 +2952,7 @@ func set_voxel_entries_mpm(entries: Array) -> void:
     if _rd == null:
         return
     _active_list_ready = false
+    _mpm_islands_ready = false
 
     var brick_grid := chunk_grid
     var brick_count := brick_grid * brick_grid * brick_grid
