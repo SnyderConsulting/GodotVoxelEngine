@@ -301,6 +301,11 @@ def main() -> int:
     ap.add_argument("--artifacts-dir", default="", help="Override artifacts output dir (default: runlogs/test_suite/<timestamp>).")
     args = ap.parse_args()
 
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except Exception:
+        pass
+
     repo_root = Path(__file__).resolve().parents[2]
     cfg_path = Path(args.config).resolve()
     cfg = json.loads(cfg_path.read_text("utf-8"))
@@ -481,4 +486,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
