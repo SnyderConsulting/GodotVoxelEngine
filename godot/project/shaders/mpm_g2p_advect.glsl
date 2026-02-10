@@ -81,6 +81,11 @@ layout(set = 0, binding = 16, std430) buffer CellClaim {
     uint data[];
 } cell_claim;
 
+// Pressure-projected grid velocity for water (computed by mpm_pressure_*.glsl).
+layout(set = 0, binding = 17, std430) readonly buffer GridVelProjected {
+    vec4 data[];
+} grid_vel_proj;
+
 const uint FLAG_STATIC = 1u << 1;
 // Inflate static solids slightly for collision to reduce leaking through thin voxel shells.
 const float STATIC_COLLISION_MARGIN = 0.03;
@@ -508,6 +513,7 @@ void main() {
         return;
     }
     uint material_id = meta.data[p].x;
+    bool is_water = (material_id == 2u);
     uint flags = meta.data[p].y;
     if (material_id == 0u) {
         pos_mass_out.data[p] = pos_mass_in.data[p];
@@ -563,7 +569,7 @@ void main() {
         if (gi == 0u) {
             continue;
         }
-        vec3 vi = grid_vel.data[gi].xyz;
+        vec3 vi = is_water ? grid_vel_proj.data[gi].xyz : grid_vel.data[gi].xyz;
         v += max(0.0, w[i]) * vi;
         C += outerProduct(vi, grads[i]);
     }
@@ -700,8 +706,16 @@ void main() {
     // Unlike a hard snap-to-center, we preserve sub-voxel motion by keeping x_new inside the claimed
     // truncated-octahedron Voronoi cell. This prevents render-side "spill" while still letting
     // particles accumulate displacement over time.
-    const float REST_SPEED = 0.15;
     const float CELL_SKIN = 0.03;
+    float rest_speed = 0.15;
+    if (material_id == 1u) { // sand
+        rest_speed = 0.15;
+    } else if (material_id == 2u) { // water
+        // Water needs to keep small residual motion so it can level out (avoid "angle of repose" piling).
+        rest_speed = 0.03;
+    } else if (material_id == 4u) { // stone
+        rest_speed = 0.08;
+    }
 
     ivec3 neigh[14] = ivec3[14](
         ivec3(2, 0, 0),
@@ -752,33 +766,64 @@ void main() {
 
     // Force a local relocation if overlapping spawn / bad state, or if we ended up inside a static voxel.
     bool need_relocate = !owns_old || old_static;
-    bool want_move = need_relocate || !all(equal(desired_cell, old_cell));
+    float sp = length(v);
+    bool optional_transport = is_water && !need_relocate && all(equal(desired_cell, old_cell)) && (sp >= rest_speed);
+    bool want_move = need_relocate || !all(equal(desired_cell, old_cell)) || optional_transport;
 
     if (want_move) {
         ivec3 target = desired_cell;
 
-        // First attempt: claim the snapped target cell.
-        uint tai = atlas_index_for_cell(target);
-        if (tai != 0u && static_atlas.data[tai] == 0u) {
-            uint prev = atomicCompSwap(cell_claim.data[tai], 0u, pid);
-            if (prev == 0u) {
-                if (owns_old && old_ai != 0u && tai != old_ai) {
-                    atomicCompSwap(cell_claim.data[old_ai], pid, 0u);
+        // First attempt: claim the snapped target cell (unless we're doing optional transport
+        // from within the same cell, in which case we want a neighbor, not the current cell).
+        if (!optional_transport) {
+            uint tai = atlas_index_for_cell(target);
+            if (tai != 0u && static_atlas.data[tai] == 0u) {
+                uint prev = atomicCompSwap(cell_claim.data[tai], 0u, pid);
+                if (prev == 0u) {
+                    if (owns_old && old_ai != 0u && tai != old_ai) {
+                        atomicCompSwap(cell_claim.data[old_ai], pid, 0u);
+                    }
+                    final_cell = target;
+                    moved_cell = !all(equal(final_cell, old_cell));
+                    need_relocate = false;
                 }
-                final_cell = target;
-                moved_cell = !all(equal(final_cell, old_cell));
-                need_relocate = false;
             }
         }
 
         // Local neighborhood search (kept intentionally small to avoid voxel "teleporting").
-        if (need_relocate || (!all(equal(desired_cell, old_cell)) && !moved_cell)) {
-            float sp = length(v);
-            if (sp >= REST_SPEED || need_relocate) {
-                // Gravity bias: try the neighbor most aligned with gravity first if moving "down".
-                if (dot(v, gdir) > 0.05 || need_relocate) {
-                    ivec3 c = desired_cell + down_off;
-                    if (!all(equal(c, old_cell)) && in_bounds(c) && bcc_parity(c)) {
+        bool need_search = need_relocate || (!moved_cell && (!all(equal(desired_cell, old_cell)) || optional_transport));
+        if (need_search) {
+            if (sp >= rest_speed || need_relocate) {
+                if (is_water && sp > 1e-6) {
+                    // Velocity-guided "move-to-empty" transport for water. This is the key to
+                    // preventing vertical stacking under a single-occupancy constraint.
+                    vec3 vdir = v / sp;
+                    ivec3 base = desired_cell;
+                    // If we're doing optional transport from within the same cell, search from old_cell.
+                    if (optional_transport) {
+                        base = old_cell;
+                    }
+
+                    int best_i = -1;
+                    float best_s = -1e9;
+                    for (int i = 0; i < 14; i++) {
+                        ivec3 c = base + neigh[i];
+                        if (all(equal(c, old_cell)) || !in_bounds(c) || !bcc_parity(c)) {
+                            continue;
+                        }
+                        uint ai = atlas_index_for_cell(c);
+                        if (ai == 0u || static_atlas.data[ai] != 0u) {
+                            continue;
+                        }
+                        float s = dot(normalize(vec3(neigh[i])), vdir);
+                        if (s > best_s) {
+                            best_s = s;
+                            best_i = i;
+                        }
+                    }
+
+                    if (best_i >= 0) {
+                        ivec3 c = base + neigh[best_i];
                         uint ai = atlas_index_for_cell(c);
                         if (ai != 0u && static_atlas.data[ai] == 0u) {
                             uint prev = atomicCompSwap(cell_claim.data[ai], 0u, pid);
@@ -794,27 +839,50 @@ void main() {
                     }
                 }
 
-                uint h = p * 1664525u + 1013904223u;
-                int start = int(h % 14u);
-                for (int k = 0; k < 14 && (need_relocate || (!moved_cell && !all(equal(desired_cell, old_cell)))); k++) {
-                    int i = (start + k) % 14;
-                    ivec3 c = desired_cell + neigh[i];
-                    if (all(equal(c, old_cell)) || !in_bounds(c) || !bcc_parity(c)) {
-                        continue;
-                    }
-                    uint ai = atlas_index_for_cell(c);
-                    if (ai == 0u || static_atlas.data[ai] != 0u) {
-                        continue;
-                    }
-                    uint prev = atomicCompSwap(cell_claim.data[ai], 0u, pid);
-                    if (prev == 0u) {
-                        if (owns_old && old_ai != 0u) {
-                            atomicCompSwap(cell_claim.data[old_ai], pid, 0u);
+                // Fallback: gravity-biased + randomized search (used for solids, and as a secondary
+                // for water when velocity-guided choice fails due to contention).
+                if (!moved_cell) {
+                    // Gravity bias: try the neighbor most aligned with gravity first if moving "down".
+                    if (dot(v, gdir) > 0.05 || need_relocate) {
+                        ivec3 c = desired_cell + down_off;
+                        if (!all(equal(c, old_cell)) && in_bounds(c) && bcc_parity(c)) {
+                            uint ai = atlas_index_for_cell(c);
+                            if (ai != 0u && static_atlas.data[ai] == 0u) {
+                                uint prev = atomicCompSwap(cell_claim.data[ai], 0u, pid);
+                                if (prev == 0u) {
+                                    if (owns_old && old_ai != 0u) {
+                                        atomicCompSwap(cell_claim.data[old_ai], pid, 0u);
+                                    }
+                                    final_cell = c;
+                                    moved_cell = true;
+                                    need_relocate = false;
+                                }
+                            }
                         }
-                        final_cell = c;
-                        moved_cell = true;
-                        need_relocate = false;
-                        break;
+                    }
+
+                    uint h = p * 1664525u + 1013904223u;
+                    int start = int(h % 14u);
+                    for (int k = 0; k < 14 && (need_relocate || (!moved_cell && !all(equal(desired_cell, old_cell)))); k++) {
+                        int i = (start + k) % 14;
+                        ivec3 c = desired_cell + neigh[i];
+                        if (all(equal(c, old_cell)) || !in_bounds(c) || !bcc_parity(c)) {
+                            continue;
+                        }
+                        uint ai = atlas_index_for_cell(c);
+                        if (ai == 0u || static_atlas.data[ai] != 0u) {
+                            continue;
+                        }
+                        uint prev = atomicCompSwap(cell_claim.data[ai], 0u, pid);
+                        if (prev == 0u) {
+                            if (owns_old && old_ai != 0u) {
+                                atomicCompSwap(cell_claim.data[old_ai], pid, 0u);
+                            }
+                            final_cell = c;
+                            moved_cell = true;
+                            need_relocate = false;
+                            break;
+                        }
                     }
                 }
             }
@@ -882,8 +950,7 @@ void main() {
     } else if (!moved_cell) {
         // If we stayed in the same cell with only tiny residual velocity, kill it so discrete
         // voxelization doesn't flicker at rest.
-        const float REST_SPEED = 0.15;
-        if (length(v) < REST_SPEED) {
+        if (length(v) < rest_speed) {
             v = vec3(0.0);
             C = mat3(0.0);
         }

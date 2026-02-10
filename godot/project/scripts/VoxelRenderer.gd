@@ -38,6 +38,8 @@ extends Node
 @export var mpm_ccl_iterations: int = 12
 @export var mpm_stats_enabled: bool = false
 @export var mpm_stats_every: int = 30
+@export var mpm_pressure_enabled: bool = true
+@export var mpm_pressure_iters: int = 6
 @export var diag_enabled: bool = false
 @export var diag_every: int = 60
 @export var diag_log_buffers: bool = false
@@ -64,6 +66,12 @@ var _mpm_p2g_shader_rid: RID
 var _mpm_p2g_pipeline_rid: RID
 var _mpm_grid_update_shader_rid: RID
 var _mpm_grid_update_pipeline_rid: RID
+var _mpm_pressure_init_shader_rid: RID
+var _mpm_pressure_init_pipeline_rid: RID
+var _mpm_pressure_jacobi_shader_rid: RID
+var _mpm_pressure_jacobi_pipeline_rid: RID
+var _mpm_pressure_apply_shader_rid: RID
+var _mpm_pressure_apply_pipeline_rid: RID
 var _mpm_g2p_advect_shader_rid: RID
 var _mpm_g2p_advect_pipeline_rid: RID
 var _mpm_grid_to_atlas_shader_rid: RID
@@ -129,6 +137,10 @@ var _mpm_meta_rid: RID
 var _mpm_particle_count_rid: RID
 var _mpm_grid_accum_rid: RID
 var _mpm_grid_vel_rid: RID
+var _mpm_grid_vel_proj_rid: RID
+var _mpm_pressure_a_rid: RID
+var _mpm_pressure_b_rid: RID
+var _mpm_divergence_rid: RID
 var _mpm_sand_occ_rid: RID
 var _mpm_water_occ_rid: RID
 var _mpm_cell_claim_rid: RID
@@ -162,6 +174,11 @@ var _mpm_init_uniform_set: RID
 var _mpm_p2g_uniform_set_a: RID
 var _mpm_p2g_uniform_set_b: RID
 var _mpm_grid_uniform_set: RID
+var _mpm_pressure_init_set: RID
+var _mpm_pressure_jacobi_set_ab: RID
+var _mpm_pressure_jacobi_set_ba: RID
+var _mpm_pressure_apply_set_a: RID
+var _mpm_pressure_apply_set_b: RID
 var _mpm_g2p_uniform_set_ab: RID
 var _mpm_g2p_uniform_set_ba: RID
 var _mpm_grid_to_atlas_uniform_set_a: RID
@@ -758,6 +775,66 @@ func _init_render_resources() -> void:
                 if !_mpm_grid_update_pipeline_rid.is_valid():
                     push_error("Failed to create MPM grid_update pipeline.")
 
+    _mpm_pressure_init_shader_rid = RID()
+    _mpm_pressure_init_pipeline_rid = RID()
+    var mpm_pressure_init_text := FileAccess.get_file_as_string("res://shaders/mpm_pressure_init.glsl")
+    if !mpm_pressure_init_text.is_empty():
+        var mpm_pressure_init_source := RDShaderSource.new()
+        mpm_pressure_init_source.language = RenderingDevice.SHADER_LANGUAGE_GLSL
+        mpm_pressure_init_source.set_stage_source(RenderingDevice.SHADER_STAGE_COMPUTE, mpm_pressure_init_text)
+        var mpm_pressure_init_spirv := _rd.shader_compile_spirv_from_source(mpm_pressure_init_source)
+        var mpm_pressure_init_error := mpm_pressure_init_spirv.get_stage_compile_error(RenderingDevice.SHADER_STAGE_COMPUTE)
+        if mpm_pressure_init_error != "":
+            push_error("MPM pressure_init shader compile error: %s" % mpm_pressure_init_error)
+        else:
+            _mpm_pressure_init_shader_rid = _rd.shader_create_from_spirv(mpm_pressure_init_spirv)
+            if !_mpm_pressure_init_shader_rid.is_valid():
+                push_error("Failed to create MPM pressure_init shader.")
+            else:
+                _mpm_pressure_init_pipeline_rid = _rd.compute_pipeline_create(_mpm_pressure_init_shader_rid)
+                if !_mpm_pressure_init_pipeline_rid.is_valid():
+                    push_error("Failed to create MPM pressure_init pipeline.")
+
+    _mpm_pressure_jacobi_shader_rid = RID()
+    _mpm_pressure_jacobi_pipeline_rid = RID()
+    var mpm_pressure_jacobi_text := FileAccess.get_file_as_string("res://shaders/mpm_pressure_jacobi.glsl")
+    if !mpm_pressure_jacobi_text.is_empty():
+        var mpm_pressure_jacobi_source := RDShaderSource.new()
+        mpm_pressure_jacobi_source.language = RenderingDevice.SHADER_LANGUAGE_GLSL
+        mpm_pressure_jacobi_source.set_stage_source(RenderingDevice.SHADER_STAGE_COMPUTE, mpm_pressure_jacobi_text)
+        var mpm_pressure_jacobi_spirv := _rd.shader_compile_spirv_from_source(mpm_pressure_jacobi_source)
+        var mpm_pressure_jacobi_error := mpm_pressure_jacobi_spirv.get_stage_compile_error(RenderingDevice.SHADER_STAGE_COMPUTE)
+        if mpm_pressure_jacobi_error != "":
+            push_error("MPM pressure_jacobi shader compile error: %s" % mpm_pressure_jacobi_error)
+        else:
+            _mpm_pressure_jacobi_shader_rid = _rd.shader_create_from_spirv(mpm_pressure_jacobi_spirv)
+            if !_mpm_pressure_jacobi_shader_rid.is_valid():
+                push_error("Failed to create MPM pressure_jacobi shader.")
+            else:
+                _mpm_pressure_jacobi_pipeline_rid = _rd.compute_pipeline_create(_mpm_pressure_jacobi_shader_rid)
+                if !_mpm_pressure_jacobi_pipeline_rid.is_valid():
+                    push_error("Failed to create MPM pressure_jacobi pipeline.")
+
+    _mpm_pressure_apply_shader_rid = RID()
+    _mpm_pressure_apply_pipeline_rid = RID()
+    var mpm_pressure_apply_text := FileAccess.get_file_as_string("res://shaders/mpm_pressure_apply.glsl")
+    if !mpm_pressure_apply_text.is_empty():
+        var mpm_pressure_apply_source := RDShaderSource.new()
+        mpm_pressure_apply_source.language = RenderingDevice.SHADER_LANGUAGE_GLSL
+        mpm_pressure_apply_source.set_stage_source(RenderingDevice.SHADER_STAGE_COMPUTE, mpm_pressure_apply_text)
+        var mpm_pressure_apply_spirv := _rd.shader_compile_spirv_from_source(mpm_pressure_apply_source)
+        var mpm_pressure_apply_error := mpm_pressure_apply_spirv.get_stage_compile_error(RenderingDevice.SHADER_STAGE_COMPUTE)
+        if mpm_pressure_apply_error != "":
+            push_error("MPM pressure_apply shader compile error: %s" % mpm_pressure_apply_error)
+        else:
+            _mpm_pressure_apply_shader_rid = _rd.shader_create_from_spirv(mpm_pressure_apply_spirv)
+            if !_mpm_pressure_apply_shader_rid.is_valid():
+                push_error("Failed to create MPM pressure_apply shader.")
+            else:
+                _mpm_pressure_apply_pipeline_rid = _rd.compute_pipeline_create(_mpm_pressure_apply_shader_rid)
+                if !_mpm_pressure_apply_pipeline_rid.is_valid():
+                    push_error("Failed to create MPM pressure_apply pipeline.")
+
     _mpm_g2p_advect_shader_rid = RID()
     _mpm_g2p_advect_pipeline_rid = RID()
     var mpm_g2p_text := FileAccess.get_file_as_string("res://shaders/mpm_g2p_advect.glsl")
@@ -1255,6 +1332,24 @@ func _init_render_resources() -> void:
         return
     _rd.buffer_clear(_mpm_grid_accum_rid, 0, grid_bytes)
     _rd.buffer_clear(_mpm_grid_vel_rid, 0, grid_bytes)
+
+    # Pressure-projected velocity for water (Eulerian incompressibility projection on the BCC grid).
+    _mpm_grid_vel_proj_rid = _rd.storage_buffer_create(grid_bytes)
+    if !_mpm_grid_vel_proj_rid.is_valid():
+        push_error("Failed to create MPM projected grid velocity buffer.")
+        return
+    _rd.buffer_clear(_mpm_grid_vel_proj_rid, 0, grid_bytes)
+
+    var scalar_grid_bytes := total_cells * 4
+    _mpm_pressure_a_rid = _rd.storage_buffer_create(scalar_grid_bytes)
+    _mpm_pressure_b_rid = _rd.storage_buffer_create(scalar_grid_bytes)
+    _mpm_divergence_rid = _rd.storage_buffer_create(scalar_grid_bytes)
+    if !_mpm_pressure_a_rid.is_valid() or !_mpm_pressure_b_rid.is_valid() or !_mpm_divergence_rid.is_valid():
+        push_error("Failed to create MPM pressure buffers.")
+        return
+    _rd.buffer_clear(_mpm_pressure_a_rid, 0, scalar_grid_bytes)
+    _rd.buffer_clear(_mpm_pressure_b_rid, 0, scalar_grid_bytes)
+    _rd.buffer_clear(_mpm_divergence_rid, 0, scalar_grid_bytes)
 
     # Coarse sand occupancy field (used to keep water from interpenetrating sand at voxel scale).
     var sand_occ_bytes := total_cells * 4
@@ -1885,6 +1980,10 @@ func _init_render_resources() -> void:
         mpm_g2p_claim.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
         mpm_g2p_claim.binding = 16
         mpm_g2p_claim.add_id(_mpm_cell_claim_rid)
+        var mpm_g2p_grid_vel_proj := RDUniform.new()
+        mpm_g2p_grid_vel_proj.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_g2p_grid_vel_proj.binding = 17
+        mpm_g2p_grid_vel_proj.add_id(_mpm_grid_vel_proj_rid)
 
         var mpm_pos_in_a := RDUniform.new()
         mpm_pos_in_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
@@ -1919,7 +2018,7 @@ func _init_render_resources() -> void:
         mpm_f_out_b.binding = 9
         mpm_f_out_b.add_id(_mpm_f_b_rid)
         _mpm_g2p_uniform_set_ab = _rd.uniform_set_create(
-            [mpm_g2p_ubo, mpm_g2p_indirection, mpm_pos_in_a, mpm_vel_in_a, mpm_c_in_a, mpm_f_in_a, mpm_pos_out_b, mpm_vel_out_b, mpm_c_out_b, mpm_f_out_b, mpm_g2p_meta, mpm_g2p_count, mpm_g2p_grid_vel, mpm_g2p_static, mpm_g2p_sand_occ, mpm_g2p_water_occ, mpm_g2p_claim],
+            [mpm_g2p_ubo, mpm_g2p_indirection, mpm_pos_in_a, mpm_vel_in_a, mpm_c_in_a, mpm_f_in_a, mpm_pos_out_b, mpm_vel_out_b, mpm_c_out_b, mpm_f_out_b, mpm_g2p_meta, mpm_g2p_count, mpm_g2p_grid_vel, mpm_g2p_static, mpm_g2p_sand_occ, mpm_g2p_water_occ, mpm_g2p_claim, mpm_g2p_grid_vel_proj],
             _mpm_g2p_advect_shader_rid,
             0
         )
@@ -1957,7 +2056,7 @@ func _init_render_resources() -> void:
         mpm_f_out_a.binding = 9
         mpm_f_out_a.add_id(_mpm_f_a_rid)
         _mpm_g2p_uniform_set_ba = _rd.uniform_set_create(
-            [mpm_g2p_ubo, mpm_g2p_indirection, mpm_pos_in_b, mpm_vel_in_b, mpm_c_in_b, mpm_f_in_b, mpm_pos_out_a, mpm_vel_out_a, mpm_c_out_a, mpm_f_out_a, mpm_g2p_meta, mpm_g2p_count, mpm_g2p_grid_vel, mpm_g2p_static, mpm_g2p_sand_occ, mpm_g2p_water_occ, mpm_g2p_claim],
+            [mpm_g2p_ubo, mpm_g2p_indirection, mpm_pos_in_b, mpm_vel_in_b, mpm_c_in_b, mpm_f_in_b, mpm_pos_out_a, mpm_vel_out_a, mpm_c_out_a, mpm_f_out_a, mpm_g2p_meta, mpm_g2p_count, mpm_g2p_grid_vel, mpm_g2p_static, mpm_g2p_sand_occ, mpm_g2p_water_occ, mpm_g2p_claim, mpm_g2p_grid_vel_proj],
             _mpm_g2p_advect_shader_rid,
             0
         )
@@ -2097,6 +2196,162 @@ func _init_render_resources() -> void:
         cc_pos_b.binding = 2
         cc_pos_b.add_id(_mpm_pos_mass_b_rid)
         _mpm_cell_claim_set_b = _rd.uniform_set_create([cc_ubo, cc_ind, cc_pos_b, cc_meta, cc_count, cc_out], _mpm_cell_claim_shader_rid, 0)
+
+    # MPM pressure projection (for water): build divergence, Jacobi solve, apply gradient to get a projected grid velocity.
+    if _mpm_pressure_init_shader_rid.is_valid():
+        var pi_ubo := RDUniform.new()
+        pi_ubo.uniform_type = RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER
+        pi_ubo.binding = 0
+        pi_ubo.add_id(_ubo_rid)
+        var pi_static := RDUniform.new()
+        pi_static.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        pi_static.binding = 1
+        pi_static.add_id(_atlas_static_rid)
+        var pi_sand := RDUniform.new()
+        pi_sand.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        pi_sand.binding = 2
+        pi_sand.add_id(_mpm_sand_occ_rid)
+        var pi_claim := RDUniform.new()
+        pi_claim.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        pi_claim.binding = 3
+        pi_claim.add_id(_mpm_cell_claim_rid)
+        var pi_meta := RDUniform.new()
+        pi_meta.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        pi_meta.binding = 4
+        pi_meta.add_id(_mpm_meta_rid)
+        var pi_count := RDUniform.new()
+        pi_count.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        pi_count.binding = 5
+        pi_count.add_id(_mpm_particle_count_rid)
+        var pi_grid_vel := RDUniform.new()
+        pi_grid_vel.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        pi_grid_vel.binding = 6
+        pi_grid_vel.add_id(_mpm_grid_vel_rid)
+        var pi_div := RDUniform.new()
+        pi_div.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        pi_div.binding = 7
+        pi_div.add_id(_mpm_divergence_rid)
+        var pi_p := RDUniform.new()
+        pi_p.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        pi_p.binding = 8
+        pi_p.add_id(_mpm_pressure_a_rid)
+        _mpm_pressure_init_set = _rd.uniform_set_create(
+            [pi_ubo, pi_static, pi_sand, pi_claim, pi_meta, pi_count, pi_grid_vel, pi_div, pi_p],
+            _mpm_pressure_init_shader_rid,
+            0
+        )
+
+    if _mpm_pressure_jacobi_shader_rid.is_valid():
+        var pj_ubo := RDUniform.new()
+        pj_ubo.uniform_type = RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER
+        pj_ubo.binding = 0
+        pj_ubo.add_id(_ubo_rid)
+        var pj_static := RDUniform.new()
+        pj_static.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        pj_static.binding = 1
+        pj_static.add_id(_atlas_static_rid)
+        var pj_sand := RDUniform.new()
+        pj_sand.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        pj_sand.binding = 2
+        pj_sand.add_id(_mpm_sand_occ_rid)
+        var pj_claim := RDUniform.new()
+        pj_claim.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        pj_claim.binding = 3
+        pj_claim.add_id(_mpm_cell_claim_rid)
+        var pj_meta := RDUniform.new()
+        pj_meta.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        pj_meta.binding = 4
+        pj_meta.add_id(_mpm_meta_rid)
+        var pj_count := RDUniform.new()
+        pj_count.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        pj_count.binding = 5
+        pj_count.add_id(_mpm_particle_count_rid)
+        var pj_div := RDUniform.new()
+        pj_div.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        pj_div.binding = 6
+        pj_div.add_id(_mpm_divergence_rid)
+
+        var pj_in_a := RDUniform.new()
+        pj_in_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        pj_in_a.binding = 7
+        pj_in_a.add_id(_mpm_pressure_a_rid)
+        var pj_out_b := RDUniform.new()
+        pj_out_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        pj_out_b.binding = 8
+        pj_out_b.add_id(_mpm_pressure_b_rid)
+        _mpm_pressure_jacobi_set_ab = _rd.uniform_set_create(
+            [pj_ubo, pj_static, pj_sand, pj_claim, pj_meta, pj_count, pj_div, pj_in_a, pj_out_b],
+            _mpm_pressure_jacobi_shader_rid,
+            0
+        )
+
+        var pj_in_b := RDUniform.new()
+        pj_in_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        pj_in_b.binding = 7
+        pj_in_b.add_id(_mpm_pressure_b_rid)
+        var pj_out_a := RDUniform.new()
+        pj_out_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        pj_out_a.binding = 8
+        pj_out_a.add_id(_mpm_pressure_a_rid)
+        _mpm_pressure_jacobi_set_ba = _rd.uniform_set_create(
+            [pj_ubo, pj_static, pj_sand, pj_claim, pj_meta, pj_count, pj_div, pj_in_b, pj_out_a],
+            _mpm_pressure_jacobi_shader_rid,
+            0
+        )
+
+    if _mpm_pressure_apply_shader_rid.is_valid():
+        var pa_ubo := RDUniform.new()
+        pa_ubo.uniform_type = RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER
+        pa_ubo.binding = 0
+        pa_ubo.add_id(_ubo_rid)
+        var pa_static := RDUniform.new()
+        pa_static.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        pa_static.binding = 1
+        pa_static.add_id(_atlas_static_rid)
+        var pa_sand := RDUniform.new()
+        pa_sand.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        pa_sand.binding = 2
+        pa_sand.add_id(_mpm_sand_occ_rid)
+        var pa_claim := RDUniform.new()
+        pa_claim.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        pa_claim.binding = 3
+        pa_claim.add_id(_mpm_cell_claim_rid)
+        var pa_meta := RDUniform.new()
+        pa_meta.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        pa_meta.binding = 4
+        pa_meta.add_id(_mpm_meta_rid)
+        var pa_count := RDUniform.new()
+        pa_count.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        pa_count.binding = 5
+        pa_count.add_id(_mpm_particle_count_rid)
+        var pa_grid_vel := RDUniform.new()
+        pa_grid_vel.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        pa_grid_vel.binding = 6
+        pa_grid_vel.add_id(_mpm_grid_vel_rid)
+        var pa_out := RDUniform.new()
+        pa_out.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        pa_out.binding = 8
+        pa_out.add_id(_mpm_grid_vel_proj_rid)
+
+        var pa_p_a := RDUniform.new()
+        pa_p_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        pa_p_a.binding = 7
+        pa_p_a.add_id(_mpm_pressure_a_rid)
+        _mpm_pressure_apply_set_a = _rd.uniform_set_create(
+            [pa_ubo, pa_static, pa_sand, pa_claim, pa_meta, pa_count, pa_grid_vel, pa_p_a, pa_out],
+            _mpm_pressure_apply_shader_rid,
+            0
+        )
+
+        var pa_p_b := RDUniform.new()
+        pa_p_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        pa_p_b.binding = 7
+        pa_p_b.add_id(_mpm_pressure_b_rid)
+        _mpm_pressure_apply_set_b = _rd.uniform_set_create(
+            [pa_ubo, pa_static, pa_sand, pa_claim, pa_meta, pa_count, pa_grid_vel, pa_p_b, pa_out],
+            _mpm_pressure_apply_shader_rid,
+            0
+        )
 
     if _mpm_particles_to_atlas_shader_rid.is_valid():
         var mpm_pta_ubo := RDUniform.new()
@@ -2903,6 +3158,46 @@ func _dispatch_mpm() -> void:
                 _rd.compute_list_bind_uniform_set(list_cc, cc_set, 0)
                 _rd.compute_list_dispatch(list_cc, particle_groups, 1, 1)
                 _rd.compute_list_end()
+
+        # Eulerian pressure projection for water (BCC 14-neighbor Poisson + apply).
+        # Uses cell_claim+meta to build an exact water mask (single-occupancy), and sand_occ/static as solids.
+        if _mpm_pressure_init_pipeline_rid.is_valid() and _mpm_pressure_apply_pipeline_rid.is_valid():
+            var scalar_grid_bytes := total_cells * 4
+            if _mpm_divergence_rid.is_valid() and _mpm_pressure_a_rid.is_valid() and _mpm_pressure_b_rid.is_valid() and _mpm_grid_vel_proj_rid.is_valid():
+                if _mpm_pressure_init_set.is_valid():
+                    _rd.buffer_clear(_mpm_divergence_rid, 0, scalar_grid_bytes)
+                    _rd.buffer_clear(_mpm_pressure_a_rid, 0, scalar_grid_bytes)
+                    _rd.buffer_clear(_mpm_pressure_b_rid, 0, scalar_grid_bytes)
+
+                    var list_pi := _rd.compute_list_begin()
+                    _rd.compute_list_bind_compute_pipeline(list_pi, _mpm_pressure_init_pipeline_rid)
+                    _rd.compute_list_bind_uniform_set(list_pi, _mpm_pressure_init_set, 0)
+                    _rd.compute_list_dispatch(list_pi, grid_groups, 1, 1)
+                    _rd.compute_list_end()
+
+                    var use_a := true
+                    var iters := maxi(0, mpm_pressure_iters)
+                    if !mpm_pressure_enabled:
+                        iters = 0
+                    if iters > 0 and _mpm_pressure_jacobi_pipeline_rid.is_valid() and _mpm_pressure_jacobi_set_ab.is_valid() and _mpm_pressure_jacobi_set_ba.is_valid():
+                        for _i in range(iters):
+                            var pj_set := _mpm_pressure_jacobi_set_ab if use_a else _mpm_pressure_jacobi_set_ba
+                            if !pj_set.is_valid():
+                                break
+                            var list_pj := _rd.compute_list_begin()
+                            _rd.compute_list_bind_compute_pipeline(list_pj, _mpm_pressure_jacobi_pipeline_rid)
+                            _rd.compute_list_bind_uniform_set(list_pj, pj_set, 0)
+                            _rd.compute_list_dispatch(list_pj, grid_groups, 1, 1)
+                            _rd.compute_list_end()
+                            use_a = !use_a
+
+                    var pa_set := _mpm_pressure_apply_set_a if use_a else _mpm_pressure_apply_set_b
+                    if pa_set.is_valid():
+                        var list_pa := _rd.compute_list_begin()
+                        _rd.compute_list_bind_compute_pipeline(list_pa, _mpm_pressure_apply_pipeline_rid)
+                        _rd.compute_list_bind_uniform_set(list_pa, pa_set, 0)
+                        _rd.compute_list_dispatch(list_pa, grid_groups, 1, 1)
+                        _rd.compute_list_end()
 
         var g2p_set := _mpm_g2p_uniform_set_ab if _mpm_particles_use_a else _mpm_g2p_uniform_set_ba
         if g2p_set.is_valid():
@@ -4921,6 +5216,16 @@ func _exit_tree() -> void:
         _rd.free_rid(_mpm_cell_claim_set_a)
     if _mpm_cell_claim_set_b.is_valid():
         _rd.free_rid(_mpm_cell_claim_set_b)
+    if _mpm_pressure_init_set.is_valid():
+        _rd.free_rid(_mpm_pressure_init_set)
+    if _mpm_pressure_jacobi_set_ab.is_valid():
+        _rd.free_rid(_mpm_pressure_jacobi_set_ab)
+    if _mpm_pressure_jacobi_set_ba.is_valid():
+        _rd.free_rid(_mpm_pressure_jacobi_set_ba)
+    if _mpm_pressure_apply_set_a.is_valid():
+        _rd.free_rid(_mpm_pressure_apply_set_a)
+    if _mpm_pressure_apply_set_b.is_valid():
+        _rd.free_rid(_mpm_pressure_apply_set_b)
     if _mpm_rigid_map_set_a.is_valid():
         _rd.free_rid(_mpm_rigid_map_set_a)
     if _mpm_rigid_map_set_b.is_valid():
@@ -5041,6 +5346,14 @@ func _exit_tree() -> void:
         _rd.free_rid(_mpm_grid_accum_rid)
     if _mpm_grid_vel_rid.is_valid():
         _rd.free_rid(_mpm_grid_vel_rid)
+    if _mpm_grid_vel_proj_rid.is_valid():
+        _rd.free_rid(_mpm_grid_vel_proj_rid)
+    if _mpm_pressure_a_rid.is_valid():
+        _rd.free_rid(_mpm_pressure_a_rid)
+    if _mpm_pressure_b_rid.is_valid():
+        _rd.free_rid(_mpm_pressure_b_rid)
+    if _mpm_divergence_rid.is_valid():
+        _rd.free_rid(_mpm_divergence_rid)
     if _mpm_sand_occ_rid.is_valid():
         _rd.free_rid(_mpm_sand_occ_rid)
     if _mpm_water_occ_rid.is_valid():
@@ -5111,6 +5424,18 @@ func _exit_tree() -> void:
         _rd.free_rid(_mpm_grid_update_pipeline_rid)
     if _mpm_grid_update_shader_rid.is_valid():
         _rd.free_rid(_mpm_grid_update_shader_rid)
+    if _mpm_pressure_init_pipeline_rid.is_valid():
+        _rd.free_rid(_mpm_pressure_init_pipeline_rid)
+    if _mpm_pressure_init_shader_rid.is_valid():
+        _rd.free_rid(_mpm_pressure_init_shader_rid)
+    if _mpm_pressure_jacobi_pipeline_rid.is_valid():
+        _rd.free_rid(_mpm_pressure_jacobi_pipeline_rid)
+    if _mpm_pressure_jacobi_shader_rid.is_valid():
+        _rd.free_rid(_mpm_pressure_jacobi_shader_rid)
+    if _mpm_pressure_apply_pipeline_rid.is_valid():
+        _rd.free_rid(_mpm_pressure_apply_pipeline_rid)
+    if _mpm_pressure_apply_shader_rid.is_valid():
+        _rd.free_rid(_mpm_pressure_apply_shader_rid)
     if _mpm_g2p_advect_pipeline_rid.is_valid():
         _rd.free_rid(_mpm_g2p_advect_pipeline_rid)
     if _mpm_g2p_advect_shader_rid.is_valid():
