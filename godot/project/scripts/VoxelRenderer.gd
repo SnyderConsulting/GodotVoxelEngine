@@ -30,9 +30,15 @@ extends Node
 @export var sim_clear_output: bool = true
 @export var sim_mode: int = 1 # 1 = MPM (particles), 0 = legacy CA (grid)
 @export var mpm_dt: float = 1.0 / 60.0
+# If true, advance the simulation using the actual frame `delta` (clamped) so the sim
+# speed stays consistent even when FPS drops. If false, uses fixed `mpm_dt` per frame.
+@export var mpm_use_frame_dt: bool = true
+@export var mpm_max_frame_dt: float = 1.0 / 15.0
+# Upper bound for dt per substep when using `mpm_use_frame_dt` (auto-increases substeps).
+@export var mpm_target_substep_dt: float = 1.0 / 240.0
 @export var mpm_substeps: int = 2
 @export var mpm_max_particles: int = 50000
-@export var mpm_gravity_strength: float = 12.0
+@export var mpm_gravity_strength: float = 60.0
 @export var mpm_rigid_enabled: bool = true
 @export var mpm_fracture_enabled: bool = true
 @export var mpm_ccl_iterations: int = 12
@@ -3177,8 +3183,17 @@ func _process(_delta: float) -> void:
     # without changing the shared Params UBO layout. We encode it in world_rot_x.w.
     var fracture_flag := 1.0 if mpm_fracture_enabled else 0.0
     if sim_enabled and sim_mode == 1:
+        var frame_dt := maxf(0.0, _delta) if mpm_use_frame_dt else maxf(0.0, mpm_dt)
+        if mpm_use_frame_dt:
+            frame_dt = minf(frame_dt, maxf(0.0, mpm_max_frame_dt))
+
         var substeps: int = maxi(1, mpm_substeps)
-        dt = maxf(0.0, mpm_dt) / float(substeps)
+        if mpm_use_frame_dt:
+            var target := maxf(1e-6, mpm_target_substep_dt)
+            var needed := int(ceil(frame_dt / target))
+            substeps = maxi(substeps, needed)
+
+        dt = frame_dt / float(substeps)
         debug_w = float(mpm_gravity_strength)
     var params := PackedFloat32Array([
         grid_extent, grid_extent, grid_extent, dt,

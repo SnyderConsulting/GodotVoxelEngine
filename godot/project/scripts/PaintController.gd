@@ -209,7 +209,20 @@ func _spawn_cells(cells: Array) -> void:
         return
     if _renderer.has_method("mpm_spawn_cells"):
         # Spawn voxel-sized particles (BCC Voronoi volume ~= 4 in grid space).
-        var spawned := int(_renderer.mpm_spawn_cells(batch, _current_material, Vector3.ZERO, 4.0))
+        if SessionRecorder != null and SessionRecorder.has_method("record_spawn"):
+            SessionRecorder.record_spawn(_current_material, batch)
+        var v := Vector3.ZERO
+        # Give painted water a small initial velocity along gravity (in grid space) so droplets
+        # near glass don't linger at the spawn point before they start falling.
+        if _current_material == water_material_id:
+            var gravity_world: Vector3 = (_renderer.gravity_dir as Vector3)
+            if gravity_world.length() < 0.001:
+                gravity_world = Vector3.DOWN
+            gravity_world = gravity_world.normalized()
+            var world_basis: Basis = Basis.from_euler(_renderer.world_rotation as Vector3)
+            var gravity_grid: Vector3 = world_basis.inverse() * gravity_world
+            v = gravity_grid * 1.2
+        var spawned := int(_renderer.mpm_spawn_cells(batch, _current_material, v, 4.0))
         _cap_hit = spawned < batch.size()
         if _cap_hit and debug_logging:
             print("PaintController | particle cap hit (requested=%d spawned=%d)" % [batch.size(), spawned])

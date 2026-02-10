@@ -321,7 +321,8 @@ void material_params(uint material_id, out float shear_relax, out float damping,
         // Keep volume close to constant so particles don't collapse into the same cells (which
         // shows up as "voxel compression" in the UI). Use PIC transfer for stability.
         shear_relax = 0.10;
-        damping = 0.992;
+        // Slightly less damping so gravity-driven settling doesn't feel "floaty".
+        damping = 0.996;
         j_min = 0.97;
         j_max = 1.03;
         apic = 0.0;
@@ -349,10 +350,12 @@ void material_params(uint material_id, out float shear_relax, out float damping,
             j_max = 1.02;
             apic = 0.6;
         } else {
-            shear_relax = 0.0;
+            // When fracture is enabled, still relax some shear and clamp volume to avoid
+            // "explosive" energy injection when islands split and rigidification kicks in.
+            shear_relax = 0.20;
             damping = 0.9995;
-            j_min = 0.80;
-            j_max = 1.20;
+            j_min = 0.92;
+            j_max = 1.08;
             apic = 0.8;
         }
         return;
@@ -745,6 +748,9 @@ void main() {
     const float CELL_SKIN = 0.03;
     float rest_speed = 0.15;
     if (material_id == 1u) { // sand
+        // Sand needs to retain sub-voxel velocity so it can build up displacement and respond
+        // immediately when gravity direction changes (e.g. world rotation). If we zero small
+        // velocities every substep, piles can "stick" and only move after a long delay.
         rest_speed = 0.15;
         if (sand_wet) {
             rest_speed = 0.08;
@@ -754,6 +760,16 @@ void main() {
         rest_speed = 0.03;
     } else if (material_id == 4u) { // stone
         rest_speed = 0.08;
+    }
+    // When a particle's continuous position stays within the same claimed voxel cell, we won't
+    // see any visual movement until it actually changes to a neighbor cell. To keep sand/water
+    // responsive when gravity direction changes (e.g. world rotation), allow an "optional transport"
+    // hop to a neighboring cell once the velocity is sufficiently aligned with gravity.
+    float transport_speed = 0.02;
+    if (material_id == 1u) { // sand
+        transport_speed = sand_wet ? 0.015 : 0.02;
+    } else if (material_id == 4u) { // stone
+        transport_speed = 0.06;
     }
 
     ivec3 neigh[14] = ivec3[14](
@@ -806,7 +822,58 @@ void main() {
     // Force a local relocation if overlapping spawn / bad state, or if we ended up inside a static voxel.
     bool need_relocate = !owns_old || old_static;
     float sp = length(v);
-    bool optional_transport = is_water && !need_relocate && all(equal(desired_cell, old_cell)) && (sp >= rest_speed);
+    float v_down = dot(v, gdir);
+    // Optional transport:
+    // - Water: use speed magnitude so leveling can occur via lateral flow too.
+    // - Sand: use gravity-aligned speed so piles respond immediately to gravity direction changes.
+    bool optional_transport_water = is_water && !need_relocate && all(equal(desired_cell, old_cell)) && (sp >= rest_speed);
+    bool optional_transport_sand = is_sand && !need_relocate && all(equal(desired_cell, old_cell)) && (v_down >= transport_speed);
+
+    bool down_static = false;
+    if (!need_relocate) {
+        ivec3 cdown = old_cell + down_off;
+        if (in_bounds(cdown) && bcc_parity(cdown)) {
+            uint dai = atlas_index_for_cell(cdown);
+            if (dai != 0u && static_atlas.data[dai] != 0u) {
+                down_static = true;
+            }
+        }
+    }
+
+    // "Creep" transport: if a particle is at rest and sitting on a static ledge (downward cell is static),
+    // but there exists a downhill empty neighbor that requires some lateral component, allow a hop even
+    // with near-zero velocity. This fixes rare "stuck on glass lip" cases without keeping settled pools
+    // perpetually in motion.
+    bool optional_transport_creep = false;
+    // Only enable creep near the top of the grid. This targets the Paint scene's "glass lip" edge
+    // artifacts without affecting the broader water equilibrium behavior in regression scenes.
+    bool near_top = (old_cell.y >= int(u.grid_info.y) - 3);
+    if (near_top && down_static && (is_water || is_sand) && !need_relocate && all(equal(desired_cell, old_cell)) && (sp < rest_speed)) {
+        for (int i = 0; i < 14; i++) {
+            if (all(equal(neigh[i], down_off))) {
+                continue;
+            }
+            vec3 dir = normalize(vec3(neigh[i]));
+            if (dot(dir, gdir) < 0.25) {
+                continue;
+            }
+            ivec3 c = old_cell + neigh[i];
+            if (!in_bounds(c) || !bcc_parity(c)) {
+                continue;
+            }
+            uint ai = atlas_index_for_cell(c);
+            if (ai == 0u || static_atlas.data[ai] != 0u) {
+                continue;
+            }
+            if (cell_claim.data[ai] != 0u) {
+                continue;
+            }
+            optional_transport_creep = true;
+            break;
+        }
+    }
+
+    bool optional_transport = optional_transport_water || optional_transport_sand || optional_transport_creep;
     bool want_move = need_relocate || !all(equal(desired_cell, old_cell)) || optional_transport;
 
     if (want_move) {
@@ -832,31 +899,34 @@ void main() {
         // Local neighborhood search (kept intentionally small to avoid voxel "teleporting").
         bool need_search = need_relocate || (!moved_cell && (!all(equal(desired_cell, old_cell)) || optional_transport));
         if (need_search) {
-            if (sp >= rest_speed || need_relocate) {
-                if (is_water && sp > 1e-6) {
-                    // Velocity-guided "move-to-empty" transport for water. This is the key to
-                    // preventing vertical stacking under a single-occupancy constraint.
-                    vec3 vdir = v / sp;
-                    ivec3 base = desired_cell;
-                    // If we're doing optional transport from within the same cell, search from old_cell.
-                    if (optional_transport) {
-                        base = old_cell;
-                    }
-
+            // For sand optional transport, don't gate on speed: the whole point is to allow a hop even
+            // when continuous position didn't cross a cell boundary yet.
+            if (sp >= rest_speed || need_relocate || optional_transport_sand || optional_transport_creep) {
+                if (optional_transport_creep && is_sand && !moved_cell) {
+                    // Same "ledge creep" as water, but for sand: pick the most gravity-aligned empty
+                    // neighbor that isn't the blocked straight-down cell.
+                    ivec3 base = old_cell;
                     int best_i = -1;
-                    float best_s = -1e9;
+                    float best_d = -1e9;
                     for (int i = 0; i < 14; i++) {
+                        if (all(equal(neigh[i], down_off))) {
+                            continue;
+                        }
+                        vec3 ndir = normalize(vec3(neigh[i]));
+                        float d = dot(ndir, gdir);
+                        if (d < 0.25) {
+                            continue;
+                        }
                         ivec3 c = base + neigh[i];
                         if (all(equal(c, old_cell)) || !in_bounds(c) || !bcc_parity(c)) {
                             continue;
                         }
                         uint ai = atlas_index_for_cell(c);
-                        if (ai == 0u || static_atlas.data[ai] != 0u) {
+                        if (ai == 0u || static_atlas.data[ai] != 0u || cell_claim.data[ai] != 0u) {
                             continue;
                         }
-                        float s = dot(normalize(vec3(neigh[i])), vdir);
-                        if (s > best_s) {
-                            best_s = s;
+                        if (d > best_d) {
+                            best_d = d;
                             best_i = i;
                         }
                     }
@@ -878,12 +948,114 @@ void main() {
                     }
                 }
 
+                if (is_water && (sp > 1e-6 || optional_transport_creep)) {
+                    if (optional_transport_creep) {
+                        // Deterministic downhill hop from rest (no random walk): choose the most
+                        // gravity-aligned empty neighbor that isn't the blocked straight-down cell.
+                        ivec3 base = old_cell;
+                        int best_i = -1;
+                        float best_d = -1e9;
+                        for (int i = 0; i < 14; i++) {
+                            if (all(equal(neigh[i], down_off))) {
+                                continue;
+                            }
+                            vec3 ndir = normalize(vec3(neigh[i]));
+                            float d = dot(ndir, gdir);
+                            if (d < 0.25) {
+                                continue;
+                            }
+                            ivec3 c = base + neigh[i];
+                            if (all(equal(c, old_cell)) || !in_bounds(c) || !bcc_parity(c)) {
+                                continue;
+                            }
+                            uint ai = atlas_index_for_cell(c);
+                            if (ai == 0u || static_atlas.data[ai] != 0u || cell_claim.data[ai] != 0u) {
+                                continue;
+                            }
+                            if (d > best_d) {
+                                best_d = d;
+                                best_i = i;
+                            }
+                        }
+
+                        if (best_i >= 0) {
+                            ivec3 c = base + neigh[best_i];
+                            uint ai = atlas_index_for_cell(c);
+                            if (ai != 0u && static_atlas.data[ai] == 0u) {
+                                uint prev = atomicCompSwap(cell_claim.data[ai], 0u, pid);
+                                if (prev == 0u) {
+                                    if (owns_old && old_ai != 0u) {
+                                        atomicCompSwap(cell_claim.data[old_ai], pid, 0u);
+                                    }
+                                    final_cell = c;
+                                    moved_cell = true;
+                                    need_relocate = false;
+                                }
+                            }
+                        }
+                    }
+
+                    if (moved_cell) {
+                        // Skip velocity-guided search if creep already succeeded.
+                    } else {
+                    // Velocity-guided "move-to-empty" transport for water. This is the key to
+                    // preventing vertical stacking under a single-occupancy constraint.
+                    vec3 vdir = (sp > 1e-6) ? (v / sp) : gdir;
+                    ivec3 base = desired_cell;
+                    // If we're doing optional transport from within the same cell, search from old_cell.
+                    if (optional_transport_water) {
+                        base = old_cell;
+                    }
+                    if (optional_transport_creep) {
+                        base = old_cell;
+                    }
+
+                    int best_i = -1;
+                    float best_s = -1e9;
+                    for (int i = 0; i < 14; i++) {
+                        ivec3 c = base + neigh[i];
+                        if (all(equal(c, old_cell)) || !in_bounds(c) || !bcc_parity(c)) {
+                            continue;
+                        }
+                        uint ai = atlas_index_for_cell(c);
+                        if (ai == 0u || static_atlas.data[ai] != 0u) {
+                            continue;
+                        }
+                        vec3 ndir = normalize(vec3(neigh[i]));
+                        // Water leveling requires lateral moves; don't over-bias toward gravity here.
+                        float s = dot(ndir, vdir);
+                        if (s > best_s) {
+                            best_s = s;
+                            best_i = i;
+                        }
+                    }
+
+                    if (best_i >= 0) {
+                        ivec3 c = base + neigh[best_i];
+                        uint ai = atlas_index_for_cell(c);
+                        if (ai != 0u && static_atlas.data[ai] == 0u) {
+                            uint prev = atomicCompSwap(cell_claim.data[ai], 0u, pid);
+                            if (prev == 0u) {
+                                if (owns_old && old_ai != 0u) {
+                                    atomicCompSwap(cell_claim.data[old_ai], pid, 0u);
+                                }
+                                final_cell = c;
+                                moved_cell = true;
+                                need_relocate = false;
+                            }
+                        }
+                    }
+                    }
+                }
+
                 // Fallback: gravity-biased + randomized search (used for solids, and as a secondary
                 // for water when velocity-guided choice fails due to contention).
                 if (!moved_cell) {
                     // Gravity bias: try the neighbor most aligned with gravity first if moving "down".
-                    if (dot(v, gdir) > 0.05 || need_relocate) {
-                        ivec3 c = desired_cell + down_off;
+                    float grav_thresh = is_sand ? 0.005 : 0.05;
+                    if (dot(v, gdir) > grav_thresh || need_relocate || optional_transport_creep || (is_sand && optional_transport_sand)) {
+                        ivec3 base = optional_transport ? old_cell : desired_cell;
+                        ivec3 c = base + down_off;
                         if (!all(equal(c, old_cell)) && in_bounds(c) && bcc_parity(c)) {
                             uint ai = atlas_index_for_cell(c);
                             if (ai != 0u && static_atlas.data[ai] == 0u) {
@@ -902,9 +1074,10 @@ void main() {
 
                     uint h = p * 1664525u + 1013904223u;
                     int start = int(h % 14u);
-                    for (int k = 0; k < 14 && (need_relocate || (!moved_cell && !all(equal(desired_cell, old_cell)))); k++) {
+                    for (int k = 0; k < 14 && (need_relocate || (is_sand && optional_transport_sand) || (!moved_cell && !all(equal(desired_cell, old_cell)))); k++) {
                         int i = (start + k) % 14;
-                        ivec3 c = desired_cell + neigh[i];
+                        ivec3 base = (is_sand && optional_transport_sand) ? old_cell : desired_cell;
+                        ivec3 c = base + neigh[i];
                         if (all(equal(c, old_cell)) || !in_bounds(c) || !bcc_parity(c)) {
                             continue;
                         }
@@ -983,13 +1156,21 @@ void main() {
     if (blocked_by_particle) {
         // If we couldn't move due to another particle occupying our desired cell, treat it like a
         // hard contact for stability (prevents "energized" jitter at rest in dense piles).
+        //
+        // However, fully zeroing sand velocity here makes dense piles feel unresponsive after a gravity
+        // direction change: the pile can remain jammed for seconds because particles lose all momentum
+        // every time they fail to claim an empty neighbor.
         F = f_in.data[p];
-        v = vec3(0.0);
+        if (material_id == 1u) { // sand
+            v *= 0.6;
+        } else {
+            v = vec3(0.0);
+        }
         C = mat3(0.0);
     } else if (!moved_cell) {
-        // If we stayed in the same cell with only tiny residual velocity, kill it so discrete
-        // voxelization doesn't flicker at rest.
-        if (length(v) < rest_speed) {
+        // For sand, keep small residual velocity so piles respond immediately to gravity changes.
+        // For water/stone, kill tiny velocities at rest to reduce churn/noise and help equilibrium.
+        if ((material_id == 2u || material_id == 4u) && length(v) < rest_speed) {
             v = vec3(0.0);
             C = mat3(0.0);
         }

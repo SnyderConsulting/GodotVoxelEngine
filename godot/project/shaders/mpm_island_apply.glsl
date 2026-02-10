@@ -47,6 +47,11 @@ const uint FLAG_STATIC = 1u << 1;
 const float FP_SCALE = 10000.0;
 const float SLEEP_V2 = 1e-4;
 const float SLEEP_W2 = 1e-4;
+// Safety: island rigidification can produce very high angular velocities for tiny fragments
+// right after fracture. Clamp/blend to avoid "explosive" piece ejection.
+const float I_REG = 1e-2;
+const float OMEGA_MAX = 10.0;
+const float RIGID_BLEND = 0.90;
 
 mat3 skew(vec3 w) {
     return mat3(
@@ -97,17 +102,23 @@ void main() {
         Ixz, Iyz, Izz
     );
     // Regularize to avoid singular inverse for tiny islands.
-    I[0][0] += 1e-3;
-    I[1][1] += 1e-3;
-    I[2][2] += 1e-3;
+    I[0][0] += I_REG;
+    I[1][1] += I_REG;
+    I[2][2] += I_REG;
 
     vec3 omega = inverse(I) * L;
+    float om = length(omega);
+    if (om > OMEGA_MAX) {
+        omega *= OMEGA_MAX / max(om, 1e-6);
+    }
     if (dot(vcom, vcom) < SLEEP_V2 && dot(omega, omega) < SLEEP_W2) {
         vel_vol.data[p].xyz = vec3(0.0);
         c_buf.data[p] = mat3(0.0);
         return;
     }
-    vec3 v = vcom + cross(omega, r);
+    vec3 v_rigid = vcom + cross(omega, r);
+    vec3 v_prev = vel_vol.data[p].xyz;
+    vec3 v = mix(v_prev, v_rigid, RIGID_BLEND);
 
     vel_vol.data[p].xyz = v;
     c_buf.data[p] = skew(omega);

@@ -40,6 +40,9 @@ sim_every = 1
 sim_mode = 1
 mpm_max_particles = 120000
 mpm_gravity_strength = 50.0
+mpm_pressure_iters = 10
+mpm_drag_strength = 12.0
+mpm_water_vel_smooth = 0.6
 debug_logging = false
 debug_log_every = 60
 

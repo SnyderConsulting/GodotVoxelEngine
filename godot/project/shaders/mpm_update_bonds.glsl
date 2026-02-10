@@ -185,7 +185,8 @@ void main() {
         mat3 P = mu * (F - FinvT) + lambda * logJ * FinvT;
         mat3 sigma = (P * transpose(F)) / max(J, 1e-6);
 
-        const float TENSILE = 120.0;
+        // Higher threshold reduces "popcorn" fracture and improves stability of small islands.
+        const float TENSILE = 180.0;
         for (int i = 0; i < 8; i++) {
             if ((mask & (1u << uint(i))) == 0u) {
                 continue;

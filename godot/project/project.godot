@@ -15,3 +15,6 @@ window/size/mode=2
 
 [rendering]
 renderer/rendering_method="forward_plus"
+
+[autoload]
+SessionRecorder="*res://scripts/SessionRecorder.gd"

@@ -78,6 +78,8 @@ func _apply_gravity() -> void:
     var pitch := deg_to_rad(_gravity_pitch_slider.value)
     var basis := Basis.from_euler(Vector3(pitch, yaw, 0.0))
     _renderer.gravity_dir = (basis * Vector3.DOWN).normalized()
+    if SessionRecorder != null and SessionRecorder.has_method("record_controls"):
+        SessionRecorder.record_controls(_renderer.world_rotation, _renderer.gravity_dir)
 
 func _apply_world_rotation() -> void:
     _renderer.world_rotation = Vector3(
@@ -85,6 +87,8 @@ func _apply_world_rotation() -> void:
         deg_to_rad(_world_yaw_slider.value),
         deg_to_rad(_world_roll_slider.value)
     )
+    if SessionRecorder != null and SessionRecorder.has_method("record_controls"):
+        SessionRecorder.record_controls(_renderer.world_rotation, _renderer.gravity_dir)
 
 func _update_labels() -> void:
     _gravity_yaw_value.text = "%.0f" % _gravity_yaw_slider.value
