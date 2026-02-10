@@ -194,9 +194,42 @@ def _slot(stats: Dict[str, Any], mat_id: int) -> Dict[str, Any]:
     return {"mat_id": mat_id, "count": 0, "mass": 0.0, "avg_speed": 0.0, "max_speed": 0.0, "overlap_static": 0}
 
 
-def _eval_scene(scene_cfg: Dict[str, Any], baseline: Dict[str, Any], final: Dict[str, Any]) -> Tuple[bool, List[str]]:
+def _audit_global(audit: Dict[str, Any]) -> Dict[str, Any]:
+    g = audit.get("global") or {}
+    return g if isinstance(g, dict) else {}
+
+
+def _audit_mat(audit: Dict[str, Any], mat_id: int) -> Dict[str, Any]:
+    mats = audit.get("materials") or []
+    if isinstance(mats, list):
+        if 0 <= mat_id < len(mats):
+            m = mats[mat_id]
+            if isinstance(m, dict):
+                return m
+        for m in mats:
+            if isinstance(m, dict) and int(m.get("mat_id", -1)) == mat_id:
+                return m
+    return {"mat_id": mat_id}
+
+
+def _label_sample(sample: Dict[str, Any]) -> str:
+    if "t_s" in sample:
+        return f"t={float(sample.get('t_s') or 0.0):.2f}s"
+    return "baseline"
+
+
+def _eval_scene(
+    scene_cfg: Dict[str, Any],
+    baseline: Dict[str, Any],
+    final: Dict[str, Any],
+    timeline: List[Dict[str, Any]],
+) -> Tuple[bool, List[str]]:
     failures: List[str] = []
-    checks = scene_cfg.get("checks", {}) or {}
+    defaults = scene_cfg.get("_defaults", {}) or {}
+
+    checks: Dict[str, Any] = {}
+    checks.update(defaults.get("checks", {}) or {})
+    checks.update(scene_cfg.get("checks", {}) or {})
 
     nan_max = int(checks.get("nan_max", 0))
     if int(final.get("nan", 0)) > nan_max:
@@ -209,6 +242,51 @@ def _eval_scene(scene_cfg: Dict[str, Any], baseline: Dict[str, Any], final: Dict
         loss_frac = max(0.0, (base_mass - final_mass) / base_mass)
         if loss_frac > total_mass_loss_frac_max:
             failures.append(f"total_mass_loss_frac {loss_frac:.4f} > {total_mass_loss_frac_max:.4f}")
+
+    # Discrete voxel invariants: no per-cell duplicates (prevents "voxel compression"),
+    # and no render-cell spill (prevents flicker/teleport due to voxelization contention).
+    discrete_checks: Dict[str, Any] = {}
+    discrete_checks.update(defaults.get("discrete_checks", {}) or {})
+    discrete_checks.update(scene_cfg.get("discrete_checks", {}) or {})
+
+    discrete_material_defaults: Dict[str, Any] = {}
+    discrete_material_defaults.update(defaults.get("discrete_material_defaults", {}) or {})
+    discrete_material_defaults.update(scene_cfg.get("discrete_material_defaults", {}) or {})
+
+    samples = [baseline] + (timeline or [])
+    if discrete_checks:
+        for s in samples:
+            audit = s.get("discrete_audit") or {}
+            if not isinstance(audit, dict) or not audit:
+                failures.append(f"{_label_sample(s)} missing discrete_audit")
+                continue
+            g = _audit_global(audit)
+
+            if "global_dupes_max" in discrete_checks:
+                maxv = int(discrete_checks["global_dupes_max"])
+                v = int(g.get("dupes", 0))
+                if v > maxv:
+                    failures.append(f"{_label_sample(s)} global_dupes {v} > {maxv}")
+
+            if "global_max_per_cell_max" in discrete_checks:
+                maxv = int(discrete_checks["global_max_per_cell_max"])
+                v = int(g.get("max_per_cell", 0))
+                if v > maxv:
+                    failures.append(f"{_label_sample(s)} global_max_per_cell {v} > {maxv}")
+
+            if "global_render_mismatched_max" in discrete_checks:
+                maxv = int(discrete_checks["global_render_mismatched_max"])
+                v = int(g.get("render_mismatched", 0))
+                if v > maxv:
+                    failures.append(f"{_label_sample(s)} global_render_mismatched {v} > {maxv}")
+
+            if "global_mapped_frac_min" in discrete_checks:
+                minv = float(discrete_checks["global_mapped_frac_min"])
+                active = int(audit.get("active_particles", 0))
+                mapped = int(g.get("mapped", 0))
+                frac = (float(mapped) / float(active)) if active > 0 else 1.0
+                if frac < minv:
+                    failures.append(f"{_label_sample(s)} global_mapped_frac {frac:.3f} < {minv:.3f}")
 
     mat_checks = scene_cfg.get("material_checks", []) or []
     for mc in mat_checks:
@@ -257,6 +335,15 @@ def _eval_scene(scene_cfg: Dict[str, Any], baseline: Dict[str, Any], final: Dict
                 if loss_frac > frac_max:
                     failures.append(f"mat={mat_id} mass_loss_frac {loss_frac:.4f} > {frac_max:.4f}")
 
+        if "count_loss_frac_max" in mc:
+            frac_max = float(mc["count_loss_frac_max"])
+            bc = float(b.get("count", 0))
+            fc = float(f.get("count", 0))
+            if bc > 0.0:
+                loss_frac = max(0.0, (bc - fc) / bc)
+                if loss_frac > frac_max:
+                    failures.append(f"mat={mat_id} count_loss_frac {loss_frac:.4f} > {frac_max:.4f}")
+
         if "overlap_static_max" in mc:
             ov_max = int(mc["overlap_static_max"])
             ov = int(f.get("overlap_static", 0))
@@ -274,6 +361,64 @@ def _eval_scene(scene_cfg: Dict[str, Any], baseline: Dict[str, Any], final: Dict
             sp = float(f.get("max_speed", 0.0))
             if sp > sp_max:
                 failures.append(f"mat={mat_id} max_speed_final {sp:.4f} > {sp_max:.4f}")
+
+        # Per-material discrete checks are evaluated across all samples (baseline + timeline),
+        # because a transient violation is still a visible artifact.
+        eff_discrete_mc: Dict[str, Any] = {}
+        eff_discrete_mc.update(discrete_material_defaults)
+        # Allow both styles:
+        # - material_checks[]: { ..., "discrete": { ... } }
+        # - material_checks[]: { ..., "discrete_dupes_max": 0, ... }
+        eff_discrete_mc.update(mc.get("discrete", {}) or {})
+        for k, v in mc.items():
+            if k.startswith("discrete_"):
+                eff_discrete_mc[k[len("discrete_") :]] = v
+
+        if eff_discrete_mc:
+            for s in samples:
+                audit = s.get("discrete_audit") or {}
+                if not isinstance(audit, dict) or not audit:
+                    continue
+                m = _audit_mat(audit, mat_id)
+                label = _label_sample(s)
+
+                if "dupes_max" in eff_discrete_mc:
+                    maxv = int(eff_discrete_mc["dupes_max"])
+                    vv = int(m.get("dupes", 0))
+                    if vv > maxv:
+                        failures.append(f"{label} mat={mat_id} dupes {vv} > {maxv}")
+
+                if "max_per_cell_max" in eff_discrete_mc:
+                    maxv = int(eff_discrete_mc["max_per_cell_max"])
+                    vv = int(m.get("max_per_cell", 0))
+                    if vv > maxv:
+                        failures.append(f"{label} mat={mat_id} max_per_cell {vv} > {maxv}")
+
+                if "render_mismatched_max" in eff_discrete_mc:
+                    maxv = int(eff_discrete_mc["render_mismatched_max"])
+                    vv = int(m.get("render_mismatched", 0))
+                    if vv > maxv:
+                        failures.append(f"{label} mat={mat_id} render_mismatched {vv} > {maxv}")
+
+                if "mapped_frac_min" in eff_discrete_mc:
+                    minv = float(eff_discrete_mc["mapped_frac_min"])
+                    c = int(m.get("count", 0))
+                    mapped = int(m.get("mapped", 0))
+                    frac = (float(mapped) / float(c)) if c > 0 else 1.0
+                    if frac < minv:
+                        failures.append(f"{label} mat={mat_id} mapped_frac {frac:.3f} < {minv:.3f}")
+
+                if "avg_spill_max" in eff_discrete_mc:
+                    maxv = float(eff_discrete_mc["avg_spill_max"])
+                    vv = float(m.get("avg_spill", 0.0))
+                    if vv > maxv:
+                        failures.append(f"{label} mat={mat_id} avg_spill {vv:.4f} > {maxv:.4f}")
+
+                if "max_spill_max" in eff_discrete_mc:
+                    maxv = float(eff_discrete_mc["max_spill_max"])
+                    vv = float(m.get("max_spill", 0.0))
+                    if vv > maxv:
+                        failures.append(f"{label} mat={mat_id} max_spill {vv:.4f} > {maxv:.4f}")
 
     return (len(failures) == 0), failures
 
@@ -312,6 +457,33 @@ def _fetch_stats(cli: AutomationClient, voxel_path: str) -> Dict[str, Any]:
         raise RuntimeError(f"unexpected stats raw type: {type(raw)}")
     ints = [int(x) for x in raw]
     return _parse_stats_ints(ints)
+
+
+def _request_discrete_audit(cli: AutomationClient, voxel_path: str) -> int:
+    resp = cli.call("call", {"path": voxel_path, "method": "mpm_request_discrete_audit", "args": []})
+    return int(resp.get("result") or 0)
+
+
+def _wait_for_discrete_audit(cli: AutomationClient, voxel_path: str, req_id: int, timeout_s: float) -> None:
+    if req_id <= 0:
+        raise RuntimeError(f"invalid discrete audit request id: {req_id}")
+    deadline = time.time() + timeout_s
+    last = -1
+    while time.time() < deadline:
+        resp = cli.call("call", {"path": voxel_path, "method": "mpm_get_last_discrete_audit_frame", "args": []})
+        frame = int(resp.get("result") or 0)
+        last = frame
+        if frame >= req_id:
+            return
+        time.sleep(0.05)
+    raise RuntimeError(f"discrete audit did not complete (req={req_id} last={last})")
+
+
+def _fetch_discrete_audit(cli: AutomationClient, voxel_path: str) -> Dict[str, Any]:
+    audit = cli.call("call", {"path": voxel_path, "method": "mpm_get_last_discrete_audit", "args": []}).get("result")
+    if not isinstance(audit, dict):
+        raise RuntimeError(f"unexpected discrete audit type: {type(audit)}")
+    return audit
 
 
 def _launch_scene(
@@ -413,6 +585,10 @@ def main() -> int:
             overall_ok = False
             continue
 
+        # Merge per-scene checks with defaults (so suite.json doesn't need to repeat boilerplate).
+        scene_cfg: Dict[str, Any] = dict(s)
+        scene_cfg["_defaults"] = defaults
+
         host = "127.0.0.1"
         port = _find_free_port(host)
         token = secrets.token_hex(8)
@@ -475,6 +651,12 @@ def main() -> int:
                 # First sample.
                 frame0 = _wait_for_stats(cli, voxel_path, min_frame=0, timeout_s=stats_timeout_s)
                 baseline = _fetch_stats(cli, voxel_path)
+                try:
+                    req = _request_discrete_audit(cli, voxel_path)
+                    _wait_for_discrete_audit(cli, voxel_path, req, timeout_s=stats_timeout_s)
+                    baseline["discrete_audit"] = _fetch_discrete_audit(cli, voxel_path)
+                except Exception as e:
+                    baseline["discrete_audit_error"] = str(e)
                 (scene_dir / "stats_baseline.json").write_text(json.dumps(baseline, indent=2, sort_keys=True), "utf-8")
 
                 # Run.
@@ -499,6 +681,12 @@ def main() -> int:
                     next_frame = _wait_for_stats(cli, voxel_path, min_frame=next_frame, timeout_s=stats_timeout_s)
                     sample = _fetch_stats(cli, voxel_path)
                     sample["t_s"] = float(tpoint)
+                    try:
+                        req = _request_discrete_audit(cli, voxel_path)
+                        _wait_for_discrete_audit(cli, voxel_path, req, timeout_s=stats_timeout_s)
+                        sample["discrete_audit"] = _fetch_discrete_audit(cli, voxel_path)
+                    except Exception as e:
+                        sample["discrete_audit_error"] = str(e)
                     timeline.append(sample)
 
                 (scene_dir / "stats_timeline.json").write_text(json.dumps(timeline, indent=2, sort_keys=True), "utf-8")
@@ -513,7 +701,7 @@ def main() -> int:
                     (scene_dir / "screenshot_error.txt").write_text(str(e), "utf-8")
 
                 # Evaluate.
-                proc_ok, failures = _eval_scene(s, baseline, final)
+                proc_ok, failures = _eval_scene(scene_cfg, baseline, final, timeline)
                 overall_ok = overall_ok and proc_ok
 
                 # Quit.

@@ -234,8 +234,11 @@ var _material_mass_by_id: Dictionary = {}
 var mpm_last_stats_frame: int = 0
 var mpm_last_stats_raw: PackedInt32Array = PackedInt32Array()
 var mpm_last_stats: Dictionary = {}
+var mpm_last_discrete_audit_frame: int = 0
+var mpm_last_discrete_audit: Dictionary = {}
 # Tracks per-particle render-cell assignment across frames to quantify voxelization churn (flicker/teleport).
 var _debug_render_cell_prev_keys: PackedInt32Array = PackedInt32Array()
+var _mpm_discrete_audit_request_id: int = 0
 
 func _diag(msg: String) -> void:
     if !diag_enabled:
@@ -257,6 +260,261 @@ func mpm_get_last_stats_raw() -> Array:
 
 func mpm_get_last_stats() -> Dictionary:
     return mpm_last_stats
+
+func mpm_request_discrete_audit() -> int:
+    # Automation/test helper: compute discrete voxel invariants (no compression, no multi-material per cell,
+    # and no render-cell "spill") by reading back the current particle buffers on the render thread.
+    if _rd == null:
+        return -1
+    if sim_mode != 1:
+        return -1
+    _mpm_discrete_audit_request_id += 1
+    RenderingServer.call_on_render_thread(Callable(self, "_mpm_discrete_audit_on_render_thread").bind(_mpm_discrete_audit_request_id))
+    return _mpm_discrete_audit_request_id
+
+func mpm_get_last_discrete_audit_frame() -> int:
+    return mpm_last_discrete_audit_frame
+
+func mpm_get_last_discrete_audit() -> Dictionary:
+    return mpm_last_discrete_audit
+
+func _mpm_discrete_audit_on_render_thread(request_id: int) -> void:
+    if _rd == null:
+        return
+    if !_mpm_particle_count_rid.is_valid() or !_mpm_meta_rid.is_valid():
+        return
+    var count_bytes := _rd.buffer_get_data(_mpm_particle_count_rid, 0, 4)
+    if count_bytes.size() < 4:
+        return
+    var count_vals := count_bytes.to_int32_array()
+    if count_vals.size() == 0:
+        return
+    var count := maxi(0, int(count_vals[0]))
+    if count <= 0:
+        call_deferred("_apply_mpm_discrete_audit", request_id, {
+            "particle_count": 0,
+            "active_particles": 0,
+            "grid_extent": chunk_grid * chunk_size,
+            "global": {"unique_cells": 0, "dupes": 0, "max_per_cell": 0, "mapped": 0, "render_mismatched": 0},
+            "materials": [],
+        })
+        return
+
+    var pos_rid: RID = _mpm_pos_mass_a_rid if _mpm_particles_use_a else _mpm_pos_mass_b_rid
+    var vel_rid: RID = _mpm_vel_vol_a_rid if _mpm_particles_use_a else _mpm_vel_vol_b_rid
+    if !pos_rid.is_valid() or !vel_rid.is_valid():
+        return
+    var bytes_per_particle := 16 # vec4 / uvec4
+    var max_bytes := count * bytes_per_particle
+    var pos_bytes := _rd.buffer_get_data(pos_rid, 0, max_bytes)
+    var vel_bytes := _rd.buffer_get_data(vel_rid, 0, max_bytes)
+    var meta_bytes := _rd.buffer_get_data(_mpm_meta_rid, 0, max_bytes)
+    var rc_bytes := PackedByteArray()
+    if _mpm_particle_render_cell_rid.is_valid():
+        rc_bytes = _rd.buffer_get_data(_mpm_particle_render_cell_rid, 0, max_bytes)
+
+    if pos_bytes.size() < max_bytes or vel_bytes.size() < max_bytes or meta_bytes.size() < max_bytes:
+        return
+    if _mpm_particle_render_cell_rid.is_valid() and rc_bytes.size() < max_bytes:
+        # Render-cell mapping not ready yet; continue without spill metrics.
+        rc_bytes = PackedByteArray()
+
+    var pos_vals := pos_bytes.to_float32_array()
+    var vel_vals := vel_bytes.to_float32_array()
+    var meta_vals := meta_bytes.to_int32_array()
+    var rc_vals := rc_bytes.to_int32_array() if rc_bytes.size() > 0 else PackedInt32Array()
+    if pos_vals.size() < count * 4 or vel_vals.size() < count * 4 or meta_vals.size() < count * 4:
+        return
+    if rc_bytes.size() > 0 and rc_vals.size() < count * 4:
+        return
+
+    var grid_extent: int = chunk_grid * chunk_size
+    var plane := grid_extent * grid_extent
+
+    const MAT_SLOTS := 16
+
+    var mat_counts := PackedInt32Array()
+    mat_counts.resize(MAT_SLOTS)
+    for i in range(MAT_SLOTS):
+        mat_counts[i] = 0
+
+    var mat_cell_counts: Array = []
+    mat_cell_counts.resize(MAT_SLOTS)
+    for i in range(MAT_SLOTS):
+        mat_cell_counts[i] = {}
+
+    var mat_max_per_cell := PackedInt32Array()
+    mat_max_per_cell.resize(MAT_SLOTS)
+    for i in range(MAT_SLOTS):
+        mat_max_per_cell[i] = 0
+
+    var mat_mapped := PackedInt32Array()
+    mat_mapped.resize(MAT_SLOTS)
+    for i in range(MAT_SLOTS):
+        mat_mapped[i] = 0
+
+    var mat_render_mismatched := PackedInt32Array()
+    mat_render_mismatched.resize(MAT_SLOTS)
+    for i in range(MAT_SLOTS):
+        mat_render_mismatched[i] = 0
+
+    var mat_sum_spill := PackedFloat32Array()
+    mat_sum_spill.resize(MAT_SLOTS)
+    var mat_max_spill := PackedFloat32Array()
+    mat_max_spill.resize(MAT_SLOTS)
+    var mat_sum_local := PackedFloat32Array()
+    mat_sum_local.resize(MAT_SLOTS)
+    var mat_max_local := PackedFloat32Array()
+    mat_max_local.resize(MAT_SLOTS)
+    for i in range(MAT_SLOTS):
+        mat_sum_spill[i] = 0.0
+        mat_max_spill[i] = 0.0
+        mat_sum_local[i] = 0.0
+        mat_max_local[i] = 0.0
+
+    var global_counts := {}
+    var global_active := 0
+    var global_max_per_cell := 0
+    var global_mapped := 0
+    var global_render_mismatched := 0
+
+    for p in range(count):
+        var mat_id := int(meta_vals[p * 4 + 0])
+        if mat_id == 0:
+            continue
+        global_active += 1
+
+        var px := float(pos_vals[p * 4 + 0])
+        var py := float(pos_vals[p * 4 + 1])
+        var pz := float(pos_vals[p * 4 + 2])
+
+        # Base cell: prefer the packed base cell from the renderer's mapping (GLSL snap_to_bcc),
+        # which avoids CPU-vs-GPU rounding differences near Voronoi boundaries.
+        var have_rc := false
+        var rx := 0
+        var ry := 0
+        var rz := 0
+        var bx := 0
+        var by := 0
+        var bz := 0
+        if rc_vals.size() >= (p + 1) * 4:
+            var w := int(rc_vals[p * 4 + 3])
+            if (w & int(0x80000000)) != 0:
+                have_rc = true
+                rx = int(rc_vals[p * 4 + 0])
+                ry = int(rc_vals[p * 4 + 1])
+                rz = int(rc_vals[p * 4 + 2])
+                var packed := w & int(0x3FFFFFFF)
+                bx = int(packed & 1023)
+                by = int((packed >> 10) & 1023)
+                bz = int((packed >> 20) & 1023)
+
+        if !have_rc:
+            # Fallback: quantize to nearest BCC lattice point (even-even-even or odd-odd-odd).
+            var ex := int(round(px * 0.5)) * 2
+            var ey := int(round(py * 0.5)) * 2
+            var ez := int(round(pz * 0.5)) * 2
+            var ox := int(round((px - 1.0) * 0.5)) * 2 + 1
+            var oy := int(round((py - 1.0) * 0.5)) * 2 + 1
+            var oz := int(round((pz - 1.0) * 0.5)) * 2 + 1
+            var de2 := (px - float(ex)) * (px - float(ex)) + (py - float(ey)) * (py - float(ey)) + (pz - float(ez)) * (pz - float(ez))
+            var do2 := (px - float(ox)) * (px - float(ox)) + (py - float(oy)) * (py - float(oy)) + (pz - float(oz)) * (pz - float(oz))
+            bx = ex if do2 >= de2 else ox
+            by = ey if do2 >= de2 else oy
+            bz = ez if do2 >= de2 else oz
+            bx = clampi(bx, 0, grid_extent - 1)
+            by = clampi(by, 0, grid_extent - 1)
+            bz = clampi(bz, 0, grid_extent - 1)
+            # Safety: enforce BCC parity (x&1 == y&1 == z&1).
+            if !((bx & 1) == (by & 1) and (by & 1) == (bz & 1)):
+                var bx2 := clampi(bx + 1, 0, grid_extent - 1)
+                if ((bx2 & 1) == (by & 1) and (by & 1) == (bz & 1)):
+                    bx = bx2
+                else:
+                    var by2 := clampi(by + 1, 0, grid_extent - 1)
+                    if ((bx & 1) == (by2 & 1) and (by2 & 1) == (bz & 1)):
+                        by = by2
+                    else:
+                        var bz2 := clampi(bz + 1, 0, grid_extent - 1)
+                        if ((bx & 1) == (by & 1) and (by & 1) == (bz2 & 1)):
+                            bz = bz2
+
+        var bkey := bx + by * grid_extent + bz * plane
+        var gc := int(global_counts.get(bkey, 0)) + 1
+        global_counts[bkey] = gc
+        global_max_per_cell = maxi(global_max_per_cell, gc)
+
+        if mat_id >= 0 and mat_id < MAT_SLOTS:
+            mat_counts[mat_id] += 1
+            var d: Dictionary = mat_cell_counts[mat_id]
+            var mc := int(d.get(bkey, 0)) + 1
+            d[bkey] = mc
+            mat_max_per_cell[mat_id] = maxi(mat_max_per_cell[mat_id], mc)
+
+            var local_d := Vector3(px, py, pz).distance_to(Vector3(float(bx), float(by), float(bz)))
+            mat_sum_local[mat_id] += local_d
+            mat_max_local[mat_id] = maxf(mat_max_local[mat_id], local_d)
+
+            if have_rc:
+                mat_mapped[mat_id] += 1
+                global_mapped += 1
+                var spill_d := Vector3(float(bx), float(by), float(bz)).distance_to(Vector3(float(rx), float(ry), float(rz)))
+                mat_sum_spill[mat_id] += spill_d
+                mat_max_spill[mat_id] = maxf(mat_max_spill[mat_id], spill_d)
+                if rx != bx or ry != by or rz != bz:
+                    mat_render_mismatched[mat_id] += 1
+                    global_render_mismatched += 1
+        # else: ignore materials outside MAT_SLOTS for now (still included in global_counts).
+
+    var global_unique := global_counts.size()
+    var global_dupes := global_active - global_unique
+
+    var materials: Array = []
+    materials.resize(MAT_SLOTS)
+    for mid in range(MAT_SLOTS):
+        var cells: Dictionary = mat_cell_counts[mid]
+        var mcount := int(mat_counts[mid])
+        var munique := cells.size()
+        var mdupes := mcount - munique
+        var mapped := int(mat_mapped[mid])
+        var avg_spill := 0.0
+        if mapped > 0:
+            avg_spill = float(mat_sum_spill[mid]) / float(mapped)
+        var avg_local := 0.0
+        if mcount > 0:
+            avg_local = float(mat_sum_local[mid]) / float(mcount)
+        materials[mid] = {
+            "mat_id": mid,
+            "count": mcount,
+            "unique_cells": munique,
+            "dupes": mdupes,
+            "max_per_cell": int(mat_max_per_cell[mid]),
+            "mapped": mapped,
+            "render_mismatched": int(mat_render_mismatched[mid]),
+            "avg_spill": avg_spill,
+            "max_spill": float(mat_max_spill[mid]),
+            "avg_local": avg_local,
+            "max_local": float(mat_max_local[mid]),
+        }
+
+    var audit := {
+        "particle_count": count,
+        "active_particles": global_active,
+        "grid_extent": grid_extent,
+        "global": {
+            "unique_cells": global_unique,
+            "dupes": global_dupes,
+            "max_per_cell": global_max_per_cell,
+            "mapped": global_mapped,
+            "render_mismatched": global_render_mismatched,
+        },
+        "materials": materials,
+    }
+    call_deferred("_apply_mpm_discrete_audit", request_id, audit)
+
+func _apply_mpm_discrete_audit(request_id: int, audit: Dictionary) -> void:
+    mpm_last_discrete_audit_frame = request_id
+    mpm_last_discrete_audit = audit
 
 func _ready() -> void:
     _diag("ready start width=%d height=%d chunk_size=%d chunk_grid=%d lattice=%.3f" % [
@@ -3630,34 +3888,12 @@ func _debug_mpm_render_churn_on_render_thread(frame_id: int, material_id: int) -
         rmax.y = maxf(rmax.y, float(ry))
         rmax.z = maxf(rmax.z, float(rz))
 
-        # Compare render-cell mapping to the particle's snapped BCC base cell.
-        # This distinguishes true "spill" (render mapping mismatch) from sub-voxel motion inside a cell.
-        var ex := int(round(px * 0.5)) * 2
-        var ey := int(round(py * 0.5)) * 2
-        var ez := int(round(pz * 0.5)) * 2
-        var ox := int(round((px - 1.0) * 0.5)) * 2 + 1
-        var oy := int(round((py - 1.0) * 0.5)) * 2 + 1
-        var oz := int(round((pz - 1.0) * 0.5)) * 2 + 1
-        var de2 := (px - float(ex)) * (px - float(ex)) + (py - float(ey)) * (py - float(ey)) + (pz - float(ez)) * (pz - float(ez))
-        var do2 := (px - float(ox)) * (px - float(ox)) + (py - float(oy)) * (py - float(oy)) + (pz - float(oz)) * (pz - float(oz))
-        var bx := ex if do2 >= de2 else ox
-        var by := ey if do2 >= de2 else oy
-        var bz := ez if do2 >= de2 else oz
-        bx = clampi(bx, 0, grid_extent - 1)
-        by = clampi(by, 0, grid_extent - 1)
-        bz = clampi(bz, 0, grid_extent - 1)
-        if !((bx & 1) == (by & 1) and (by & 1) == (bz & 1)):
-            var bx2 := clampi(bx + 1, 0, grid_extent - 1)
-            if ((bx2 & 1) == (by & 1) and (by & 1) == (bz & 1)):
-                bx = bx2
-            else:
-                var by2 := clampi(by + 1, 0, grid_extent - 1)
-                if ((bx & 1) == (by2 & 1) and (by2 & 1) == (bz & 1)):
-                    by = by2
-                else:
-                    var bz2 := clampi(bz + 1, 0, grid_extent - 1)
-                    if ((bx & 1) == (by & 1) and (by & 1) == (bz2 & 1)):
-                        bz = bz2
+        # Compare render-cell mapping to the particle's base BCC cell (packed by the voxelization shader).
+        # This avoids CPU-vs-GPU rounding differences near Voronoi boundaries.
+        var packed := w & int(0x3FFFFFFF)
+        var bx := int(packed & 1023)
+        var by := int((packed >> 10) & 1023)
+        var bz := int((packed >> 20) & 1023)
 
         var local_d := Vector3(px, py, pz).distance_to(Vector3(float(bx), float(by), float(bz)))
         sum_local += local_d

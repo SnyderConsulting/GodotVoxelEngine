@@ -179,13 +179,17 @@ void main() {
         ivec3(-1, -1, -1)
     );
 
-    // Stabilize voxelization across frames: if the particle is still in the same snapped base cell,
-    // first try to re-claim the voxel cell it rendered into last frame. This prevents dense piles
-    // from "flickering" due to nondeterministic atomic claim ordering.
+    // First try the nearest BCC cell.
+    if (try_claim_cell(base, mat_id, vec3(base), p, base)) {
+        return;
+    }
+
+    // If the base cell is unavailable (static voxel or unexpected contention), prefer the previous
+    // render cell as a stabilization step. This avoids "teleport" flicker, but only after the base
+    // claim has already failed (so we don't violate discrete voxel conservation when base is free).
     uvec4 prev_rc = render_cell.data[p];
     if ((prev_rc.w & RENDER_CELL_VALID_BIT) != 0u) {
         ivec3 prev_cell = ivec3(prev_rc.xyz);
-        // Hysteresis: keep using the previous cell if we're still close to it.
         vec3 dxp = x - vec3(prev_cell);
         float d2 = dot(dxp, dxp);
         if (d2 <= 1.0) {
@@ -193,11 +197,6 @@ void main() {
                 return;
             }
         }
-    }
-
-    // First try the nearest BCC cell.
-    if (try_claim_cell(base, mat_id, vec3(base), p, base)) {
-        return;
     }
 
     // Then try 1-hop neighbors (order randomized per particle to reduce contention).
