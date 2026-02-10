@@ -43,8 +43,29 @@ layout(set = 0, binding = 6, std430) buffer CellPos {
     vec4 data[];
 } cell_pos;
 
+// Persistent per-particle render mapping for stable voxelization across frames.
+// xyz = last claimed render cell (grid coords), w = packed base cell (10 bits per axis) with a valid bit.
+layout(set = 0, binding = 7, std430) buffer ParticleRenderCell {
+    uvec4 data[];
+} render_cell;
+
 const uint GLASS_MATERIAL = 8u;
 const uint INVISIBLE_MATERIAL = 9u;
+
+const uint RENDER_CELL_VALID_BIT = 0x80000000u;
+const uint RENDER_CELL_BASE_MASK = 0x3FFFFFFFu;
+
+uint pack_cell_10bits(ivec3 c) {
+    return uint(c.x) | (uint(c.y) << 10) | (uint(c.z) << 20);
+}
+
+ivec3 unpack_cell_10bits(uint p) {
+    return ivec3(
+        int(p & 1023u),
+        int((p >> 10) & 1023u),
+        int((p >> 20) & 1023u)
+    );
+}
 
 uint idx_brick(ivec3 b) {
     return uint(b.x) + uint(b.y) * uint(u.brick_info.x)
@@ -105,7 +126,7 @@ bool is_solid(uint mat_id) {
     return mat_id == GLASS_MATERIAL || mat_id == INVISIBLE_MATERIAL;
 }
 
-bool try_claim_cell(ivec3 cell, uint mat_id, vec3 render_pos) {
+bool try_claim_cell(ivec3 cell, uint mat_id, vec3 render_pos, uint p, ivec3 base) {
     if (!in_bounds(cell) || !bcc_parity(cell)) {
         return false;
     }
@@ -115,10 +136,11 @@ bool try_claim_cell(ivec3 cell, uint mat_id, vec3 render_pos) {
     }
     uint prev = atomicCompSwap(atlas_out.data[ci], 0u, mat_id);
     if (prev == 0u) {
-        // Render center in grid-space coordinates. Ideally this is the particle's continuous position.
-        // When we "spill" into neighboring cells due to contention, use the claimed cell center to
-        // keep the raymarch cell lookup roughly aligned.
+        // Render center in grid-space coordinates.
+        // For VoxLand's voxel UI, keep particles snapped to BCC lattice cells so voxels don't
+        // appear to "partially fill" cells as the continuum particles advect.
         cell_pos.data[ci] = vec4(render_pos, 1.0);
+        render_cell.data[p] = uvec4(uint(cell.x), uint(cell.y), uint(cell.z), pack_cell_10bits(base) | RENDER_CELL_VALID_BIT);
         return true;
     }
     return false;
@@ -157,8 +179,24 @@ void main() {
         ivec3(-1, -1, -1)
     );
 
+    // Stabilize voxelization across frames: if the particle is still in the same snapped base cell,
+    // first try to re-claim the voxel cell it rendered into last frame. This prevents dense piles
+    // from "flickering" due to nondeterministic atomic claim ordering.
+    uvec4 prev_rc = render_cell.data[p];
+    if ((prev_rc.w & RENDER_CELL_VALID_BIT) != 0u) {
+        ivec3 prev_cell = ivec3(prev_rc.xyz);
+        // Hysteresis: keep using the previous cell if we're still close to it.
+        vec3 dxp = x - vec3(prev_cell);
+        float d2 = dot(dxp, dxp);
+        if (d2 <= 1.0) {
+            if (try_claim_cell(prev_cell, mat_id, vec3(prev_cell), p, base)) {
+                return;
+            }
+        }
+    }
+
     // First try the nearest BCC cell.
-    if (try_claim_cell(base, mat_id, x)) {
+    if (try_claim_cell(base, mat_id, vec3(base), p, base)) {
         return;
     }
 
@@ -168,45 +206,54 @@ void main() {
     for (int k = 0; k < 14; k++) {
         int i = (start + k) % 14;
         ivec3 c = base + neigh[i];
-        if (try_claim_cell(c, mat_id, vec3(c))) {
+        if (try_claim_cell(c, mat_id, vec3(c), p, base)) {
             return;
         }
     }
 
-    // Dense piles can still fail the local neighborhood search (many particles share the same cells).
-    // As a last resort, do a bounded random-walk search that explores further out without
-    // stepping into static solids. This is render-only and aims to preserve the perception of
-    // conserved mass even when the underlying continuum particles compress.
-    const int WALK_LEN = 5;
-    const int WALK_TRIES = 96;
-    uint walk_seed = h ^ 0x9E3779B9u;
-    for (int t = 0; t < WALK_TRIES; t++) {
-        ivec3 c = base;
-        bool ok = true;
-        uint ws = walk_seed + uint(t) * 747796405u;
-        for (int s = 0; s < WALK_LEN; s++) {
-            ws = ws * 1664525u + 1013904223u;
-            int ii = int(ws % 14u);
-            c += neigh[ii];
-            if (!in_bounds(c) || !bcc_parity(c)) {
-                ok = false;
-                break;
-            }
-            uint ci = atlas_index_for_cell(c);
-            if (ci == 0u) {
-                ok = false;
-                break;
-            }
-            uint cm = atlas_out.data[ci];
-            if (is_solid(cm)) {
-                ok = false;
-                break;
+    // Dense piles can still fail the 1-hop neighborhood search (many particles share the same cells).
+    // Prefer a wider *local* search over long random walks so voxels don't "teleport" far from the
+    // underlying particles (which looks like sand being pushed to corners).
+    uint h2 = h ^ 0x9E3779B9u;
+    int start0 = int(h2 % 14u);
+    int start1 = int((h2 >> 4) % 14u);
+    // 2-hop Kelvin neighborhood (<= 4-ish cells away).
+    for (int a = 0; a < 14; a++) {
+        ivec3 c1 = base + neigh[(start0 + a) % 14];
+        for (int b = 0; b < 14; b++) {
+            ivec3 c = c1 + neigh[(start1 + b) % 14];
+            if (try_claim_cell(c, mat_id, vec3(c), p, base)) {
+                return;
             }
         }
-        if (!ok) {
-            continue;
+    }
+
+    // Final fallback: bounded randomized samples in a small cube around base.
+    const int RAND_TRIES = 64;
+    const int R = 6;
+    const int RY = 2;
+    uint s = h2 ^ 0xA341316Cu;
+    for (int t = 0; t < RAND_TRIES; t++) {
+        s = s * 1664525u + 1013904223u;
+        int ox = int(s % uint(2 * R + 1)) - R;
+        s = s * 1664525u + 1013904223u;
+        int oy = int(s % uint(2 * RY + 1)) - RY;
+        s = s * 1664525u + 1013904223u;
+        int oz = int(s % uint(2 * R + 1)) - R;
+
+        // Force parity: offsets must be all-even or all-odd so base+offset stays on the BCC lattice.
+        if ((s & 1u) != 0u) {
+            if ((ox & 1) == 0) ox += (ox >= 0) ? 1 : -1;
+            if ((oy & 1) == 0) oy += (oy >= 0) ? 1 : -1;
+            if ((oz & 1) == 0) oz += (oz >= 0) ? 1 : -1;
+        } else {
+            ox &= ~1;
+            oy &= ~1;
+            oz &= ~1;
         }
-        if (try_claim_cell(c, mat_id, vec3(c))) {
+
+        ivec3 c = base + ivec3(ox, oy, oz);
+        if (try_claim_cell(c, mat_id, vec3(c), p, base)) {
             return;
         }
     }

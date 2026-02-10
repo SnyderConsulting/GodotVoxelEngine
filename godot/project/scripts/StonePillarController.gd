@@ -35,9 +35,12 @@ func _initialize_scenario() -> void:
     wait_for_renderer_ready(Callable(self, "_start_scene"))
 
 func _start_scene() -> void:
+    # Prevent a few frames of sim from running on an empty/uninitialized scenario.
+    renderer.sim_enabled = false
     renderer.sim_mode = 1
     _build_scene()
     renderer.gravity_dir = Vector3(0, -1, 0)
+    renderer.sim_enabled = true
     _update_overlay()
 
 func _process(delta: float) -> void:
@@ -144,4 +147,4 @@ func _drop_weight() -> void:
                 # Keep weight centered near the pillar tip.
                 var c := Vector3i(_tip_cell.x + dx * 2, spawn_y + dy * 2, _tip_cell.z + dz * 2)
                 cells.append(c)
-    renderer.mpm_spawn_cells(cells, weight_material_id, Vector3.ZERO, 1.0, 0)
+    renderer.mpm_spawn_cells(cells, weight_material_id, Vector3.ZERO, 4.0, 0)

@@ -21,8 +21,12 @@ func _initialize_scenario() -> void:
 
 func _start_scene() -> void:
     if renderer != null:
+        # Prevent a few frames of sim from running on an empty/uninitialized scenario.
+        renderer.sim_enabled = false
         renderer.sim_mode = 1
     _build_tumbler()
+    if renderer != null:
+        renderer.sim_enabled = true
     _update_overlay()
 
 func _process(_delta: float) -> void:

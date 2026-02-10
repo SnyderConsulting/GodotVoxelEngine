@@ -6,10 +6,12 @@ extends Node
 @export var overlay_path: NodePath
 @export var sand_button_path: NodePath
 @export var water_button_path: NodePath
+@export var material_dropdown_path: NodePath
 @export var brush_slider_path: NodePath
 @export var brush_value_path: NodePath
 @export var sand_material_id: int = 1
 @export var water_material_id: int = 2
+@export var materials_json_path: String = "res://data/materials.json"
 @export var hub_scene: String = "res://scenes/ProtoHub.tscn"
 @export var spawn_interval: float = 0.02
 @export var brush_radius: int = 1
@@ -23,9 +25,11 @@ var _quad: MeshInstance3D
 var _overlay: Label
 var _sand_button: Button
 var _water_button: Button
+var _material_dropdown: OptionButton
 var _brush_slider: HSlider
 var _brush_value: Label
 var _current_material: int = 1
+var _material_name_by_id: Dictionary = {}
 var _spawn_accum: float = 0.0
 var _last_center := Vector3i(-1, -1, -1)
 var _last_brush_cells: Array = []
@@ -35,6 +39,7 @@ var _debug_frame: int = 0
 var _debug_quad_min: Vector2 = Vector2.ZERO
 var _debug_quad_max: Vector2 = Vector2.ZERO
 var _debug_uv: Vector2 = Vector2(-1, -1)
+var _cap_hit: bool = false
 
 func _ready() -> void:
     _renderer = get_node_or_null(voxel_renderer_path)
@@ -43,18 +48,76 @@ func _ready() -> void:
     _overlay = get_node_or_null(overlay_path)
     _sand_button = get_node_or_null(sand_button_path)
     _water_button = get_node_or_null(water_button_path)
+    _material_dropdown = get_node_or_null(material_dropdown_path) as OptionButton
     _brush_slider = get_node_or_null(brush_slider_path)
     _brush_value = get_node_or_null(brush_value_path)
     if _sand_button:
         _sand_button.pressed.connect(func() -> void: _set_material(sand_material_id))
     if _water_button:
         _water_button.pressed.connect(func() -> void: _set_material(water_material_id))
+    _load_material_list()
+    _setup_material_dropdown()
     if _brush_slider:
         _brush_slider.value_changed.connect(_on_brush_changed)
         _brush_slider.value = brush_radius
     _set_material(sand_material_id)
     call_deferred("_late_init")
     _update_brush_ui()
+
+func _load_material_list() -> void:
+    _material_name_by_id.clear()
+    if materials_json_path.is_empty() or !FileAccess.file_exists(materials_json_path):
+        _material_name_by_id[sand_material_id] = "sand"
+        _material_name_by_id[water_material_id] = "water"
+        return
+    var text := FileAccess.get_file_as_string(materials_json_path)
+    var parsed: Variant = JSON.parse_string(text)
+    if typeof(parsed) != TYPE_DICTIONARY:
+        _material_name_by_id[sand_material_id] = "sand"
+        _material_name_by_id[water_material_id] = "water"
+        return
+    var mats: Array = (parsed as Dictionary).get("materials", [])
+    if typeof(mats) != TYPE_ARRAY:
+        _material_name_by_id[sand_material_id] = "sand"
+        _material_name_by_id[water_material_id] = "water"
+        return
+    for m in mats:
+        if typeof(m) != TYPE_DICTIONARY:
+            continue
+        var id := int((m as Dictionary).get("id", -1))
+        if id <= 0:
+            continue
+        var name := str((m as Dictionary).get("name", "mat_%d" % id))
+        _material_name_by_id[id] = name
+
+func _setup_material_dropdown() -> void:
+    if _material_dropdown == null:
+        return
+    _material_dropdown.clear()
+    var ids: Array = _material_name_by_id.keys()
+    ids.sort()
+    for idv in ids:
+        var mid := int(idv)
+        var name := str(_material_name_by_id.get(mid, "mat_%d" % mid))
+        # Glass/invisible are static obstacles in the MPM path.
+        if mid == 8:
+            name = "%s (static)" % name
+        elif mid == 9:
+            name = "%s (static)" % name
+        _material_dropdown.add_item("%s [%d]" % [name, mid], mid)
+    _material_dropdown.item_selected.connect(_on_material_dropdown_selected)
+    # Select current material if present.
+    for i in range(_material_dropdown.item_count):
+        if _material_dropdown.get_item_id(i) == _current_material:
+            _material_dropdown.select(i)
+            return
+
+func _on_material_dropdown_selected(index: int) -> void:
+    if _material_dropdown == null:
+        return
+    var mat_id := int(_material_dropdown.get_item_id(index))
+    if mat_id > 0:
+        _set_material(mat_id)
 
 func _late_init() -> void:
     if _renderer == null:
@@ -97,8 +160,14 @@ func _process(delta: float) -> void:
 func _set_material(mat_id: int) -> void:
     _current_material = mat_id
     if _overlay:
-        var name := "Sand" if mat_id == sand_material_id else "Water"
-        _overlay.text = "Paint Mode\nMaterial: %s\nEsc: hub" % name
+        var name := str(_material_name_by_id.get(mat_id, "mat_%d" % mat_id))
+        var cap_line := "\nCAP HIT (increase mpm_max_particles)" if _cap_hit else ""
+        _overlay.text = "Paint Mode\nMaterial: %s%s\nEsc: hub" % [name, cap_line]
+    if _material_dropdown != null:
+        for i in range(_material_dropdown.item_count):
+            if _material_dropdown.get_item_id(i) == mat_id:
+                _material_dropdown.select(i)
+                break
 
 func _on_brush_changed(value: float) -> void:
     brush_radius = int(round(value))
@@ -130,8 +199,22 @@ func _spawn_cells(cells: Array) -> void:
         count += 1
     if batch.size() == 0:
         return
+    # Some materials are meant to be static obstacles (not MPM particles).
+    if _current_material == 8 or _current_material == 9:
+        _cap_hit = false
+        if _renderer.has_method("set_voxel_at"):
+            for cell in batch:
+                _renderer.set_voxel_at(cell, _current_material)
+        _set_material(_current_material)
+        return
     if _renderer.has_method("mpm_spawn_cells"):
-        _renderer.mpm_spawn_cells(batch, _current_material, Vector3.ZERO, 1.0)
+        # Spawn voxel-sized particles (BCC Voronoi volume ~= 4 in grid space).
+        var spawned := int(_renderer.mpm_spawn_cells(batch, _current_material, Vector3.ZERO, 4.0))
+        _cap_hit = spawned < batch.size()
+        if _cap_hit and debug_logging:
+            print("PaintController | particle cap hit (requested=%d spawned=%d)" % [batch.size(), spawned])
+        # Refresh overlay so the cap warning shows even if material didn't change.
+        _set_material(_current_material)
         return
     if _renderer.has_method("set_voxel_at"):
         for cell in batch:

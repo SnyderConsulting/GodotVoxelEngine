@@ -20,9 +20,15 @@ func _initialize_scenario() -> void:
     wait_for_renderer_ready(Callable(self, "_start_scene"))
 
 func _start_scene() -> void:
+    # This scene is used as the automated stability regression.
+    # Run with gravity disabled and fracture disabled to isolate "MPM jelly" drift.
+    renderer.sim_enabled = false
     renderer.sim_mode = 1
+    renderer.mpm_gravity_strength = 0.0
+    renderer.mpm_fracture_enabled = false
     _build_scene()
     renderer.gravity_dir = Vector3(0, -1, 0)
+    renderer.sim_enabled = true
     _update_overlay()
 
 func _process(_delta: float) -> void:
@@ -34,7 +40,7 @@ func _update_overlay() -> void:
         return
     update_overlay_text(compose_overlay(
         "Jelly Test",
-        "Acceptance Test C: stone block should not drift/melt over time.",
+        "Acceptance Test C: stone block should not drift/melt over time. (gravity=0, fracture=off)",
         renderer,
         true,
         true,
@@ -76,4 +82,3 @@ func _build_scene() -> void:
         renderer.set_voxel_entries_mpm(entries)
     else:
         renderer.set_voxel_entries(entries, true)
-

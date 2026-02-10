@@ -10,6 +10,7 @@ extends "res://scripts/BaseVoxelShared.gd"
 @export var log_every: float = 1.0
 
 var _accum := 0.0
+var _spawned_cells := {}
 
 func _ready() -> void:
     bind(voxel_renderer_path, overlay_path, random_seed)
@@ -23,10 +24,15 @@ func _initialize_scenario() -> void:
 
 func _start_scene() -> void:
     if renderer != null:
+        # Prevent a few frames of sim from running on an empty/uninitialized scenario.
+        renderer.sim_enabled = false
         renderer.sim_mode = 1
+    _spawned_cells.clear()
     _build_container()
     _spawn_water()
     renderer.gravity_dir = Vector3(0, -1, 0)
+    if renderer != null:
+        renderer.sim_enabled = true
     _update_overlay()
 
 func _process(delta: float) -> void:
@@ -74,11 +80,19 @@ func _spawn_water() -> void:
     var center := int((grid_extent - 1) * 0.5)
     var radius := 8
     var top := grid_extent - 2
+    var min_wall := 1
+    var max_wall := grid_extent - 2
     for z in range(center - radius, center + radius + 1):
         for x in range(center - radius, center + radius + 1):
             var cell := _snap_to_bcc(Vector3i(x, top, z), grid_extent)
             if cell.x < 0:
                 continue
+            if cell.x == min_wall or cell.x == max_wall or cell.z == min_wall or cell.z == max_wall or cell.y == min_wall:
+                continue
+            var key := cell.x + cell.y * grid_extent + cell.z * grid_extent * grid_extent
+            if _spawned_cells.has(key):
+                continue
+            _spawned_cells[key] = true
             if renderer.has_method("set_voxel_at"):
                 renderer.set_voxel_at(cell, water_material_id)
 

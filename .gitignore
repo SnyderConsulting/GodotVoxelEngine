@@ -12,6 +12,7 @@ godot/engine-src/.scons_env.json
 godot/engine-src/.sconsign.dblite
 godot/project/.godot/
 godot/project/.import/
+godot/*.app/
 logs/
 runlogs/
 references/The-Powder-Toy/

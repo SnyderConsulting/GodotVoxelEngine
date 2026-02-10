@@ -49,6 +49,8 @@ func _late_init() -> void:
         call_deferred("_late_init")
         return
     if _renderer != null:
+        # Prevent a few frames of sim from running on an empty/uninitialized scenario.
+        _renderer.sim_enabled = false
         _renderer.sim_mode = 1
     _build_board()
     _apply_entries()
@@ -61,6 +63,9 @@ func _late_init() -> void:
 
     # Auto-spawn one sand voxel for debug visibility.
     _spawn_sand()
+
+    if _renderer != null:
+        _renderer.sim_enabled = true
 
 func _process(_delta: float) -> void:
     if Input.is_action_just_pressed("ui_cancel"):

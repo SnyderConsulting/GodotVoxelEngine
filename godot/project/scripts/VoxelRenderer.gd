@@ -70,6 +70,12 @@ var _mpm_grid_to_atlas_shader_rid: RID
 var _mpm_grid_to_atlas_pipeline_rid: RID
 var _mpm_particles_to_atlas_shader_rid: RID
 var _mpm_particles_to_atlas_pipeline_rid: RID
+var _mpm_sand_occ_shader_rid: RID
+var _mpm_sand_occ_pipeline_rid: RID
+var _mpm_water_occ_shader_rid: RID
+var _mpm_water_occ_pipeline_rid: RID
+var _mpm_cell_claim_shader_rid: RID
+var _mpm_cell_claim_pipeline_rid: RID
 var _mpm_build_rigid_map_shader_rid: RID
 var _mpm_build_rigid_map_pipeline_rid: RID
 var _mpm_update_bonds_shader_rid: RID
@@ -123,8 +129,12 @@ var _mpm_meta_rid: RID
 var _mpm_particle_count_rid: RID
 var _mpm_grid_accum_rid: RID
 var _mpm_grid_vel_rid: RID
+var _mpm_sand_occ_rid: RID
+var _mpm_water_occ_rid: RID
+var _mpm_cell_claim_rid: RID
 var _mpm_rigid_map_rid: RID
 var _mpm_cell_pos_rid: RID
+var _mpm_particle_render_cell_rid: RID
 var _mpm_labels_a_rid: RID
 var _mpm_labels_b_rid: RID
 var _mpm_island_mass_mom_rid: RID
@@ -158,6 +168,12 @@ var _mpm_grid_to_atlas_uniform_set_a: RID
 var _mpm_grid_to_atlas_uniform_set_b: RID
 var _mpm_particles_to_atlas_uniform_set_a: RID
 var _mpm_particles_to_atlas_uniform_set_b: RID
+var _mpm_sand_occ_set_a: RID
+var _mpm_sand_occ_set_b: RID
+var _mpm_water_occ_set_a: RID
+var _mpm_water_occ_set_b: RID
+var _mpm_cell_claim_set_a: RID
+var _mpm_cell_claim_set_b: RID
 var _mpm_rigid_map_set_a: RID
 var _mpm_rigid_map_set_b: RID
 var _mpm_update_bonds_set_a: RID
@@ -218,6 +234,8 @@ var _material_mass_by_id: Dictionary = {}
 var mpm_last_stats_frame: int = 0
 var mpm_last_stats_raw: PackedInt32Array = PackedInt32Array()
 var mpm_last_stats: Dictionary = {}
+# Tracks per-particle render-cell assignment across frames to quantify voxelization churn (flicker/teleport).
+var _debug_render_cell_prev_keys: PackedInt32Array = PackedInt32Array()
 
 func _diag(msg: String) -> void:
     if !diag_enabled:
@@ -541,6 +559,66 @@ func _init_render_resources() -> void:
                 _mpm_particles_to_atlas_pipeline_rid = _rd.compute_pipeline_create(_mpm_particles_to_atlas_shader_rid)
                 if !_mpm_particles_to_atlas_pipeline_rid.is_valid():
                     push_error("Failed to create MPM particles_to_atlas pipeline.")
+
+    _mpm_sand_occ_shader_rid = RID()
+    _mpm_sand_occ_pipeline_rid = RID()
+    var mpm_sand_occ_text := FileAccess.get_file_as_string("res://shaders/mpm_build_sand_occ.glsl")
+    if !mpm_sand_occ_text.is_empty():
+        var mpm_sand_occ_source := RDShaderSource.new()
+        mpm_sand_occ_source.language = RenderingDevice.SHADER_LANGUAGE_GLSL
+        mpm_sand_occ_source.set_stage_source(RenderingDevice.SHADER_STAGE_COMPUTE, mpm_sand_occ_text)
+        var mpm_sand_occ_spirv := _rd.shader_compile_spirv_from_source(mpm_sand_occ_source)
+        var mpm_sand_occ_error := mpm_sand_occ_spirv.get_stage_compile_error(RenderingDevice.SHADER_STAGE_COMPUTE)
+        if mpm_sand_occ_error != "":
+            push_error("MPM sand_occ shader compile error: %s" % mpm_sand_occ_error)
+        else:
+            _mpm_sand_occ_shader_rid = _rd.shader_create_from_spirv(mpm_sand_occ_spirv)
+            if !_mpm_sand_occ_shader_rid.is_valid():
+                push_error("Failed to create MPM sand_occ shader.")
+            else:
+                _mpm_sand_occ_pipeline_rid = _rd.compute_pipeline_create(_mpm_sand_occ_shader_rid)
+                if !_mpm_sand_occ_pipeline_rid.is_valid():
+                    push_error("Failed to create MPM sand_occ pipeline.")
+
+    _mpm_water_occ_shader_rid = RID()
+    _mpm_water_occ_pipeline_rid = RID()
+    var mpm_water_occ_text := FileAccess.get_file_as_string("res://shaders/mpm_build_water_occ.glsl")
+    if !mpm_water_occ_text.is_empty():
+        var mpm_water_occ_source := RDShaderSource.new()
+        mpm_water_occ_source.language = RenderingDevice.SHADER_LANGUAGE_GLSL
+        mpm_water_occ_source.set_stage_source(RenderingDevice.SHADER_STAGE_COMPUTE, mpm_water_occ_text)
+        var mpm_water_occ_spirv := _rd.shader_compile_spirv_from_source(mpm_water_occ_source)
+        var mpm_water_occ_error := mpm_water_occ_spirv.get_stage_compile_error(RenderingDevice.SHADER_STAGE_COMPUTE)
+        if mpm_water_occ_error != "":
+            push_error("MPM water_occ shader compile error: %s" % mpm_water_occ_error)
+        else:
+            _mpm_water_occ_shader_rid = _rd.shader_create_from_spirv(mpm_water_occ_spirv)
+            if !_mpm_water_occ_shader_rid.is_valid():
+                push_error("Failed to create MPM water_occ shader.")
+            else:
+                _mpm_water_occ_pipeline_rid = _rd.compute_pipeline_create(_mpm_water_occ_shader_rid)
+                if !_mpm_water_occ_pipeline_rid.is_valid():
+                    push_error("Failed to create MPM water_occ pipeline.")
+
+    _mpm_cell_claim_shader_rid = RID()
+    _mpm_cell_claim_pipeline_rid = RID()
+    var mpm_cell_claim_text := FileAccess.get_file_as_string("res://shaders/mpm_build_cell_claim.glsl")
+    if !mpm_cell_claim_text.is_empty():
+        var mpm_cell_claim_source := RDShaderSource.new()
+        mpm_cell_claim_source.language = RenderingDevice.SHADER_LANGUAGE_GLSL
+        mpm_cell_claim_source.set_stage_source(RenderingDevice.SHADER_STAGE_COMPUTE, mpm_cell_claim_text)
+        var mpm_cell_claim_spirv := _rd.shader_compile_spirv_from_source(mpm_cell_claim_source)
+        var mpm_cell_claim_error := mpm_cell_claim_spirv.get_stage_compile_error(RenderingDevice.SHADER_STAGE_COMPUTE)
+        if mpm_cell_claim_error != "":
+            push_error("MPM cell_claim shader compile error: %s" % mpm_cell_claim_error)
+        else:
+            _mpm_cell_claim_shader_rid = _rd.shader_create_from_spirv(mpm_cell_claim_spirv)
+            if !_mpm_cell_claim_shader_rid.is_valid():
+                push_error("Failed to create MPM cell_claim shader.")
+            else:
+                _mpm_cell_claim_pipeline_rid = _rd.compute_pipeline_create(_mpm_cell_claim_shader_rid)
+                if !_mpm_cell_claim_pipeline_rid.is_valid():
+                    push_error("Failed to create MPM cell_claim pipeline.")
 
     _mpm_build_rigid_map_shader_rid = RID()
     _mpm_build_rigid_map_pipeline_rid = RID()
@@ -920,6 +998,31 @@ func _init_render_resources() -> void:
     _rd.buffer_clear(_mpm_grid_accum_rid, 0, grid_bytes)
     _rd.buffer_clear(_mpm_grid_vel_rid, 0, grid_bytes)
 
+    # Coarse sand occupancy field (used to keep water from interpenetrating sand at voxel scale).
+    var sand_occ_bytes := total_cells * 4
+    _mpm_sand_occ_rid = _rd.storage_buffer_create(sand_occ_bytes)
+    if !_mpm_sand_occ_rid.is_valid():
+        push_error("Failed to create MPM sand occupancy buffer.")
+        return
+    _rd.buffer_clear(_mpm_sand_occ_rid, 0, sand_occ_bytes)
+
+    # Coarse water occupancy field (used to keep sand from interpenetrating water at voxel scale).
+    var water_occ_bytes := total_cells * 4
+    _mpm_water_occ_rid = _rd.storage_buffer_create(water_occ_bytes)
+    if !_mpm_water_occ_rid.is_valid():
+        push_error("Failed to create MPM water occupancy buffer.")
+        return
+    _rd.buffer_clear(_mpm_water_occ_rid, 0, water_occ_bytes)
+
+    # Per-cell particle claim field (particle_index + 1). Used to keep voxel counts conserved by
+    # enforcing 1 particle per BCC cell in the simulation (instead of only during rendering).
+    var claim_bytes := total_cells * 4
+    _mpm_cell_claim_rid = _rd.storage_buffer_create(claim_bytes)
+    if !_mpm_cell_claim_rid.is_valid():
+        push_error("Failed to create MPM cell-claim buffer.")
+        return
+    _rd.buffer_clear(_mpm_cell_claim_rid, 0, claim_bytes)
+
     # MPM rigid/island/fracture buffers.
     var rigid_map_bytes := total_cells * 4
     _mpm_rigid_map_rid = _rd.storage_buffer_create(rigid_map_bytes)
@@ -934,6 +1037,13 @@ func _init_render_resources() -> void:
         push_error("Failed to create MPM cell position buffer.")
         return
     _rd.buffer_clear(_mpm_cell_pos_rid, 0, cell_pos_bytes)
+
+    var render_cell_bytes := max_p * 16
+    _mpm_particle_render_cell_rid = _rd.storage_buffer_create(render_cell_bytes)
+    if !_mpm_particle_render_cell_rid.is_valid():
+        push_error("Failed to create MPM particle render-cell buffer.")
+        return
+    _rd.buffer_clear(_mpm_particle_render_cell_rid, 0, render_cell_bytes)
 
     var labels_bytes := max_p * 4
     _mpm_labels_a_rid = _rd.storage_buffer_create(labels_bytes)
@@ -1505,6 +1615,18 @@ func _init_render_resources() -> void:
         mpm_g2p_static.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
         mpm_g2p_static.binding = 13
         mpm_g2p_static.add_id(_atlas_static_rid)
+        var mpm_g2p_sand_occ := RDUniform.new()
+        mpm_g2p_sand_occ.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_g2p_sand_occ.binding = 14
+        mpm_g2p_sand_occ.add_id(_mpm_sand_occ_rid)
+        var mpm_g2p_water_occ := RDUniform.new()
+        mpm_g2p_water_occ.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_g2p_water_occ.binding = 15
+        mpm_g2p_water_occ.add_id(_mpm_water_occ_rid)
+        var mpm_g2p_claim := RDUniform.new()
+        mpm_g2p_claim.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_g2p_claim.binding = 16
+        mpm_g2p_claim.add_id(_mpm_cell_claim_rid)
 
         var mpm_pos_in_a := RDUniform.new()
         mpm_pos_in_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
@@ -1539,7 +1661,7 @@ func _init_render_resources() -> void:
         mpm_f_out_b.binding = 9
         mpm_f_out_b.add_id(_mpm_f_b_rid)
         _mpm_g2p_uniform_set_ab = _rd.uniform_set_create(
-            [mpm_g2p_ubo, mpm_g2p_indirection, mpm_pos_in_a, mpm_vel_in_a, mpm_c_in_a, mpm_f_in_a, mpm_pos_out_b, mpm_vel_out_b, mpm_c_out_b, mpm_f_out_b, mpm_g2p_meta, mpm_g2p_count, mpm_g2p_grid_vel, mpm_g2p_static],
+            [mpm_g2p_ubo, mpm_g2p_indirection, mpm_pos_in_a, mpm_vel_in_a, mpm_c_in_a, mpm_f_in_a, mpm_pos_out_b, mpm_vel_out_b, mpm_c_out_b, mpm_f_out_b, mpm_g2p_meta, mpm_g2p_count, mpm_g2p_grid_vel, mpm_g2p_static, mpm_g2p_sand_occ, mpm_g2p_water_occ, mpm_g2p_claim],
             _mpm_g2p_advect_shader_rid,
             0
         )
@@ -1577,7 +1699,7 @@ func _init_render_resources() -> void:
         mpm_f_out_a.binding = 9
         mpm_f_out_a.add_id(_mpm_f_a_rid)
         _mpm_g2p_uniform_set_ba = _rd.uniform_set_create(
-            [mpm_g2p_ubo, mpm_g2p_indirection, mpm_pos_in_b, mpm_vel_in_b, mpm_c_in_b, mpm_f_in_b, mpm_pos_out_a, mpm_vel_out_a, mpm_c_out_a, mpm_f_out_a, mpm_g2p_meta, mpm_g2p_count, mpm_g2p_grid_vel, mpm_g2p_static],
+            [mpm_g2p_ubo, mpm_g2p_indirection, mpm_pos_in_b, mpm_vel_in_b, mpm_c_in_b, mpm_f_in_b, mpm_pos_out_a, mpm_vel_out_a, mpm_c_out_a, mpm_f_out_a, mpm_g2p_meta, mpm_g2p_count, mpm_g2p_grid_vel, mpm_g2p_static, mpm_g2p_sand_occ, mpm_g2p_water_occ, mpm_g2p_claim],
             _mpm_g2p_advect_shader_rid,
             0
         )
@@ -1616,6 +1738,108 @@ func _init_render_resources() -> void:
             0
         )
 
+    if _mpm_sand_occ_shader_rid.is_valid():
+        var so_ubo := RDUniform.new()
+        so_ubo.uniform_type = RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER
+        so_ubo.binding = 0
+        so_ubo.add_id(_ubo_rid)
+        var so_ind := RDUniform.new()
+        so_ind.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        so_ind.binding = 1
+        so_ind.add_id(_indirection_rid)
+        var so_meta := RDUniform.new()
+        so_meta.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        so_meta.binding = 3
+        so_meta.add_id(_mpm_meta_rid)
+        var so_count := RDUniform.new()
+        so_count.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        so_count.binding = 4
+        so_count.add_id(_mpm_particle_count_rid)
+        var so_out := RDUniform.new()
+        so_out.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        so_out.binding = 5
+        so_out.add_id(_mpm_sand_occ_rid)
+
+        var so_pos_a := RDUniform.new()
+        so_pos_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        so_pos_a.binding = 2
+        so_pos_a.add_id(_mpm_pos_mass_a_rid)
+        _mpm_sand_occ_set_a = _rd.uniform_set_create([so_ubo, so_ind, so_pos_a, so_meta, so_count, so_out], _mpm_sand_occ_shader_rid, 0)
+
+        var so_pos_b := RDUniform.new()
+        so_pos_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        so_pos_b.binding = 2
+        so_pos_b.add_id(_mpm_pos_mass_b_rid)
+        _mpm_sand_occ_set_b = _rd.uniform_set_create([so_ubo, so_ind, so_pos_b, so_meta, so_count, so_out], _mpm_sand_occ_shader_rid, 0)
+
+    if _mpm_water_occ_shader_rid.is_valid():
+        var wo_ubo := RDUniform.new()
+        wo_ubo.uniform_type = RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER
+        wo_ubo.binding = 0
+        wo_ubo.add_id(_ubo_rid)
+        var wo_ind := RDUniform.new()
+        wo_ind.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        wo_ind.binding = 1
+        wo_ind.add_id(_indirection_rid)
+        var wo_meta := RDUniform.new()
+        wo_meta.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        wo_meta.binding = 3
+        wo_meta.add_id(_mpm_meta_rid)
+        var wo_count := RDUniform.new()
+        wo_count.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        wo_count.binding = 4
+        wo_count.add_id(_mpm_particle_count_rid)
+        var wo_out := RDUniform.new()
+        wo_out.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        wo_out.binding = 5
+        wo_out.add_id(_mpm_water_occ_rid)
+
+        var wo_pos_a := RDUniform.new()
+        wo_pos_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        wo_pos_a.binding = 2
+        wo_pos_a.add_id(_mpm_pos_mass_a_rid)
+        _mpm_water_occ_set_a = _rd.uniform_set_create([wo_ubo, wo_ind, wo_pos_a, wo_meta, wo_count, wo_out], _mpm_water_occ_shader_rid, 0)
+
+        var wo_pos_b := RDUniform.new()
+        wo_pos_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        wo_pos_b.binding = 2
+        wo_pos_b.add_id(_mpm_pos_mass_b_rid)
+        _mpm_water_occ_set_b = _rd.uniform_set_create([wo_ubo, wo_ind, wo_pos_b, wo_meta, wo_count, wo_out], _mpm_water_occ_shader_rid, 0)
+
+    if _mpm_cell_claim_shader_rid.is_valid():
+        var cc_ubo := RDUniform.new()
+        cc_ubo.uniform_type = RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER
+        cc_ubo.binding = 0
+        cc_ubo.add_id(_ubo_rid)
+        var cc_ind := RDUniform.new()
+        cc_ind.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        cc_ind.binding = 1
+        cc_ind.add_id(_indirection_rid)
+        var cc_meta := RDUniform.new()
+        cc_meta.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        cc_meta.binding = 3
+        cc_meta.add_id(_mpm_meta_rid)
+        var cc_count := RDUniform.new()
+        cc_count.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        cc_count.binding = 4
+        cc_count.add_id(_mpm_particle_count_rid)
+        var cc_out := RDUniform.new()
+        cc_out.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        cc_out.binding = 5
+        cc_out.add_id(_mpm_cell_claim_rid)
+
+        var cc_pos_a := RDUniform.new()
+        cc_pos_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        cc_pos_a.binding = 2
+        cc_pos_a.add_id(_mpm_pos_mass_a_rid)
+        _mpm_cell_claim_set_a = _rd.uniform_set_create([cc_ubo, cc_ind, cc_pos_a, cc_meta, cc_count, cc_out], _mpm_cell_claim_shader_rid, 0)
+
+        var cc_pos_b := RDUniform.new()
+        cc_pos_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        cc_pos_b.binding = 2
+        cc_pos_b.add_id(_mpm_pos_mass_b_rid)
+        _mpm_cell_claim_set_b = _rd.uniform_set_create([cc_ubo, cc_ind, cc_pos_b, cc_meta, cc_count, cc_out], _mpm_cell_claim_shader_rid, 0)
+
     if _mpm_particles_to_atlas_shader_rid.is_valid():
         var mpm_pta_ubo := RDUniform.new()
         mpm_pta_ubo.uniform_type = RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER
@@ -1637,6 +1861,10 @@ func _init_render_resources() -> void:
         mpm_pta_cell_pos.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
         mpm_pta_cell_pos.binding = 6
         mpm_pta_cell_pos.add_id(_mpm_cell_pos_rid)
+        var mpm_pta_render_cell := RDUniform.new()
+        mpm_pta_render_cell.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_pta_render_cell.binding = 7
+        mpm_pta_render_cell.add_id(_mpm_particle_render_cell_rid)
 
         var mpm_pta_pos_a := RDUniform.new()
         mpm_pta_pos_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
@@ -1647,7 +1875,7 @@ func _init_render_resources() -> void:
         mpm_pta_out_a.binding = 5
         mpm_pta_out_a.add_id(_atlas_a_rid)
         _mpm_particles_to_atlas_uniform_set_a = _rd.uniform_set_create(
-            [mpm_pta_ubo, mpm_pta_ind, mpm_pta_pos_a, mpm_pta_meta, mpm_pta_count, mpm_pta_out_a, mpm_pta_cell_pos],
+            [mpm_pta_ubo, mpm_pta_ind, mpm_pta_pos_a, mpm_pta_meta, mpm_pta_count, mpm_pta_out_a, mpm_pta_cell_pos, mpm_pta_render_cell],
             _mpm_particles_to_atlas_shader_rid,
             0
         )
@@ -1661,7 +1889,7 @@ func _init_render_resources() -> void:
         mpm_pta_out_b.binding = 5
         mpm_pta_out_b.add_id(_atlas_b_rid)
         _mpm_particles_to_atlas_uniform_set_b = _rd.uniform_set_create(
-            [mpm_pta_ubo, mpm_pta_ind, mpm_pta_pos_b, mpm_pta_meta, mpm_pta_count, mpm_pta_out_b, mpm_pta_cell_pos],
+            [mpm_pta_ubo, mpm_pta_ind, mpm_pta_pos_b, mpm_pta_meta, mpm_pta_count, mpm_pta_out_b, mpm_pta_cell_pos, mpm_pta_render_cell],
             _mpm_particles_to_atlas_shader_rid,
             0
         )
@@ -2366,6 +2594,27 @@ func _dispatch_mpm() -> void:
                 _rd.compute_list_dispatch(list_iap, particle_groups, 1, 1)
                 _rd.compute_list_end()
 
+        # Occupancy fields (voxel-scale coupling; used to keep phases impermeable).
+        if _mpm_sand_occ_pipeline_rid.is_valid() and _mpm_sand_occ_rid.is_valid():
+            _rd.buffer_clear(_mpm_sand_occ_rid, 0, _atlas_bytes)
+            var so_set := _mpm_sand_occ_set_a if _mpm_particles_use_a else _mpm_sand_occ_set_b
+            if so_set.is_valid():
+                var list_so := _rd.compute_list_begin()
+                _rd.compute_list_bind_compute_pipeline(list_so, _mpm_sand_occ_pipeline_rid)
+                _rd.compute_list_bind_uniform_set(list_so, so_set, 0)
+                _rd.compute_list_dispatch(list_so, particle_groups, 1, 1)
+                _rd.compute_list_end()
+
+        if _mpm_water_occ_pipeline_rid.is_valid() and _mpm_water_occ_rid.is_valid():
+            _rd.buffer_clear(_mpm_water_occ_rid, 0, _atlas_bytes)
+            var wo_set := _mpm_water_occ_set_a if _mpm_particles_use_a else _mpm_water_occ_set_b
+            if wo_set.is_valid():
+                var list_wo := _rd.compute_list_begin()
+                _rd.compute_list_bind_compute_pipeline(list_wo, _mpm_water_occ_pipeline_rid)
+                _rd.compute_list_bind_uniform_set(list_wo, wo_set, 0)
+                _rd.compute_list_dispatch(list_wo, particle_groups, 1, 1)
+                _rd.compute_list_end()
+
         if _mpm_grid_accum_rid.is_valid():
             _rd.buffer_clear(_mpm_grid_accum_rid, 0, grid_bytes)
         if _mpm_grid_vel_rid.is_valid():
@@ -2384,6 +2633,18 @@ func _dispatch_mpm() -> void:
         _rd.compute_list_bind_uniform_set(list_grid, _mpm_grid_uniform_set, 0)
         _rd.compute_list_dispatch(list_grid, grid_groups, 1, 1)
         _rd.compute_list_end()
+
+        # Discrete voxel projection: build a per-cell occupancy/claim field from the current particle
+        # positions so g2p can keep 1 particle per BCC cell (prevents visual "voxel compression").
+        if _mpm_cell_claim_pipeline_rid.is_valid() and _mpm_cell_claim_rid.is_valid():
+            _rd.buffer_clear(_mpm_cell_claim_rid, 0, _atlas_bytes)
+            var cc_set := _mpm_cell_claim_set_a if _mpm_particles_use_a else _mpm_cell_claim_set_b
+            if cc_set.is_valid():
+                var list_cc := _rd.compute_list_begin()
+                _rd.compute_list_bind_compute_pipeline(list_cc, _mpm_cell_claim_pipeline_rid)
+                _rd.compute_list_bind_uniform_set(list_cc, cc_set, 0)
+                _rd.compute_list_dispatch(list_cc, particle_groups, 1, 1)
+                _rd.compute_list_end()
 
         var g2p_set := _mpm_g2p_uniform_set_ab if _mpm_particles_use_a else _mpm_g2p_uniform_set_ba
         if g2p_set.is_valid():
@@ -3045,7 +3306,10 @@ func set_voxel_entries_mpm(entries: Array) -> void:
         vel_vol.append(0.0)
         vel_vol.append(0.0)
         vel_vol.append(0.0)
-        vel_vol.append(1.0) # volume
+        # BCC lattice points are 2 units apart along axes in grid space; the Voronoi cell volume is ~4.
+        # Using a matching particle volume reduces the "voxel compression" artifact (too many particles
+        # collapsing into too few BCC cells).
+        vel_vol.append(4.0) # volume
         # meta uvec4 packed as int32
         meta.append(mat_id)
         meta.append(flags) # flags (bitmask; e.g., static bedrock)
@@ -3091,6 +3355,10 @@ func set_voxel_entries_mpm(entries: Array) -> void:
         var count_bytes := PackedInt32Array([count]).to_byte_array()
         _rd.buffer_update(_mpm_particle_count_rid, 0, count_bytes.size(), count_bytes)
     _mpm_particle_count_cpu = count
+
+    var render_cell_bytes := max_p * 16
+    if _mpm_particle_render_cell_rid.is_valid():
+        _rd.buffer_clear(_mpm_particle_render_cell_rid, 0, render_cell_bytes)
 
     # Reset deformation state and initialize F=I on the GPU (C=0).
     var particle_mat3_bytes: int = max_p * 48
@@ -3241,6 +3509,210 @@ func _debug_render_thread_ping(frame_id: int) -> void:
         frame_id,
         str(main_thread),
         str(rd_valid)
+    ])
+
+func debug_mpm_render_churn(material_id: int, every: int = 60) -> void:
+    # Debug helper for render-side flicker: compares each particle's claimed render cell to its prior claim
+    # and reports how many change (and by how far) between samples.
+    if _rd == null:
+        return
+    if sim_mode != 1:
+        return
+    if every < 1:
+        every = 1
+    if _debug_frame % every != 0:
+        return
+    RenderingServer.call_on_render_thread(Callable(self, "_debug_mpm_render_churn_on_render_thread").bind(
+        _debug_frame,
+        material_id
+    ))
+
+func _debug_mpm_render_churn_on_render_thread(frame_id: int, material_id: int) -> void:
+    if _rd == null:
+        return
+    if !_mpm_particle_count_rid.is_valid() or !_mpm_meta_rid.is_valid() or !_mpm_particle_render_cell_rid.is_valid():
+        return
+    var count_bytes := _rd.buffer_get_data(_mpm_particle_count_rid, 0, 4)
+    if count_bytes.size() < 4:
+        return
+    var count_vals := count_bytes.to_int32_array()
+    if count_vals.size() == 0:
+        return
+    var count := maxi(0, int(count_vals[0]))
+    if count <= 0:
+        return
+
+    var pos_rid: RID = _mpm_pos_mass_a_rid if _mpm_particles_use_a else _mpm_pos_mass_b_rid
+    var vel_rid: RID = _mpm_vel_vol_a_rid if _mpm_particles_use_a else _mpm_vel_vol_b_rid
+    if !pos_rid.is_valid() or !vel_rid.is_valid():
+        return
+
+    var bytes_per_particle := 16 # vec4 / uvec4
+    var max_bytes := count * bytes_per_particle
+    var pos_bytes := _rd.buffer_get_data(pos_rid, 0, max_bytes)
+    var vel_bytes := _rd.buffer_get_data(vel_rid, 0, max_bytes)
+    var meta_bytes := _rd.buffer_get_data(_mpm_meta_rid, 0, max_bytes)
+    var rc_bytes := _rd.buffer_get_data(_mpm_particle_render_cell_rid, 0, max_bytes)
+    if pos_bytes.size() < max_bytes or vel_bytes.size() < max_bytes or meta_bytes.size() < max_bytes or rc_bytes.size() < max_bytes:
+        return
+
+    var pos_vals := pos_bytes.to_float32_array()
+    var vel_vals := vel_bytes.to_float32_array()
+    var meta_vals := meta_bytes.to_int32_array()
+    var rc_vals := rc_bytes.to_int32_array()
+    if pos_vals.size() < count * 4 or vel_vals.size() < count * 4 or meta_vals.size() < count * 4 or rc_vals.size() < count * 4:
+        return
+
+    if _debug_render_cell_prev_keys.size() < count:
+        var old := _debug_render_cell_prev_keys.size()
+        _debug_render_cell_prev_keys.resize(count)
+        for i in range(old, count):
+            _debug_render_cell_prev_keys[i] = -1
+
+    var grid_extent: int = chunk_grid * chunk_size
+    var plane := grid_extent * grid_extent
+
+    var mat_count := 0
+    var mapped := 0
+    var changed := 0
+    var max_jump := 0
+    var mismatched := 0
+    var sum_spill := 0.0
+    var max_spill := 0.0
+    var sum_local := 0.0
+    var max_local := 0.0
+    var sum_speed := 0.0
+    var max_speed := 0.0
+
+    var base_counts := {}
+    var base_max_per_cell := 0
+
+    var pmin := Vector3(1e9, 1e9, 1e9)
+    var pmax := Vector3(-1e9, -1e9, -1e9)
+    var rmin := Vector3(1e9, 1e9, 1e9)
+    var rmax := Vector3(-1e9, -1e9, -1e9)
+
+    for i in range(count):
+        var mid := int(meta_vals[i * 4 + 0])
+        if mid != material_id:
+            continue
+        mat_count += 1
+
+        var px := float(pos_vals[i * 4 + 0])
+        var py := float(pos_vals[i * 4 + 1])
+        var pz := float(pos_vals[i * 4 + 2])
+        pmin.x = minf(pmin.x, px)
+        pmin.y = minf(pmin.y, py)
+        pmin.z = minf(pmin.z, pz)
+        pmax.x = maxf(pmax.x, px)
+        pmax.y = maxf(pmax.y, py)
+        pmax.z = maxf(pmax.z, pz)
+
+        var vx := float(vel_vals[i * 4 + 0])
+        var vy := float(vel_vals[i * 4 + 1])
+        var vz := float(vel_vals[i * 4 + 2])
+        var sp := sqrt(vx * vx + vy * vy + vz * vz)
+        sum_speed += sp
+        max_speed = maxf(max_speed, sp)
+
+        var w := int(rc_vals[i * 4 + 3])
+        if (w & int(0x80000000)) == 0:
+            continue
+        mapped += 1
+
+        var rx := int(rc_vals[i * 4 + 0])
+        var ry := int(rc_vals[i * 4 + 1])
+        var rz := int(rc_vals[i * 4 + 2])
+        rmin.x = minf(rmin.x, float(rx))
+        rmin.y = minf(rmin.y, float(ry))
+        rmin.z = minf(rmin.z, float(rz))
+        rmax.x = maxf(rmax.x, float(rx))
+        rmax.y = maxf(rmax.y, float(ry))
+        rmax.z = maxf(rmax.z, float(rz))
+
+        # Compare render-cell mapping to the particle's snapped BCC base cell.
+        # This distinguishes true "spill" (render mapping mismatch) from sub-voxel motion inside a cell.
+        var ex := int(round(px * 0.5)) * 2
+        var ey := int(round(py * 0.5)) * 2
+        var ez := int(round(pz * 0.5)) * 2
+        var ox := int(round((px - 1.0) * 0.5)) * 2 + 1
+        var oy := int(round((py - 1.0) * 0.5)) * 2 + 1
+        var oz := int(round((pz - 1.0) * 0.5)) * 2 + 1
+        var de2 := (px - float(ex)) * (px - float(ex)) + (py - float(ey)) * (py - float(ey)) + (pz - float(ez)) * (pz - float(ez))
+        var do2 := (px - float(ox)) * (px - float(ox)) + (py - float(oy)) * (py - float(oy)) + (pz - float(oz)) * (pz - float(oz))
+        var bx := ex if do2 >= de2 else ox
+        var by := ey if do2 >= de2 else oy
+        var bz := ez if do2 >= de2 else oz
+        bx = clampi(bx, 0, grid_extent - 1)
+        by = clampi(by, 0, grid_extent - 1)
+        bz = clampi(bz, 0, grid_extent - 1)
+        if !((bx & 1) == (by & 1) and (by & 1) == (bz & 1)):
+            var bx2 := clampi(bx + 1, 0, grid_extent - 1)
+            if ((bx2 & 1) == (by & 1) and (by & 1) == (bz & 1)):
+                bx = bx2
+            else:
+                var by2 := clampi(by + 1, 0, grid_extent - 1)
+                if ((bx & 1) == (by2 & 1) and (by2 & 1) == (bz & 1)):
+                    by = by2
+                else:
+                    var bz2 := clampi(bz + 1, 0, grid_extent - 1)
+                    if ((bx & 1) == (by & 1) and (by & 1) == (bz2 & 1)):
+                        bz = bz2
+
+        var local_d := Vector3(px, py, pz).distance_to(Vector3(float(bx), float(by), float(bz)))
+        sum_local += local_d
+        max_local = maxf(max_local, local_d)
+
+        var spill_d := Vector3(float(bx), float(by), float(bz)).distance_to(Vector3(float(rx), float(ry), float(rz)))
+        sum_spill += spill_d
+        max_spill = maxf(max_spill, spill_d)
+        if rx != bx or ry != by or rz != bz:
+            mismatched += 1
+
+        var bkey := bx + by * grid_extent + bz * plane
+        var bc := int(base_counts.get(bkey, 0)) + 1
+        base_counts[bkey] = bc
+        base_max_per_cell = maxi(base_max_per_cell, bc)
+
+        var key := rx + ry * grid_extent + rz * plane
+        var prev := int(_debug_render_cell_prev_keys[i])
+        if prev != -1 and prev != key:
+            changed += 1
+            var px0 := prev % grid_extent
+            var py0 := int(floor(float(prev) / float(grid_extent))) % grid_extent
+            var pz0 := int(floor(float(prev) / float(plane)))
+            var j := maxi(abs(rx - px0), maxi(abs(ry - py0), abs(rz - pz0)))
+            max_jump = maxi(max_jump, j)
+        _debug_render_cell_prev_keys[i] = key
+
+    if mat_count <= 0:
+        return
+    var avg_spill := sum_spill / float(maxi(1, mapped))
+    var avg_local := sum_local / float(maxi(1, mapped))
+    var avg_speed := sum_speed / float(mat_count)
+    var base_unique := base_counts.size()
+    var base_dupes := mat_count - base_unique
+    print("MPM render churn | frame=%d mat=%d particles=%d mapped=%d mismatched=%d base_unique=%d base_dupes=%d base_max=%d changed=%d max_jump=%d avg_spill=%.3f max_spill=%.3f avg_local=%.3f max_local=%.3f avg_speed=%.3f max_speed=%.3f p_bbox=(%.2f,%.2f,%.2f)..(%.2f,%.2f,%.2f) r_bbox=(%.0f,%.0f,%.0f)..(%.0f,%.0f,%.0f)" % [
+        frame_id,
+        material_id,
+        mat_count,
+        mapped,
+        mismatched,
+        base_unique,
+        base_dupes,
+        base_max_per_cell,
+        changed,
+        max_jump,
+        avg_spill,
+        max_spill,
+        avg_local,
+        max_local,
+        avg_speed,
+        max_speed,
+        pmin.x, pmin.y, pmin.z,
+        pmax.x, pmax.y, pmax.z,
+        rmin.x, rmin.y, rmin.z,
+        rmax.x, rmax.y, rmax.z,
     ])
 
 func debug_mpm_hourglass_metrics(
@@ -3577,7 +4049,7 @@ func _mpm_set_static_cell(cell: Vector3i, material: int) -> void:
     if _atlas_b_rid.is_valid():
         _rd.buffer_update(_atlas_b_rid, offset, bytes.size(), bytes)
 
-func mpm_spawn_cells(cells: Array, material: int, velocity: Vector3 = Vector3.ZERO, volume: float = 1.0, flags: int = 0) -> int:
+func mpm_spawn_cells(cells: Array, material: int, velocity: Vector3 = Vector3.ZERO, volume: float = 4.0, flags: int = 0) -> int:
     if _rd == null:
         return 0
     if sim_mode != 1:
@@ -3683,7 +4155,7 @@ func mpm_spawn_cells(cells: Array, material: int, velocity: Vector3 = Vector3.ZE
     return n
 
 func mpm_spawn_particle(cell: Vector3i, material: int, velocity: Vector3 = Vector3.ZERO, flags: int = 0) -> bool:
-    return mpm_spawn_cells([cell], material, velocity, 1.0, flags) > 0
+    return mpm_spawn_cells([cell], material, velocity, 4.0, flags) > 0
 
 func set_voxel_at(cell: Vector3i, material: int) -> void:
     if _rd == null:
@@ -4201,6 +4673,18 @@ func _exit_tree() -> void:
         _rd.free_rid(_mpm_particles_to_atlas_uniform_set_a)
     if _mpm_particles_to_atlas_uniform_set_b.is_valid():
         _rd.free_rid(_mpm_particles_to_atlas_uniform_set_b)
+    if _mpm_sand_occ_set_a.is_valid():
+        _rd.free_rid(_mpm_sand_occ_set_a)
+    if _mpm_sand_occ_set_b.is_valid():
+        _rd.free_rid(_mpm_sand_occ_set_b)
+    if _mpm_water_occ_set_a.is_valid():
+        _rd.free_rid(_mpm_water_occ_set_a)
+    if _mpm_water_occ_set_b.is_valid():
+        _rd.free_rid(_mpm_water_occ_set_b)
+    if _mpm_cell_claim_set_a.is_valid():
+        _rd.free_rid(_mpm_cell_claim_set_a)
+    if _mpm_cell_claim_set_b.is_valid():
+        _rd.free_rid(_mpm_cell_claim_set_b)
     if _mpm_rigid_map_set_a.is_valid():
         _rd.free_rid(_mpm_rigid_map_set_a)
     if _mpm_rigid_map_set_b.is_valid():
@@ -4321,10 +4805,18 @@ func _exit_tree() -> void:
         _rd.free_rid(_mpm_grid_accum_rid)
     if _mpm_grid_vel_rid.is_valid():
         _rd.free_rid(_mpm_grid_vel_rid)
+    if _mpm_sand_occ_rid.is_valid():
+        _rd.free_rid(_mpm_sand_occ_rid)
+    if _mpm_water_occ_rid.is_valid():
+        _rd.free_rid(_mpm_water_occ_rid)
+    if _mpm_cell_claim_rid.is_valid():
+        _rd.free_rid(_mpm_cell_claim_rid)
     if _mpm_rigid_map_rid.is_valid():
         _rd.free_rid(_mpm_rigid_map_rid)
     if _mpm_cell_pos_rid.is_valid():
         _rd.free_rid(_mpm_cell_pos_rid)
+    if _mpm_particle_render_cell_rid.is_valid():
+        _rd.free_rid(_mpm_particle_render_cell_rid)
     if _mpm_labels_a_rid.is_valid():
         _rd.free_rid(_mpm_labels_a_rid)
     if _mpm_labels_b_rid.is_valid():
@@ -4395,6 +4887,18 @@ func _exit_tree() -> void:
         _rd.free_rid(_mpm_particles_to_atlas_pipeline_rid)
     if _mpm_particles_to_atlas_shader_rid.is_valid():
         _rd.free_rid(_mpm_particles_to_atlas_shader_rid)
+    if _mpm_sand_occ_pipeline_rid.is_valid():
+        _rd.free_rid(_mpm_sand_occ_pipeline_rid)
+    if _mpm_sand_occ_shader_rid.is_valid():
+        _rd.free_rid(_mpm_sand_occ_shader_rid)
+    if _mpm_water_occ_pipeline_rid.is_valid():
+        _rd.free_rid(_mpm_water_occ_pipeline_rid)
+    if _mpm_water_occ_shader_rid.is_valid():
+        _rd.free_rid(_mpm_water_occ_shader_rid)
+    if _mpm_cell_claim_pipeline_rid.is_valid():
+        _rd.free_rid(_mpm_cell_claim_pipeline_rid)
+    if _mpm_cell_claim_shader_rid.is_valid():
+        _rd.free_rid(_mpm_cell_claim_shader_rid)
     if _mpm_build_rigid_map_pipeline_rid.is_valid():
         _rd.free_rid(_mpm_build_rigid_map_pipeline_rid)
     if _mpm_build_rigid_map_shader_rid.is_valid():

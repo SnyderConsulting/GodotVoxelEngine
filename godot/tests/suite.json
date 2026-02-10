@@ -71,10 +71,6 @@
       "scene": "res://scenes/JellyTest.tscn",
       "run_duration_s": 6.0,
       "sample_points_s": [1.0, 3.0, 6.0],
-      "renderer_overrides": {
-        "mpm_gravity_strength": 0.0,
-        "mpm_fracture_enabled": false
-      },
       "reset": {
         "node_name": "JellyController",
         "method": "_build_scene"

@@ -364,7 +364,17 @@ def main() -> int:
     cfg_path = Path(args.config).resolve()
     cfg = json.loads(cfg_path.read_text("utf-8"))
 
-    engine = Path(args.engine) if args.engine else (repo_root / cfg.get("engine", "godot/engine-src/bin/godot.macos.editor.x86_64"))
+    if args.engine:
+        engine = Path(args.engine)
+    else:
+        # suite.json historically points at an x86_64 editor binary for older Intel Macs.
+        # On Apple Silicon, we expect an arm64 editor build.
+        cfg_engine = str(cfg.get("engine", "godot/engine-src/bin/godot.macos.editor.x86_64"))
+        engine = repo_root / cfg_engine
+        if not engine.exists() and sys.platform == "darwin":
+            arm64 = repo_root / "godot/engine-src/bin/godot.macos.editor.arm64"
+            if arm64.exists():
+                engine = arm64
     project_dir = Path(args.project) if args.project else (repo_root / cfg.get("project", "godot/project"))
     engine = engine.resolve()
     project_dir = project_dir.resolve()

@@ -89,10 +89,9 @@ vec2 lame_for_material(uint material_id) {
     // Tuned for grid-space units and dt ~= 1/120..1/240 with substeps.
     // x = mu (shear), y = lambda (bulk).
     if (material_id == 1u) { // sand
-        // Sand: keep some shear response, but use a much stiffer bulk term so grains don't
-        // numerically "compress" into a tiny volume (which looks like mass loss in voxel render).
-        // Velocity clamps + substeps keep this stable.
-        return vec2(22.0, 90.0);
+        // Sand: moderate shear with a stiff bulk response so grains resist numerical compression
+        // (helps keep one-particle-per-voxel behavior in the UI).
+        return vec2(25.0, 110.0);
     }
     if (material_id == 2u) { // water (fluid-ish)
         // Fluid: no shear, but relatively stiff bulk to reduce compressibility artifacts.
@@ -287,6 +286,7 @@ void main() {
         }
 
         vec3 xi = vec3(cell);
+        // Affine (APIC/MLS-MPM) transfer. Per-material scaling is baked into C in g2p.
         vec3 v_apic = v + C * (xi - x);
         vec3 momentum = (mass * wi) * v_apic;
 

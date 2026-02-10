@@ -38,6 +38,7 @@ chunk_grid = 8
 sim_enabled = true
 sim_every = 1
 sim_mode = 1
+mpm_max_particles = 120000
 mpm_gravity_strength = 50.0
 debug_logging = false
 debug_log_every = 60
@@ -50,6 +51,7 @@ quad_path = NodePath("../OrbitRig/Camera3D/RaymarchQuad")
 overlay_path = NodePath("../HUD/InfoLabel")
 sand_button_path = NodePath("../HUD/Controls/Panel/Margin/VBox/SandButton")
 water_button_path = NodePath("../HUD/Controls/Panel/Margin/VBox/WaterButton")
+material_dropdown_path = NodePath("../HUD/Controls/Panel/Margin/VBox/MaterialDropdown")
 brush_slider_path = NodePath("../HUD/Controls/Panel/Margin/VBox/BrushSize/Slider")
 brush_value_path = NodePath("../HUD/Controls/Panel/Margin/VBox/BrushSize/Value")
 debug_logging = false
@@ -96,6 +98,12 @@ offset_bottom = -8.0
 size_flags_horizontal = 3
 size_flags_vertical = 3
 theme_override_constants/separation = 6
+
+[node name="MaterialLabel" type="Label" parent="HUD/Controls/Panel/Margin/VBox"]
+text = "Material"
+
+[node name="MaterialDropdown" type="OptionButton" parent="HUD/Controls/Panel/Margin/VBox"]
+size_flags_horizontal = 3
 
 [node name="SandButton" type="Button" parent="HUD/Controls/Panel/Margin/VBox"]
 text = "Sand"
