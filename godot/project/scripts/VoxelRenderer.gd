@@ -40,6 +40,8 @@ extends Node
 @export var mpm_stats_every: int = 30
 @export var mpm_pressure_enabled: bool = true
 @export var mpm_pressure_iters: int = 6
+@export var mpm_drag_strength: float = 20.0
+@export var mpm_water_vel_smooth: float = 0.35
 @export var diag_enabled: bool = false
 @export var diag_every: int = 60
 @export var diag_log_buffers: bool = false
@@ -72,6 +74,10 @@ var _mpm_pressure_jacobi_shader_rid: RID
 var _mpm_pressure_jacobi_pipeline_rid: RID
 var _mpm_pressure_apply_shader_rid: RID
 var _mpm_pressure_apply_pipeline_rid: RID
+var _mpm_phase_update_shader_rid: RID
+var _mpm_phase_update_pipeline_rid: RID
+var _mpm_water_vel_smooth_shader_rid: RID
+var _mpm_water_vel_smooth_pipeline_rid: RID
 var _mpm_g2p_advect_shader_rid: RID
 var _mpm_g2p_advect_pipeline_rid: RID
 var _mpm_grid_to_atlas_shader_rid: RID
@@ -136,8 +142,13 @@ var _mpm_f_b_rid: RID
 var _mpm_meta_rid: RID
 var _mpm_particle_count_rid: RID
 var _mpm_grid_accum_rid: RID
+var _mpm_grid_accum_sand_rid: RID
+var _mpm_grid_accum_water_rid: RID
 var _mpm_grid_vel_rid: RID
 var _mpm_grid_vel_proj_rid: RID
+var _mpm_grid_vel_sand_rid: RID
+var _mpm_grid_vel_water_rid: RID
+var _mpm_grid_vel_water_smooth_rid: RID
 var _mpm_pressure_a_rid: RID
 var _mpm_pressure_b_rid: RID
 var _mpm_divergence_rid: RID
@@ -179,6 +190,8 @@ var _mpm_pressure_jacobi_set_ab: RID
 var _mpm_pressure_jacobi_set_ba: RID
 var _mpm_pressure_apply_set_a: RID
 var _mpm_pressure_apply_set_b: RID
+var _mpm_phase_update_set: RID
+var _mpm_water_vel_smooth_set: RID
 var _mpm_g2p_uniform_set_ab: RID
 var _mpm_g2p_uniform_set_ba: RID
 var _mpm_grid_to_atlas_uniform_set_a: RID
@@ -294,6 +307,83 @@ func mpm_get_last_discrete_audit_frame() -> int:
 
 func mpm_get_last_discrete_audit() -> Dictionary:
     return mpm_last_discrete_audit
+
+func mpm_get_material_column_metrics(mat_id: int) -> Dictionary:
+    # Automation/test helper: measure how "flat" a material surface is by scanning the render atlas and
+    # recording the top-most filled voxel per (x,z) column.
+    # This catches regressions where water behaves like sand (piles up) even if particle speed is low.
+    var out := {
+        "mat_id": mat_id,
+        "columns": 0,
+        "min_h": -1,
+        "max_h": -1,
+        "avg_h": 0.0,
+        "var_h": 0.0,
+        "range_h": 0
+    }
+    if _rd == null or _indirection_cpu.is_empty():
+        return out
+    var atlas_rid := _current_atlas_rid()
+    if !atlas_rid.is_valid():
+        return out
+    var atlas_bytes := _rd.buffer_get_data(atlas_rid)
+    var atlas_vals := atlas_bytes.to_int32_array()
+    if atlas_vals.size() == 0:
+        return out
+
+    var grid_extent: int = chunk_grid * chunk_size
+    var min_h: int = 2147483647
+    var max_h: int = -2147483647
+    var sum_h := 0.0
+    var count := 0
+
+    for z in range(grid_extent):
+        for x in range(grid_extent):
+            var h := -1
+            for y in range(grid_extent - 1, -1, -1):
+                if !_bcc_parity(Vector3i(x, y, z)):
+                    continue
+                var idx := _atlas_index_for_cell(Vector3i(x, y, z))
+                if idx < 0 or idx >= atlas_vals.size():
+                    continue
+                if atlas_vals[idx] == mat_id:
+                    h = y
+                    break
+            if h >= 0:
+                min_h = mini(min_h, h)
+                max_h = maxi(max_h, h)
+                sum_h += float(h)
+                count += 1
+
+    if count <= 0:
+        return out
+
+    var avg_h := sum_h / float(count)
+    var variance := 0.0
+    for z in range(grid_extent):
+        for x in range(grid_extent):
+            var h := -1
+            for y in range(grid_extent - 1, -1, -1):
+                if !_bcc_parity(Vector3i(x, y, z)):
+                    continue
+                var idx := _atlas_index_for_cell(Vector3i(x, y, z))
+                if idx < 0 or idx >= atlas_vals.size():
+                    continue
+                if atlas_vals[idx] == mat_id:
+                    h = y
+                    break
+            if h >= 0:
+                var d := float(h) - avg_h
+                variance += d * d
+    variance /= float(count)
+
+    out["columns"] = count
+    out["min_h"] = min_h
+    out["max_h"] = max_h
+    out["avg_h"] = avg_h
+    out["var_h"] = variance
+    out["range_h"] = maxi(0, max_h - min_h)
+    return out
 
 func _mpm_discrete_audit_on_render_thread(request_id: int) -> void:
     if _rd == null:
@@ -835,6 +925,46 @@ func _init_render_resources() -> void:
                 if !_mpm_pressure_apply_pipeline_rid.is_valid():
                     push_error("Failed to create MPM pressure_apply pipeline.")
 
+    _mpm_phase_update_shader_rid = RID()
+    _mpm_phase_update_pipeline_rid = RID()
+    var mpm_phase_update_text := FileAccess.get_file_as_string("res://shaders/mpm_phase_update.glsl")
+    if !mpm_phase_update_text.is_empty():
+        var mpm_phase_update_source := RDShaderSource.new()
+        mpm_phase_update_source.language = RenderingDevice.SHADER_LANGUAGE_GLSL
+        mpm_phase_update_source.set_stage_source(RenderingDevice.SHADER_STAGE_COMPUTE, mpm_phase_update_text)
+        var mpm_phase_update_spirv := _rd.shader_compile_spirv_from_source(mpm_phase_update_source)
+        var mpm_phase_update_error := mpm_phase_update_spirv.get_stage_compile_error(RenderingDevice.SHADER_STAGE_COMPUTE)
+        if mpm_phase_update_error != "":
+            push_error("MPM phase_update shader compile error: %s" % mpm_phase_update_error)
+        else:
+            _mpm_phase_update_shader_rid = _rd.shader_create_from_spirv(mpm_phase_update_spirv)
+            if !_mpm_phase_update_shader_rid.is_valid():
+                push_error("Failed to create MPM phase_update shader.")
+            else:
+                _mpm_phase_update_pipeline_rid = _rd.compute_pipeline_create(_mpm_phase_update_shader_rid)
+                if !_mpm_phase_update_pipeline_rid.is_valid():
+                    push_error("Failed to create MPM phase_update pipeline.")
+
+    _mpm_water_vel_smooth_shader_rid = RID()
+    _mpm_water_vel_smooth_pipeline_rid = RID()
+    var mpm_water_smooth_text := FileAccess.get_file_as_string("res://shaders/mpm_water_vel_smooth.glsl")
+    if !mpm_water_smooth_text.is_empty():
+        var mpm_water_smooth_source := RDShaderSource.new()
+        mpm_water_smooth_source.language = RenderingDevice.SHADER_LANGUAGE_GLSL
+        mpm_water_smooth_source.set_stage_source(RenderingDevice.SHADER_STAGE_COMPUTE, mpm_water_smooth_text)
+        var mpm_water_smooth_spirv := _rd.shader_compile_spirv_from_source(mpm_water_smooth_source)
+        var mpm_water_smooth_error := mpm_water_smooth_spirv.get_stage_compile_error(RenderingDevice.SHADER_STAGE_COMPUTE)
+        if mpm_water_smooth_error != "":
+            push_error("MPM water_vel_smooth shader compile error: %s" % mpm_water_smooth_error)
+        else:
+            _mpm_water_vel_smooth_shader_rid = _rd.shader_create_from_spirv(mpm_water_smooth_spirv)
+            if !_mpm_water_vel_smooth_shader_rid.is_valid():
+                push_error("Failed to create MPM water_vel_smooth shader.")
+            else:
+                _mpm_water_vel_smooth_pipeline_rid = _rd.compute_pipeline_create(_mpm_water_vel_smooth_shader_rid)
+                if !_mpm_water_vel_smooth_pipeline_rid.is_valid():
+                    push_error("Failed to create MPM water_vel_smooth pipeline.")
+
     _mpm_g2p_advect_shader_rid = RID()
     _mpm_g2p_advect_pipeline_rid = RID()
     var mpm_g2p_text := FileAccess.get_file_as_string("res://shaders/mpm_g2p_advect.glsl")
@@ -1332,6 +1462,21 @@ func _init_render_resources() -> void:
         return
     _rd.buffer_clear(_mpm_grid_accum_rid, 0, grid_bytes)
     _rd.buffer_clear(_mpm_grid_vel_rid, 0, grid_bytes)
+
+    # Per-phase grids (sand/water) for mixture coupling and better phase separation.
+    _mpm_grid_accum_sand_rid = _rd.storage_buffer_create(grid_bytes)
+    _mpm_grid_accum_water_rid = _rd.storage_buffer_create(grid_bytes)
+    _mpm_grid_vel_sand_rid = _rd.storage_buffer_create(grid_bytes)
+    _mpm_grid_vel_water_rid = _rd.storage_buffer_create(grid_bytes)
+    _mpm_grid_vel_water_smooth_rid = _rd.storage_buffer_create(grid_bytes)
+    if !_mpm_grid_accum_sand_rid.is_valid() or !_mpm_grid_accum_water_rid.is_valid() or !_mpm_grid_vel_sand_rid.is_valid() or !_mpm_grid_vel_water_rid.is_valid() or !_mpm_grid_vel_water_smooth_rid.is_valid():
+        push_error("Failed to create one or more MPM phase grid buffers.")
+        return
+    _rd.buffer_clear(_mpm_grid_accum_sand_rid, 0, grid_bytes)
+    _rd.buffer_clear(_mpm_grid_accum_water_rid, 0, grid_bytes)
+    _rd.buffer_clear(_mpm_grid_vel_sand_rid, 0, grid_bytes)
+    _rd.buffer_clear(_mpm_grid_vel_water_rid, 0, grid_bytes)
+    _rd.buffer_clear(_mpm_grid_vel_water_smooth_rid, 0, grid_bytes)
 
     # Pressure-projected velocity for water (Eulerian incompressibility projection on the BCC grid).
     _mpm_grid_vel_proj_rid = _rd.storage_buffer_create(grid_bytes)
@@ -1887,6 +2032,14 @@ func _init_render_resources() -> void:
         mpm_grid_accum.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
         mpm_grid_accum.binding = 8
         mpm_grid_accum.add_id(_mpm_grid_accum_rid)
+        var mpm_grid_accum_sand := RDUniform.new()
+        mpm_grid_accum_sand.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_grid_accum_sand.binding = 9
+        mpm_grid_accum_sand.add_id(_mpm_grid_accum_sand_rid)
+        var mpm_grid_accum_water := RDUniform.new()
+        mpm_grid_accum_water.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_grid_accum_water.binding = 10
+        mpm_grid_accum_water.add_id(_mpm_grid_accum_water_rid)
 
         var mpm_pos_a := RDUniform.new()
         mpm_pos_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
@@ -1904,7 +2057,11 @@ func _init_render_resources() -> void:
         mpm_f_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
         mpm_f_a.binding = 5
         mpm_f_a.add_id(_mpm_f_a_rid)
-        _mpm_p2g_uniform_set_a = _rd.uniform_set_create([mpm_ubo, mpm_indirection, mpm_pos_a, mpm_vel_a, mpm_c_a, mpm_f_a, mpm_meta, mpm_count, mpm_grid_accum], _mpm_p2g_shader_rid, 0)
+        _mpm_p2g_uniform_set_a = _rd.uniform_set_create(
+            [mpm_ubo, mpm_indirection, mpm_pos_a, mpm_vel_a, mpm_c_a, mpm_f_a, mpm_meta, mpm_count, mpm_grid_accum, mpm_grid_accum_sand, mpm_grid_accum_water],
+            _mpm_p2g_shader_rid,
+            0
+        )
 
         var mpm_pos_b := RDUniform.new()
         mpm_pos_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
@@ -1922,7 +2079,11 @@ func _init_render_resources() -> void:
         mpm_f_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
         mpm_f_b.binding = 5
         mpm_f_b.add_id(_mpm_f_b_rid)
-        _mpm_p2g_uniform_set_b = _rd.uniform_set_create([mpm_ubo, mpm_indirection, mpm_pos_b, mpm_vel_b, mpm_c_b, mpm_f_b, mpm_meta, mpm_count, mpm_grid_accum], _mpm_p2g_shader_rid, 0)
+        _mpm_p2g_uniform_set_b = _rd.uniform_set_create(
+            [mpm_ubo, mpm_indirection, mpm_pos_b, mpm_vel_b, mpm_c_b, mpm_f_b, mpm_meta, mpm_count, mpm_grid_accum, mpm_grid_accum_sand, mpm_grid_accum_water],
+            _mpm_p2g_shader_rid,
+            0
+        )
 
     if _mpm_grid_update_shader_rid.is_valid():
         var mpm_grid_ubo := RDUniform.new()
@@ -1942,6 +2103,72 @@ func _init_render_resources() -> void:
         mpm_grid_vel.binding = 3
         mpm_grid_vel.add_id(_mpm_grid_vel_rid)
         _mpm_grid_uniform_set = _rd.uniform_set_create([mpm_grid_ubo, mpm_grid_static, mpm_grid_acc, mpm_grid_vel], _mpm_grid_update_shader_rid, 0)
+
+    if _mpm_phase_update_shader_rid.is_valid():
+        var ph_ubo := RDUniform.new()
+        ph_ubo.uniform_type = RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER
+        ph_ubo.binding = 0
+        ph_ubo.add_id(_ubo_rid)
+        var ph_static := RDUniform.new()
+        ph_static.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        ph_static.binding = 1
+        ph_static.add_id(_atlas_static_rid)
+        var ph_sand_occ := RDUniform.new()
+        ph_sand_occ.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        ph_sand_occ.binding = 2
+        ph_sand_occ.add_id(_mpm_sand_occ_rid)
+        var ph_water_occ := RDUniform.new()
+        ph_water_occ.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        ph_water_occ.binding = 3
+        ph_water_occ.add_id(_mpm_water_occ_rid)
+        var ph_acc_sand := RDUniform.new()
+        ph_acc_sand.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        ph_acc_sand.binding = 4
+        ph_acc_sand.add_id(_mpm_grid_accum_sand_rid)
+        var ph_acc_water := RDUniform.new()
+        ph_acc_water.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        ph_acc_water.binding = 5
+        ph_acc_water.add_id(_mpm_grid_accum_water_rid)
+        var ph_vel_sand := RDUniform.new()
+        ph_vel_sand.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        ph_vel_sand.binding = 6
+        ph_vel_sand.add_id(_mpm_grid_vel_sand_rid)
+        var ph_vel_water := RDUniform.new()
+        ph_vel_water.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        ph_vel_water.binding = 7
+        ph_vel_water.add_id(_mpm_grid_vel_water_rid)
+        _mpm_phase_update_set = _rd.uniform_set_create(
+            [ph_ubo, ph_static, ph_sand_occ, ph_water_occ, ph_acc_sand, ph_acc_water, ph_vel_sand, ph_vel_water],
+            _mpm_phase_update_shader_rid,
+            0
+        )
+
+    if _mpm_water_vel_smooth_shader_rid.is_valid():
+        var ws_ubo := RDUniform.new()
+        ws_ubo.uniform_type = RenderingDevice.UNIFORM_TYPE_UNIFORM_BUFFER
+        ws_ubo.binding = 0
+        ws_ubo.add_id(_ubo_rid)
+        var ws_static := RDUniform.new()
+        ws_static.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        ws_static.binding = 1
+        ws_static.add_id(_atlas_static_rid)
+        var ws_sand_occ := RDUniform.new()
+        ws_sand_occ.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        ws_sand_occ.binding = 2
+        ws_sand_occ.add_id(_mpm_sand_occ_rid)
+        var ws_in := RDUniform.new()
+        ws_in.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        ws_in.binding = 3
+        ws_in.add_id(_mpm_grid_vel_water_rid)
+        var ws_out := RDUniform.new()
+        ws_out.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        ws_out.binding = 4
+        ws_out.add_id(_mpm_grid_vel_water_smooth_rid)
+        _mpm_water_vel_smooth_set = _rd.uniform_set_create(
+            [ws_ubo, ws_static, ws_sand_occ, ws_in, ws_out],
+            _mpm_water_vel_smooth_shader_rid,
+            0
+        )
 
     if _mpm_g2p_advect_shader_rid.is_valid():
         var mpm_g2p_ubo := RDUniform.new()
@@ -1984,6 +2211,10 @@ func _init_render_resources() -> void:
         mpm_g2p_grid_vel_proj.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
         mpm_g2p_grid_vel_proj.binding = 17
         mpm_g2p_grid_vel_proj.add_id(_mpm_grid_vel_proj_rid)
+        var mpm_g2p_grid_vel_sand := RDUniform.new()
+        mpm_g2p_grid_vel_sand.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        mpm_g2p_grid_vel_sand.binding = 18
+        mpm_g2p_grid_vel_sand.add_id(_mpm_grid_vel_sand_rid)
 
         var mpm_pos_in_a := RDUniform.new()
         mpm_pos_in_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
@@ -2018,7 +2249,7 @@ func _init_render_resources() -> void:
         mpm_f_out_b.binding = 9
         mpm_f_out_b.add_id(_mpm_f_b_rid)
         _mpm_g2p_uniform_set_ab = _rd.uniform_set_create(
-            [mpm_g2p_ubo, mpm_g2p_indirection, mpm_pos_in_a, mpm_vel_in_a, mpm_c_in_a, mpm_f_in_a, mpm_pos_out_b, mpm_vel_out_b, mpm_c_out_b, mpm_f_out_b, mpm_g2p_meta, mpm_g2p_count, mpm_g2p_grid_vel, mpm_g2p_static, mpm_g2p_sand_occ, mpm_g2p_water_occ, mpm_g2p_claim, mpm_g2p_grid_vel_proj],
+            [mpm_g2p_ubo, mpm_g2p_indirection, mpm_pos_in_a, mpm_vel_in_a, mpm_c_in_a, mpm_f_in_a, mpm_pos_out_b, mpm_vel_out_b, mpm_c_out_b, mpm_f_out_b, mpm_g2p_meta, mpm_g2p_count, mpm_g2p_grid_vel, mpm_g2p_static, mpm_g2p_sand_occ, mpm_g2p_water_occ, mpm_g2p_claim, mpm_g2p_grid_vel_proj, mpm_g2p_grid_vel_sand],
             _mpm_g2p_advect_shader_rid,
             0
         )
@@ -2056,7 +2287,7 @@ func _init_render_resources() -> void:
         mpm_f_out_a.binding = 9
         mpm_f_out_a.add_id(_mpm_f_a_rid)
         _mpm_g2p_uniform_set_ba = _rd.uniform_set_create(
-            [mpm_g2p_ubo, mpm_g2p_indirection, mpm_pos_in_b, mpm_vel_in_b, mpm_c_in_b, mpm_f_in_b, mpm_pos_out_a, mpm_vel_out_a, mpm_c_out_a, mpm_f_out_a, mpm_g2p_meta, mpm_g2p_count, mpm_g2p_grid_vel, mpm_g2p_static, mpm_g2p_sand_occ, mpm_g2p_water_occ, mpm_g2p_claim, mpm_g2p_grid_vel_proj],
+            [mpm_g2p_ubo, mpm_g2p_indirection, mpm_pos_in_b, mpm_vel_in_b, mpm_c_in_b, mpm_f_in_b, mpm_pos_out_a, mpm_vel_out_a, mpm_c_out_a, mpm_f_out_a, mpm_g2p_meta, mpm_g2p_count, mpm_g2p_grid_vel, mpm_g2p_static, mpm_g2p_sand_occ, mpm_g2p_water_occ, mpm_g2p_claim, mpm_g2p_grid_vel_proj, mpm_g2p_grid_vel_sand],
             _mpm_g2p_advect_shader_rid,
             0
         )
@@ -2226,7 +2457,7 @@ func _init_render_resources() -> void:
         var pi_grid_vel := RDUniform.new()
         pi_grid_vel.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
         pi_grid_vel.binding = 6
-        pi_grid_vel.add_id(_mpm_grid_vel_rid)
+        pi_grid_vel.add_id(_mpm_grid_vel_water_smooth_rid)
         var pi_div := RDUniform.new()
         pi_div.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
         pi_div.binding = 7
@@ -2327,7 +2558,7 @@ func _init_render_resources() -> void:
         var pa_grid_vel := RDUniform.new()
         pa_grid_vel.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
         pa_grid_vel.binding = 6
-        pa_grid_vel.add_id(_mpm_grid_vel_rid)
+        pa_grid_vel.add_id(_mpm_grid_vel_water_smooth_rid)
         var pa_out := RDUniform.new()
         pa_out.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
         pa_out.binding = 8
@@ -2961,8 +3192,8 @@ func _process(_delta: float) -> void:
         brick_grid, brick_grid, brick_grid, float(chunk_size),
         gravity.x, gravity.y, gravity.z, debug_w,
         world_basis.x.x, world_basis.x.y, world_basis.x.z, fracture_flag,
-        world_basis.y.x, world_basis.y.y, world_basis.y.z, 0.0,
-        world_basis.z.x, world_basis.z.y, world_basis.z.z, 0.0
+        world_basis.y.x, world_basis.y.y, world_basis.y.z, mpm_drag_strength,
+        world_basis.z.x, world_basis.z.y, world_basis.z.z, mpm_water_vel_smooth
     ])
     var bytes := params.to_byte_array()
     _update_params(bytes)
@@ -3132,6 +3363,14 @@ func _dispatch_mpm() -> void:
             _rd.buffer_clear(_mpm_grid_accum_rid, 0, grid_bytes)
         if _mpm_grid_vel_rid.is_valid():
             _rd.buffer_clear(_mpm_grid_vel_rid, 0, grid_bytes)
+        if _mpm_grid_accum_sand_rid.is_valid():
+            _rd.buffer_clear(_mpm_grid_accum_sand_rid, 0, grid_bytes)
+        if _mpm_grid_accum_water_rid.is_valid():
+            _rd.buffer_clear(_mpm_grid_accum_water_rid, 0, grid_bytes)
+        if _mpm_grid_vel_sand_rid.is_valid():
+            _rd.buffer_clear(_mpm_grid_vel_sand_rid, 0, grid_bytes)
+        if _mpm_grid_vel_water_rid.is_valid():
+            _rd.buffer_clear(_mpm_grid_vel_water_rid, 0, grid_bytes)
 
         var p2g_set := _mpm_p2g_uniform_set_a if _mpm_particles_use_a else _mpm_p2g_uniform_set_b
         if p2g_set.is_valid():
@@ -3146,6 +3385,24 @@ func _dispatch_mpm() -> void:
         _rd.compute_list_bind_uniform_set(list_grid, _mpm_grid_uniform_set, 0)
         _rd.compute_list_dispatch(list_grid, grid_groups, 1, 1)
         _rd.compute_list_end()
+
+        # Compute separate sand + water grid velocities and apply inter-phase drag.
+        if _mpm_phase_update_pipeline_rid.is_valid() and _mpm_phase_update_set.is_valid():
+            var list_ph := _rd.compute_list_begin()
+            _rd.compute_list_bind_compute_pipeline(list_ph, _mpm_phase_update_pipeline_rid)
+            _rd.compute_list_bind_uniform_set(list_ph, _mpm_phase_update_set, 0)
+            _rd.compute_list_dispatch(list_ph, grid_groups, 1, 1)
+            _rd.compute_list_end()
+
+        # Smooth the water velocity field to reduce tetrahedral "grid crossing" artifacts
+        # before pressure projection (approximate BCC box-spline behavior).
+        if _mpm_water_vel_smooth_pipeline_rid.is_valid() and _mpm_water_vel_smooth_set.is_valid() and _mpm_grid_vel_water_smooth_rid.is_valid():
+            _rd.buffer_clear(_mpm_grid_vel_water_smooth_rid, 0, grid_bytes)
+            var list_ws := _rd.compute_list_begin()
+            _rd.compute_list_bind_compute_pipeline(list_ws, _mpm_water_vel_smooth_pipeline_rid)
+            _rd.compute_list_bind_uniform_set(list_ws, _mpm_water_vel_smooth_set, 0)
+            _rd.compute_list_dispatch(list_ws, grid_groups, 1, 1)
+            _rd.compute_list_end()
 
         # Discrete voxel projection: build a per-cell occupancy/claim field from the current particle
         # positions so g2p can keep 1 particle per BCC cell (prevents visual "voxel compression").
@@ -5226,6 +5483,10 @@ func _exit_tree() -> void:
         _rd.free_rid(_mpm_pressure_apply_set_a)
     if _mpm_pressure_apply_set_b.is_valid():
         _rd.free_rid(_mpm_pressure_apply_set_b)
+    if _mpm_phase_update_set.is_valid():
+        _rd.free_rid(_mpm_phase_update_set)
+    if _mpm_water_vel_smooth_set.is_valid():
+        _rd.free_rid(_mpm_water_vel_smooth_set)
     if _mpm_rigid_map_set_a.is_valid():
         _rd.free_rid(_mpm_rigid_map_set_a)
     if _mpm_rigid_map_set_b.is_valid():
@@ -5344,8 +5605,18 @@ func _exit_tree() -> void:
         _rd.free_rid(_mpm_particle_count_rid)
     if _mpm_grid_accum_rid.is_valid():
         _rd.free_rid(_mpm_grid_accum_rid)
+    if _mpm_grid_accum_sand_rid.is_valid():
+        _rd.free_rid(_mpm_grid_accum_sand_rid)
+    if _mpm_grid_accum_water_rid.is_valid():
+        _rd.free_rid(_mpm_grid_accum_water_rid)
     if _mpm_grid_vel_rid.is_valid():
         _rd.free_rid(_mpm_grid_vel_rid)
+    if _mpm_grid_vel_sand_rid.is_valid():
+        _rd.free_rid(_mpm_grid_vel_sand_rid)
+    if _mpm_grid_vel_water_rid.is_valid():
+        _rd.free_rid(_mpm_grid_vel_water_rid)
+    if _mpm_grid_vel_water_smooth_rid.is_valid():
+        _rd.free_rid(_mpm_grid_vel_water_smooth_rid)
     if _mpm_grid_vel_proj_rid.is_valid():
         _rd.free_rid(_mpm_grid_vel_proj_rid)
     if _mpm_pressure_a_rid.is_valid():
@@ -5436,6 +5707,14 @@ func _exit_tree() -> void:
         _rd.free_rid(_mpm_pressure_apply_pipeline_rid)
     if _mpm_pressure_apply_shader_rid.is_valid():
         _rd.free_rid(_mpm_pressure_apply_shader_rid)
+    if _mpm_phase_update_pipeline_rid.is_valid():
+        _rd.free_rid(_mpm_phase_update_pipeline_rid)
+    if _mpm_phase_update_shader_rid.is_valid():
+        _rd.free_rid(_mpm_phase_update_shader_rid)
+    if _mpm_water_vel_smooth_pipeline_rid.is_valid():
+        _rd.free_rid(_mpm_water_vel_smooth_pipeline_rid)
+    if _mpm_water_vel_smooth_shader_rid.is_valid():
+        _rd.free_rid(_mpm_water_vel_smooth_shader_rid)
     if _mpm_g2p_advect_pipeline_rid.is_valid():
         _rd.free_rid(_mpm_g2p_advect_pipeline_rid)
     if _mpm_g2p_advect_shader_rid.is_valid():

@@ -1,7 +1,11 @@
 #version 450
 
-// Apply the BCC pressure gradient to produce a pressure-projected velocity field for water.
-// This is used by g2p for water voxels to avoid the "stacking" artifact under single-occupancy.
+// Approximate the smoothing benefit of BCC linear box splines by applying a
+// 14-neighbor weighted average to the water grid velocity field.
+//
+// This is not a full box-spline p2g/g2p transfer replacement, but it reduces the
+// tetrahedral "grid crossing" artifacts by producing a smoother, more isotropic
+// guidance field for the subsequent pressure projection and discrete transport.
 
 layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 
@@ -29,31 +33,13 @@ layout(set = 0, binding = 2, std430) readonly buffer SandOcc {
     uint data[];
 } sand_occ;
 
-layout(set = 0, binding = 3, std430) readonly buffer CellClaim {
-    uint data[];
-} cell_claim;
-
-layout(set = 0, binding = 4, std430) readonly buffer ParticleMeta {
-    uvec4 data[];
-} meta;
-
-layout(set = 0, binding = 5, std430) readonly buffer ParticleCount {
-    uint data[];
-} particle_count;
-
-layout(set = 0, binding = 6, std430) readonly buffer GridVelIn {
+layout(set = 0, binding = 3, std430) readonly buffer GridVelWaterIn {
     vec4 data[];
-} grid_vel;
+} vel_in;
 
-layout(set = 0, binding = 7, std430) readonly buffer PressureIn {
-    float data[];
-} pressure;
-
-layout(set = 0, binding = 8, std430) buffer GridVelOut {
+layout(set = 0, binding = 4, std430) buffer GridVelWaterOut {
     vec4 data[];
-} grid_vel_proj;
-
-const uint WATER_MATERIAL = 2u;
+} vel_out;
 
 bool bcc_parity(ivec3 cell) {
     return ((cell.x & 1) == (cell.y & 1)) && ((cell.y & 1) == (cell.z & 1));
@@ -121,31 +107,9 @@ const ivec3 NEIGH[14] = ivec3[14](
     ivec3(-1, -1, -1)
 );
 
-float inv_d2_for_neigh(int i) {
-    return (i < 6) ? 0.25 : (1.0 / 3.0);
-}
-
-bool is_water_cell(uint atlas_idx) {
-    uint cid = cell_claim.data[atlas_idx];
-    if (cid == 0u) {
-        return false;
-    }
-    uint p = cid - 1u;
-    uint count = particle_count.data[0];
-    if (p >= count) {
-        return false;
-    }
-    return meta.data[p].x == WATER_MATERIAL;
-}
-
-bool is_solid_cell(uint atlas_idx, bool water_here) {
-    if (static_atlas.data[atlas_idx] != 0u) {
-        return true;
-    }
-    if (!water_here && sand_occ.data[atlas_idx] != 0u) {
-        return true;
-    }
-    return false;
+float w_neigh(int i) {
+    // Favor closer diagonal neighbors slightly (d^2=3 vs axial d^2=4).
+    return (i < 6) ? 0.8 : 1.0;
 }
 
 void main() {
@@ -159,23 +123,26 @@ void main() {
 
     ivec3 cell = cell_from_atlas_index(idx);
     if (!bcc_parity(cell)) {
-        grid_vel_proj.data[idx] = vec4(0.0);
+        vel_out.data[idx] = vec4(0.0);
+        return;
+    }
+    if (static_atlas.data[idx] != 0u) {
+        vel_out.data[idx] = vec4(0.0);
         return;
     }
 
-    vec4 gv = grid_vel.data[idx];
-    vec3 v = gv.xyz;
-
-    bool water_here = is_water_cell(idx);
-    bool static_here = static_atlas.data[idx] != 0u;
-    if (!water_here || static_here) {
-        // This buffer is the projected water velocity field; leave non-water nodes empty.
-        grid_vel_proj.data[idx] = vec4(0.0);
+    vec4 self = vel_in.data[idx];
+    float m0 = self.w;
+    if (!(m0 > 0.0)) {
+        vel_out.data[idx] = vec4(0.0);
         return;
     }
 
-    float p_i = pressure.data[idx];
-    vec3 grad = vec3(0.0);
+    float blend = clamp(u.world_rot_z.w, 0.0, 1.0);
+    vec3 v0 = self.xyz;
+    vec3 sum = v0 * m0;
+    float wsum = m0;
+
     for (int i = 0; i < 14; i++) {
         ivec3 nc = cell + NEIGH[i];
         if (!in_bounds(nc) || !bcc_parity(nc)) {
@@ -185,60 +152,26 @@ void main() {
         if (ni == 0xffffffffu) {
             continue;
         }
-        bool nwater = is_water_cell(ni);
-        bool nsolid = is_solid_cell(ni, nwater);
-        if (nsolid) {
+        if (static_atlas.data[ni] != 0u) {
+            continue;
+        }
+        if (sand_occ.data[ni] != 0u) {
+            // Don't smooth through sand barriers (treat as solid wall for water).
             continue;
         }
 
-        float p_j = nwater ? pressure.data[ni] : 0.0;
-        float invd2 = inv_d2_for_neigh(i);
-        grad += 0.5 * (p_j - p_i) * vec3(NEIGH[i]) * invd2;
+        vec4 n = vel_in.data[ni];
+        float mn = n.w;
+        if (!(mn > 0.0)) {
+            continue;
+        }
+        float w = w_neigh(i);
+        sum += n.xyz * (mn * w);
+        wsum += mn * w;
     }
 
-    float dt = max(0.0, u.grid_info.w);
-    vec3 v_proj = v - dt * grad;
-
-    // Enforce no-penetration against static solids + sand occupancy (free-slip).
-    for (int i = 0; i < 14; i++) {
-        ivec3 nc = cell + NEIGH[i];
-        if (!in_bounds(nc) || !bcc_parity(nc)) {
-            continue;
-        }
-        uint ni = atlas_index_for_cell_direct(nc);
-        if (ni == 0xffffffffu) {
-            continue;
-        }
-        bool nwater = is_water_cell(ni);
-        bool nsolid = is_solid_cell(ni, nwater);
-        if (!nsolid) {
-            continue;
-        }
-        vec3 fn = normalize(vec3(NEIGH[i]));
-        float toward = dot(v_proj, fn);
-        if (toward > 0.0) {
-            v_proj -= toward * fn;
-        }
-    }
-
-    // World bounds collision (axis-aligned grid AABB).
-    int gx = int(u.grid_info.x);
-    int gy = int(u.grid_info.y);
-    int gz = int(u.grid_info.z);
-    if (cell.x <= 1 && v_proj.x < 0.0) v_proj.x = 0.0;
-    if (cell.x >= gx - 2 && v_proj.x > 0.0) v_proj.x = 0.0;
-    if (cell.y <= 1 && v_proj.y < 0.0) v_proj.y = 0.0;
-    if (cell.y >= gy - 2 && v_proj.y > 0.0) v_proj.y = 0.0;
-    if (cell.z <= 1 && v_proj.z < 0.0) v_proj.z = 0.0;
-    if (cell.z >= gz - 2 && v_proj.z > 0.0) v_proj.z = 0.0;
-
-    // Mild damping + safety clamp.
-    v_proj *= 0.999;
-    float vmax = 120.0;
-    float vm = length(v_proj);
-    if (vm > vmax) {
-        v_proj *= vmax / vm;
-    }
-
-    grid_vel_proj.data[idx] = vec4(v_proj, gv.w);
+    vec3 v_avg = sum / max(1e-6, wsum);
+    vec3 v = mix(v0, v_avg, blend);
+    vel_out.data[idx] = vec4(v, m0);
 }
+

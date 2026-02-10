@@ -86,6 +86,11 @@ layout(set = 0, binding = 17, std430) readonly buffer GridVelProjected {
     vec4 data[];
 } grid_vel_proj;
 
+// Per-phase grid velocity for sand (computed by mpm_phase_update.glsl).
+layout(set = 0, binding = 18, std430) readonly buffer GridVelSand {
+    vec4 data[];
+} grid_vel_sand;
+
 const uint FLAG_STATIC = 1u << 1;
 // Inflate static solids slightly for collision to reduce leaking through thin voxel shells.
 const float STATIC_COLLISION_MARGIN = 0.03;
@@ -514,6 +519,7 @@ void main() {
     }
     uint material_id = meta.data[p].x;
     bool is_water = (material_id == 2u);
+    bool is_sand = (material_id == 1u);
     uint flags = meta.data[p].y;
     if (material_id == 0u) {
         pos_mass_out.data[p] = pos_mass_in.data[p];
@@ -550,6 +556,26 @@ void main() {
     float apic = 1.0;
     material_params(material_id, shear_relax, damping, j_min, j_max, apic);
 
+    // Saturation-dependent sand tuning (approximation of "wet sand liquefaction").
+    // Use the coarse water occupancy field as a cheap saturation proxy.
+    bool sand_wet = false;
+    if (is_sand) {
+        ivec3 c = snap_to_bcc(x);
+        if (in_bounds(c) && bcc_parity(c)) {
+            uint ai = atlas_index_for_cell(c);
+            if (ai != 0u && water_occ.data[ai] != 0u) {
+                sand_wet = true;
+            }
+        }
+    }
+    if (sand_wet) {
+        // Shift sand towards fluid-like behavior near water: reduce shear persistence,
+        // reduce frictional sticking, and allow a bit more APIC.
+        shear_relax = 0.45;
+        damping = 0.996;
+        apic = 0.35;
+    }
+
     ivec3 v0, v1, v2, v3;
     vec4 w;
     vec3 gw0, gw1, gw2, gw3;
@@ -569,7 +595,14 @@ void main() {
         if (gi == 0u) {
             continue;
         }
-        vec3 vi = is_water ? grid_vel_proj.data[gi].xyz : grid_vel.data[gi].xyz;
+        vec3 vi = vec3(0.0);
+        if (is_water) {
+            vi = grid_vel_proj.data[gi].xyz;
+        } else if (is_sand) {
+            vi = grid_vel_sand.data[gi].xyz;
+        } else {
+            vi = grid_vel.data[gi].xyz;
+        }
         v += max(0.0, w[i]) * vi;
         C += outerProduct(vi, grads[i]);
     }
@@ -593,6 +626,9 @@ void main() {
     float mu = 0.35;
     if (material_id == 1u) { // sand
         mu = 0.55;
+        if (sand_wet) {
+            mu = 0.22;
+        }
     } else if (material_id == 2u) { // water
         mu = 0.02;
     }
@@ -710,6 +746,9 @@ void main() {
     float rest_speed = 0.15;
     if (material_id == 1u) { // sand
         rest_speed = 0.15;
+        if (sand_wet) {
+            rest_speed = 0.08;
+        }
     } else if (material_id == 2u) { // water
         // Water needs to keep small residual motion so it can level out (avoid "angle of repose" piling).
         rest_speed = 0.03;

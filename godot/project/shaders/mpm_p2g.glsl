@@ -52,6 +52,15 @@ layout(set = 0, binding = 8, std430) buffer GridAccum {
     ivec4 data[];
 } grid_accum;
 
+// Optional per-phase accumulation (sand/water) for mixture coupling.
+layout(set = 0, binding = 9, std430) buffer GridAccumSand {
+    ivec4 data[];
+} grid_accum_sand;
+
+layout(set = 0, binding = 10, std430) buffer GridAccumWater {
+    ivec4 data[];
+} grid_accum_water;
+
 const float FP_SCALE = 10000.0;
 
 uint idx_brick(ivec3 b) {
@@ -302,5 +311,18 @@ void main() {
         atomicAdd(grid_accum.data[gi].y, px);
         atomicAdd(grid_accum.data[gi].z, py);
         atomicAdd(grid_accum.data[gi].w, pz);
+
+        // Also write to per-phase buffers so we can compute separate sand/water velocity fields.
+        if (material_id == 1u) {
+            atomicAdd(grid_accum_sand.data[gi].x, m_fixed);
+            atomicAdd(grid_accum_sand.data[gi].y, px);
+            atomicAdd(grid_accum_sand.data[gi].z, py);
+            atomicAdd(grid_accum_sand.data[gi].w, pz);
+        } else if (material_id == 2u) {
+            atomicAdd(grid_accum_water.data[gi].x, m_fixed);
+            atomicAdd(grid_accum_water.data[gi].y, px);
+            atomicAdd(grid_accum_water.data[gi].z, py);
+            atomicAdd(grid_accum_water.data[gi].w, pz);
+        }
     }
 }

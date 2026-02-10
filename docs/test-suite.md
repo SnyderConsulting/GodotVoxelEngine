@@ -63,8 +63,17 @@ Each stats sample includes:
 - Per-material bounding box
 - Count of particles overlapping static solids (by snapping to nearest BCC cell)
 - NaN/Inf detection for position/velocity/mass
+- Optional per-material column metrics (surface flatness) via `VoxelRenderer.mpm_get_material_column_metrics(mat_id)`
 
 The runner compares a baseline sample (right after startup/reset) to a final sample after `run_duration_s`.
+
+## Additional Checks (Suite JSON)
+
+`material_checks[]` supports extra keys for behavioral assertions:
+- `column_var_final_max`, `column_range_final_max`, `column_var_max`, `column_range_max`
+  - Require `mpm_get_material_column_metrics()` and catch water "piling" regressions (water behaving like sand).
+- `bbox_min_x_min/max`, `bbox_min_y_min/max`, `bbox_min_z_min/max`, `bbox_max_x_min/max`, `bbox_max_y_min/max`, `bbox_max_z_min/max`
+  - Constrain final bounding box per material (useful for impermeability tests, e.g. water staying above a static sand bed).
 
 ## Per-Scene Overrides And Reset Hooks
 

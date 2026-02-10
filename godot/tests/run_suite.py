@@ -218,6 +218,15 @@ def _label_sample(sample: Dict[str, Any]) -> str:
     return "baseline"
 
 
+def _column_metrics(sample: Dict[str, Any], mat_id: int) -> Dict[str, Any]:
+    cms = sample.get("column_metrics") or []
+    if isinstance(cms, list):
+        for m in cms:
+            if isinstance(m, dict) and int(m.get("mat_id", -1)) == mat_id:
+                return m
+    return {"mat_id": mat_id}
+
+
 def _eval_scene(
     scene_cfg: Dict[str, Any],
     baseline: Dict[str, Any],
@@ -295,6 +304,7 @@ def _eval_scene(
             continue
         b = _slot(baseline, mat_id)
         f = _slot(final, mat_id)
+        samples = [baseline] + (timeline or [])
 
         if "count_min" in mc:
             cmin = int(mc["count_min"])
@@ -362,6 +372,95 @@ def _eval_scene(
             if sp > sp_max:
                 failures.append(f"mat={mat_id} max_speed_final {sp:.4f} > {sp_max:.4f}")
 
+        # Column metrics checks (surface flatness). These require VoxelRenderer.mpm_get_material_column_metrics().
+        # - Water should level out: low variance/range.
+        # - Sand should generally *not* be constrained by these checks unless explicitly configured.
+        if any(k.startswith("column_") for k in mc.keys()):
+            cm_final = _column_metrics(final, mat_id)
+            if not isinstance(cm_final, dict) or "columns" not in cm_final:
+                failures.append(f"mat={mat_id} missing column_metrics in final sample")
+            else:
+                if "column_var_final_max" in mc:
+                    vmax = float(mc["column_var_final_max"])
+                    v = float(cm_final.get("var_h", 0.0))
+                    if v > vmax:
+                        failures.append(f"mat={mat_id} column_var_final {v:.3f} > {vmax:.3f}")
+                if "column_range_final_max" in mc:
+                    rmax = float(mc["column_range_final_max"])
+                    r = float(cm_final.get("range_h", 0.0))
+                    if r > rmax:
+                        failures.append(f"mat={mat_id} column_range_final {r:.1f} > {rmax:.1f}")
+
+            # Optional: enforce a max across the entire timeline (baseline + samples).
+            if "column_var_max" in mc:
+                vmax = float(mc["column_var_max"])
+                worst = 0.0
+                ok_any = False
+                for s in samples:
+                    cm = _column_metrics(s, mat_id)
+                    if isinstance(cm, dict) and "columns" in cm:
+                        ok_any = True
+                        worst = max(worst, float(cm.get("var_h", 0.0)))
+                if not ok_any:
+                    failures.append(f"mat={mat_id} missing column_metrics for timeline")
+                elif worst > vmax:
+                    failures.append(f"mat={mat_id} column_var_max {worst:.3f} > {vmax:.3f}")
+
+            if "column_range_max" in mc:
+                rmax = float(mc["column_range_max"])
+                worst = 0.0
+                ok_any = False
+                for s in samples:
+                    cm = _column_metrics(s, mat_id)
+                    if isinstance(cm, dict) and "columns" in cm:
+                        ok_any = True
+                        worst = max(worst, float(cm.get("range_h", 0.0)))
+                if not ok_any:
+                    failures.append(f"mat={mat_id} missing column_metrics for timeline")
+                elif worst > rmax:
+                    failures.append(f"mat={mat_id} column_range_max {worst:.1f} > {rmax:.1f}")
+
+        # Per-material bounding-box constraints (final sample only).
+        # Keys: bbox_min_<axis>_min/max, bbox_max_<axis>_min/max where axis in {x,y,z}.
+        if any(k.startswith("bbox_") for k in mc.keys()):
+            if not bool(f.get("bbox_valid", False)):
+                failures.append(f"mat={mat_id} missing/invalid bbox in final sample")
+            else:
+                bmin = f.get("bbox_min") or (0.0, 0.0, 0.0)
+                bmax = f.get("bbox_max") or (0.0, 0.0, 0.0)
+                try:
+                    bmin = (float(bmin[0]), float(bmin[1]), float(bmin[2]))
+                    bmax = (float(bmax[0]), float(bmax[1]), float(bmax[2]))
+                except Exception:
+                    bmin = (0.0, 0.0, 0.0)
+                    bmax = (0.0, 0.0, 0.0)
+                axis_idx = {"x": 0, "y": 1, "z": 2}
+                for axis, ai in axis_idx.items():
+                    k = f"bbox_min_{axis}_min"
+                    if k in mc:
+                        vmin = float(mc[k])
+                        vv = float(bmin[ai])
+                        if vv < vmin:
+                            failures.append(f"mat={mat_id} {k} {vv:.3f} < {vmin:.3f}")
+                    k = f"bbox_min_{axis}_max"
+                    if k in mc:
+                        vmax = float(mc[k])
+                        vv = float(bmin[ai])
+                        if vv > vmax:
+                            failures.append(f"mat={mat_id} {k} {vv:.3f} > {vmax:.3f}")
+                    k = f"bbox_max_{axis}_min"
+                    if k in mc:
+                        vmin = float(mc[k])
+                        vv = float(bmax[ai])
+                        if vv < vmin:
+                            failures.append(f"mat={mat_id} {k} {vv:.3f} < {vmin:.3f}")
+                    k = f"bbox_max_{axis}_max"
+                    if k in mc:
+                        vmax = float(mc[k])
+                        vv = float(bmax[ai])
+                        if vv > vmax:
+                            failures.append(f"mat={mat_id} {k} {vv:.3f} > {vmax:.3f}")
+
         # Per-material discrete checks are evaluated across all samples (baseline + timeline),
         # because a transient violation is still a visible artifact.
         eff_discrete_mc: Dict[str, Any] = {}
@@ -421,6 +520,37 @@ def _eval_scene(
                         failures.append(f"{label} mat={mat_id} max_spill {vv:.4f} > {maxv:.4f}")
 
     return (len(failures) == 0), failures
+
+
+def _required_column_materials(scene_cfg: Dict[str, Any]) -> List[int]:
+    mats: List[int] = []
+    # Explicit allow-list.
+    for x in scene_cfg.get("column_metrics", []) or []:
+        try:
+            mats.append(int(x))
+        except Exception:
+            pass
+    # Implicit from material checks.
+    for mc in scene_cfg.get("material_checks", []) or []:
+        if not isinstance(mc, dict):
+            continue
+        if not any(str(k).startswith("column_") for k in mc.keys()):
+            continue
+        try:
+            mid = int(mc.get("mat_id", -1))
+        except Exception:
+            mid = -1
+        if mid >= 0:
+            mats.append(mid)
+    # De-dup while preserving order.
+    out: List[int] = []
+    seen = set()
+    for m in mats:
+        if m in seen:
+            continue
+        seen.add(m)
+        out.append(m)
+    return out
 
 
 def _wait_for_voxel_renderer(cli: AutomationClient, timeout_s: float = 10.0) -> Tuple[str, Optional[str]]:
@@ -484,6 +614,21 @@ def _fetch_discrete_audit(cli: AutomationClient, voxel_path: str) -> Dict[str, A
     if not isinstance(audit, dict):
         raise RuntimeError(f"unexpected discrete audit type: {type(audit)}")
     return audit
+
+
+def _fetch_column_metrics(cli: AutomationClient, voxel_path: str, mat_ids: List[int]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for mid in mat_ids:
+        try:
+            resp = cli.call("call", {"path": voxel_path, "method": "mpm_get_material_column_metrics", "args": [int(mid)]})
+            cm = resp.get("result")
+            if not isinstance(cm, dict):
+                out.append({"mat_id": int(mid), "error": f"unexpected column metrics type: {type(cm)}"})
+                continue
+            out.append(cm)
+        except Exception as e:
+            out.append({"mat_id": int(mid), "error": str(e)})
+    return out
 
 
 def _launch_scene(
@@ -621,6 +766,7 @@ def main() -> int:
             try:
                 _ = cli.call("ping").get("result")
                 voxel_path, _orbit_path = _wait_for_voxel_renderer(cli, timeout_s=startup_timeout_s)
+                column_mats = _required_column_materials(scene_cfg)
 
                 # Configure renderer for stats and lower log noise.
                 cli.call("set", {"path": voxel_path, "property": "debug_logging", "value": False})
@@ -657,6 +803,8 @@ def main() -> int:
                     baseline["discrete_audit"] = _fetch_discrete_audit(cli, voxel_path)
                 except Exception as e:
                     baseline["discrete_audit_error"] = str(e)
+                if column_mats:
+                    baseline["column_metrics"] = _fetch_column_metrics(cli, voxel_path, column_mats)
                 (scene_dir / "stats_baseline.json").write_text(json.dumps(baseline, indent=2, sort_keys=True), "utf-8")
 
                 # Run.
@@ -687,6 +835,8 @@ def main() -> int:
                         sample["discrete_audit"] = _fetch_discrete_audit(cli, voxel_path)
                     except Exception as e:
                         sample["discrete_audit_error"] = str(e)
+                    if column_mats:
+                        sample["column_metrics"] = _fetch_column_metrics(cli, voxel_path, column_mats)
                     timeline.append(sample)
 
                 (scene_dir / "stats_timeline.json").write_text(json.dumps(timeline, indent=2, sort_keys=True), "utf-8")

@@ -58,12 +58,13 @@
       "scene": "res://scenes/WaterEquilibriumTest.tscn",
       "run_duration_s": 6.0,
       "sample_points_s": [1.0, 3.0, 6.0],
+      "column_metrics": [2],
       "checks": {
         "nan_max": 0,
         "total_mass_loss_frac_max": 0.02
       },
       "material_checks": [
-        { "mat_id": 2, "count_loss_frac_max": 0.00, "mass_loss_frac_max": 0.03, "overlap_static_max": 200, "avg_speed_final_max": 5.0 }
+        { "mat_id": 2, "count_loss_frac_max": 0.00, "mass_loss_frac_max": 0.03, "overlap_static_max": 200, "avg_speed_final_max": 5.0, "column_var_final_max": 2.0 }
       ]
     },
     {
@@ -78,6 +79,48 @@
       "material_checks": [
         { "mat_id": 1, "count_loss_frac_max": 0.00, "mass_loss_frac_max": 0.03, "overlap_static_max": 400, "avg_speed_final_max": 10.0 },
         { "mat_id": 2, "count_loss_frac_max": 0.00, "mass_loss_frac_max": 0.03, "overlap_static_max": 400, "avg_speed_final_max": 25.0 }
+      ]
+    },
+    {
+      "name": "sand_equilibrium",
+      "scene": "res://scenes/SandEquilibriumTest.tscn",
+      "run_duration_s": 8.0,
+      "sample_points_s": [1.0, 4.0, 8.0],
+      "checks": {
+        "nan_max": 0,
+        "total_mass_loss_frac_max": 0.02
+      },
+      "material_checks": [
+        { "mat_id": 1, "count_min": 700, "count_loss_frac_max": 0.00, "mass_loss_frac_max": 0.03, "overlap_static_max": 600, "avg_speed_final_max": 3.0, "max_speed_final_max": 60.0 }
+      ]
+    },
+    {
+      "name": "water_leveling_large",
+      "scene": "res://scenes/WaterLevelingLargeTest.tscn",
+      "run_duration_s": 8.0,
+      "sample_points_s": [1.0, 4.0, 8.0],
+      "column_metrics": [2],
+      "checks": {
+        "nan_max": 0,
+        "total_mass_loss_frac_max": 0.02
+      },
+      "material_checks": [
+        { "mat_id": 2, "count_min": 3000, "count_loss_frac_max": 0.00, "mass_loss_frac_max": 0.03, "overlap_static_max": 800, "avg_speed_final_max": 8.0, "max_speed_final_max": 120.0, "column_var_final_max": 6.0 }
+      ]
+    },
+    {
+      "name": "water_sand_bed",
+      "scene": "res://scenes/WaterSandBedTest.tscn",
+      "run_duration_s": 6.0,
+      "sample_points_s": [1.0, 3.0, 6.0],
+      "column_metrics": [2],
+      "checks": {
+        "nan_max": 0,
+        "total_mass_loss_frac_max": 0.02
+      },
+      "material_checks": [
+        { "mat_id": 1, "count_min": 1900, "count_loss_frac_max": 0.00, "mass_loss_frac_max": 0.03, "overlap_static_max": 800, "avg_speed_final_max": 0.1, "max_speed_final_max": 0.5 },
+        { "mat_id": 2, "count_min": 750, "count_loss_frac_max": 0.00, "mass_loss_frac_max": 0.03, "overlap_static_max": 800, "avg_speed_final_max": 6.0, "max_speed_final_max": 120.0, "bbox_min_y_min": 10.0, "column_var_final_max": 4.0 }
       ]
     },
     {

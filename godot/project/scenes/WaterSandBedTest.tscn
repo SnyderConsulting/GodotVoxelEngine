@@ -1,0 +1,59 @@
+[gd_scene load_steps=6 format=3]
+
+[ext_resource type="Script" path="res://scripts/OrbitCamera.gd" id="1"]
+[ext_resource type="Script" path="res://scripts/VoxelRenderer.gd" id="2"]
+[ext_resource type="Shader" path="res://shaders/compute_display.gdshader" id="3"]
+[ext_resource type="Script" path="res://scripts/WaterSandBedTest.gd" id="4"]
+[ext_resource type="Script" path="res://scripts/SceneControls.gd" id="5"]
+
+[sub_resource type="QuadMesh" id="1"]
+size = Vector2(2, 2)
+
+[sub_resource type="ShaderMaterial" id="2"]
+shader = ExtResource("3")
+
+[node name="WaterSandBedTest" type="Node3D"]
+
+[node name="OrbitRig" type="Node3D" parent="."]
+script = ExtResource("1")
+distance = 140.0
+min_distance = 24.0
+max_distance = 800.0
+
+[node name="Camera3D" type="Camera3D" parent="OrbitRig"]
+current = true
+
+[node name="RaymarchQuad" type="MeshInstance3D" parent="OrbitRig/Camera3D"]
+position = Vector3(0, 0, -1)
+scale = Vector3(2, 2, 2)
+mesh = SubResource("1")
+material_override = SubResource("2")
+
+[node name="VoxelRenderer" type="Node" parent="."]
+script = ExtResource("2")
+quad_path = NodePath("../OrbitRig/Camera3D/RaymarchQuad")
+camera_path = NodePath("../OrbitRig/Camera3D")
+chunk_size = 8
+chunk_grid = 4
+sim_enabled = true
+sim_every = 1
+sim_mode = 1
+mpm_gravity_strength = 50.0
+
+[node name="WaterSandBedController" type="Node" parent="."]
+script = ExtResource("4")
+voxel_renderer_path = NodePath("../VoxelRenderer")
+overlay_path = NodePath("../HUD/InfoLabel")
+
+[node name="HUD" type="CanvasLayer" parent="."]
+
+[node name="InfoLabel" type="Label" parent="HUD"]
+anchor_right = 0.0
+anchor_bottom = 0.0
+offset_left = 16.0
+offset_top = 16.0
+offset_right = 560.0
+offset_bottom = 140.0
+text = "Water On Sand Bed Test"
+theme_override_font_sizes/font_size = 16
+
