@@ -678,9 +678,9 @@ void main() {
     // Friction depends on material.
     float mu = 0.35;
     if (material_id == 1u) { // sand
-        mu = 0.35;
+        mu = 0.52;
         if (sand_wet) {
-            mu = 0.16;
+            mu = 0.26;
         }
     } else if (material_id == 2u) { // water
         mu = 0.02;
@@ -805,7 +805,7 @@ void main() {
         }
     } else if (material_id == 2u) { // water
         // Water needs to keep small residual motion so it can level out (avoid "angle of repose" piling).
-        rest_speed = 0.03;
+        rest_speed = 0.015;
     } else if (material_id == 4u) { // stone
         rest_speed = 0.08;
     }
@@ -817,7 +817,7 @@ void main() {
     if (material_id == 1u) { // sand
         // Moderate threshold keeps responsiveness when gravity direction changes (world rotation)
         // without reintroducing high-frequency jitter.
-        transport_speed = sand_wet ? 0.06 : 0.08;
+        transport_speed = sand_wet ? 0.16 : 0.20;
     } else if (material_id == 4u) { // stone
         transport_speed = 0.06;
     }
@@ -911,8 +911,7 @@ void main() {
     bool optional_transport_creep = false;
     // Only enable creep near the top of the grid. This targets the Paint scene's "glass lip" edge
     // artifacts without affecting the broader water equilibrium behavior in regression scenes.
-    bool near_top = (old_cell.y >= int(u.grid_info.y) - 3);
-    if (near_top && down_static && is_water && !need_relocate && all(equal(desired_cell, old_cell)) && (sp < rest_speed)) {
+    if (down_static && is_water && !need_relocate && all(equal(desired_cell, old_cell)) && (sp < rest_speed)) {
         for (int i = 0; i < 14; i++) {
             if (all(equal(neigh[i], down_off))) {
                 continue;
@@ -937,7 +936,9 @@ void main() {
         }
     }
 
-    bool optional_transport = optional_transport_water || optional_transport_sand || optional_transport_creep;
+    bool optional_transport_water_side = is_water && side_static && !down_static
+        && !need_relocate && all(equal(desired_cell, old_cell)) && (sp < rest_speed);
+    bool optional_transport = optional_transport_water || optional_transport_sand || optional_transport_creep || optional_transport_water_side;
     bool want_move = need_relocate || !all(equal(desired_cell, old_cell)) || optional_transport;
 
     if (want_move) {
@@ -966,8 +967,8 @@ void main() {
             // For sand optional transport, don't gate on speed: the whole point is to allow a hop even
             // when continuous position didn't cross a cell boundary yet.
             if (sp >= rest_speed || need_relocate || optional_transport_sand || optional_transport_creep) {
-                if (is_water && (sp > 1e-6 || optional_transport_creep)) {
-                    if (optional_transport_creep) {
+                if (is_water && (sp > 1e-6 || optional_transport_creep || optional_transport_water_side)) {
+                    if (optional_transport_creep || optional_transport_water_side) {
                         // Deterministic downhill hop from rest (no random walk): choose the most
                         // gravity-aligned empty neighbor that isn't the blocked straight-down cell.
                         ivec3 base = old_cell;
@@ -1024,9 +1025,9 @@ void main() {
                     if (optional_transport_water) {
                         base = old_cell;
                     }
-                    if (optional_transport_creep) {
-                        base = old_cell;
-                    }
+                        if (optional_transport_creep || optional_transport_water_side) {
+                            base = old_cell;
+                        }
 
                     int best_i = -1;
                     float best_s = -1e9;
@@ -1114,6 +1115,10 @@ void main() {
                                     continue;
                                 }
                                 float d = dot(normalize(vec3(neigh[i])), gdir);
+                                if (!need_relocate && d < 0.35) {
+                                    // Granular sand should strongly prefer downhill moves.
+                                    continue;
+                                }
                                 // Keep gravity as the dominant direction, but break ties with a
                                 // tiny per-particle stochastic term so tall columns don't collapse
                                 // in perfectly uniform lateral lanes.
@@ -1234,9 +1239,19 @@ void main() {
         if (material_id == 1u) { // sand
             // Preserve a small gravity-aligned drive so tall columns keep collapsing instead of
             // freezing when many particles contend for nearby cells in one substep.
+            if (down_static) {
+                // Once supported, granular sand should lock and form piles rather than keep creeping.
+                v = vec3(0.0);
+            } else {
+                float vg = max(0.0, dot(v, gdir));
+                float keep = max(0.03, vg * 0.22);
+                v = gdir * min(0.12, keep);
+            }
+        } else if (material_id == 2u) { // water
+            // Keep a weak downward bias on blocked liquid so it can drain from ledges/walls.
             float vg = max(0.0, dot(v, gdir));
-            float keep = max(0.08, vg * 0.35);
-            v = gdir * min(0.35, keep);
+            float keep = max(0.08, vg * 0.40);
+            v = gdir * min(0.28, keep);
         } else {
             v = vec3(0.0);
         }
@@ -1249,12 +1264,15 @@ void main() {
             // Only use a larger sleep threshold when supported from below.
             // On side walls (no downward support), keep a tiny threshold so sand can slide.
             if (down_static) {
-                sleep_speed = 0.08;
+                sleep_speed = 0.14;
             } else if (side_static) {
-                sleep_speed = 0.01;
+                sleep_speed = 0.03;
             } else {
-                sleep_speed = 0.015;
+                sleep_speed = 0.02;
             }
+        } else if (material_id == 2u) {
+            // Let water keep tiny residual motion longer so it drains instead of perching.
+            sleep_speed = 0.012;
         }
         if ((material_id == 1u || material_id == 2u || material_id == 4u) && length(v) < sleep_speed) {
             v = vec3(0.0);
