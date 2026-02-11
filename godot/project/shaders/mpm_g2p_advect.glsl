@@ -703,12 +703,14 @@ void main() {
         float sd0 = 0.0;
         vec3 n0 = vec3(0.0, 1.0, 0.0);
         bool hit0 = false;
+        bool hit0_sand = false;
         if (step_len > 1e-6 && query_static_sdf(x_step, sd0, n0)) {
             hit0 = true;
         }
         // Water also collides against sand occupancy.
         if (!hit0 && material_id == 2u && step_len > 1e-6 && query_sand_sdf(x_step, sd0, n0)) {
             hit0 = true;
+            hit0_sand = true;
         }
         // Sand also treats water as an impermeable phase (temporary simplification).
         if (!hit0 && material_id == 1u && step_len > 1e-6 && query_water_sdf(x_step, sd0, n0)) {
@@ -726,7 +728,9 @@ void main() {
                 v = apply_contact_friction(v, n0, mu);
                 C = mat3(0.0);
                 // Small extra damping at contact to reduce jitter.
-                v *= 0.85;
+                // Water should keep sliding over sand instead of sticking.
+                float contact_damp0 = (is_water && hit0_sand) ? 0.97 : 0.85;
+                v *= contact_damp0;
                 continue;
             }
             float max_step = max(0.0, sd0 - SKIN);
@@ -742,11 +746,13 @@ void main() {
         float sd = 0.0;
         vec3 n = vec3(0.0, 1.0, 0.0);
         bool hit = false;
+        bool hit_sand = false;
         if (query_static_sdf(x_try, sd, n)) {
             hit = true;
         }
         if (!hit && material_id == 2u && query_sand_sdf(x_try, sd, n)) {
             hit = true;
+            hit_sand = true;
         }
         if (!hit && material_id == 1u && query_water_sdf(x_try, sd, n)) {
             hit = true;
@@ -761,7 +767,8 @@ void main() {
 
             v = apply_contact_friction(v, n, mu);
             C = mat3(0.0);
-            v *= 0.9;
+            float contact_damp = (is_water && hit_sand) ? 0.98 : 0.9;
+            v *= contact_damp;
         } else {
             // Discrete fallback.
             ivec3 cell = snap_to_bcc(x_try);
@@ -881,12 +888,17 @@ void main() {
 
     bool down_static = false;
     bool side_static = false;
+    bool down_sand = false;
+    bool side_sand = false;
     if (!need_relocate) {
         ivec3 cdown = old_cell + down_off;
         if (in_bounds(cdown) && bcc_parity(cdown)) {
             uint dai = atlas_index_for_cell(cdown);
             if (dai != 0u && static_atlas.data[dai] != 0u) {
                 down_static = true;
+            }
+            if (is_water && dai != 0u && sand_occ.data[dai] != 0u) {
+                down_sand = true;
             }
         }
         for (int i = 0; i < 14; i++) {
@@ -895,14 +907,20 @@ void main() {
                 continue;
             }
             uint sai = atlas_index_for_cell(cside);
-            if (sai == 0u || static_atlas.data[sai] == 0u) {
+            if (sai == 0u) {
                 continue;
             }
-            if (!all(equal(neigh[i], down_off))) {
+            bool is_down = all(equal(neigh[i], down_off));
+            if (!is_down && static_atlas.data[sai] != 0u) {
                 side_static = true;
+            }
+            if (is_water && !is_down && sand_occ.data[sai] != 0u) {
+                side_sand = true;
             }
         }
     }
+    bool down_support = down_static || (is_water && down_sand);
+    bool side_support = side_static || (is_water && side_sand);
 
     // "Creep" transport: if a particle is at rest and sitting on a static ledge (downward cell is static),
     // but there exists a downhill empty neighbor that requires some lateral component, allow a hop even
@@ -911,7 +929,7 @@ void main() {
     bool optional_transport_creep = false;
     // Only enable creep near the top of the grid. This targets the Paint scene's "glass lip" edge
     // artifacts without affecting the broader water equilibrium behavior in regression scenes.
-    if (down_static && is_water && !need_relocate && all(equal(desired_cell, old_cell)) && (sp < rest_speed)) {
+    if (down_support && is_water && !need_relocate && all(equal(desired_cell, old_cell)) && (sp < rest_speed)) {
         for (int i = 0; i < 14; i++) {
             if (all(equal(neigh[i], down_off))) {
                 continue;
@@ -936,9 +954,14 @@ void main() {
         }
     }
 
-    bool optional_transport_water_side = is_water && side_static && !down_static
+    // For large-volume pours, allow high-altitude, near-stationary water to keep searching for
+    // downhill/lateral exits even when it is not directly resting on static support.
+    bool optional_transport_water_relax_high = is_water && !need_relocate && all(equal(desired_cell, old_cell))
+        && (sp < rest_speed) && (old_cell.y > 12);
+    bool water_high = is_water && (old_cell.y > int(u.grid_info.y) - 24);
+    bool optional_transport_water_side = is_water && side_support && !down_support
         && !need_relocate && all(equal(desired_cell, old_cell)) && (sp < rest_speed);
-    bool optional_transport = optional_transport_water || optional_transport_sand || optional_transport_creep || optional_transport_water_side;
+    bool optional_transport = optional_transport_water || optional_transport_sand || optional_transport_creep || optional_transport_water_side || optional_transport_water_relax_high;
     bool want_move = need_relocate || !all(equal(desired_cell, old_cell)) || optional_transport;
 
     if (want_move) {
@@ -966,21 +989,22 @@ void main() {
         if (need_search) {
             // For sand optional transport, don't gate on speed: the whole point is to allow a hop even
             // when continuous position didn't cross a cell boundary yet.
-            if (sp >= rest_speed || need_relocate || optional_transport_sand || optional_transport_creep) {
-                if (is_water && (sp > 1e-6 || optional_transport_creep || optional_transport_water_side)) {
-                    if (optional_transport_creep || optional_transport_water_side) {
+            if (sp >= rest_speed || need_relocate || optional_transport_sand || optional_transport_creep || optional_transport_water_side || optional_transport_water_relax_high) {
+                if (is_water && (sp > 1e-6 || optional_transport_creep || optional_transport_water_side || optional_transport_water_relax_high)) {
+                    if (optional_transport_creep || optional_transport_water_side || optional_transport_water_relax_high) {
                         // Deterministic downhill hop from rest (no random walk): choose the most
                         // gravity-aligned empty neighbor that isn't the blocked straight-down cell.
                         ivec3 base = old_cell;
                         int best_i = -1;
                         float best_d = -1e9;
                         for (int i = 0; i < 14; i++) {
-                            if (all(equal(neigh[i], down_off))) {
+                            if (all(equal(neigh[i], down_off)) && optional_transport_creep) {
                                 continue;
                             }
                             vec3 ndir = normalize(vec3(neigh[i]));
                             float d = dot(ndir, gdir);
-                            if (d < 0.25) {
+                            float min_d = water_high ? 0.18 : 0.05;
+                            if (d < min_d) {
                                 continue;
                             }
                             ivec3 c = base + neigh[i];
@@ -1025,7 +1049,7 @@ void main() {
                     if (optional_transport_water) {
                         base = old_cell;
                     }
-                        if (optional_transport_creep || optional_transport_water_side) {
+                        if (optional_transport_creep || optional_transport_water_side || optional_transport_water_relax_high) {
                             base = old_cell;
                         }
 
@@ -1036,13 +1060,29 @@ void main() {
                         if (all(equal(c, old_cell)) || !in_bounds(c) || !bcc_parity(c)) {
                             continue;
                         }
+                        if (is_water && !need_relocate) {
+                            float dg = dot(normalize(vec3(neigh[i])), gdir);
+                            if (dg < -0.01) {
+                                // Don't let water fallback choose uphill cells under gravity.
+                                continue;
+                            }
+                            if (water_high && dg < 0.18) {
+                                continue;
+                            }
+                        }
                         uint ai = atlas_index_for_cell(c);
                         if (ai == 0u || static_atlas.data[ai] != 0u) {
                             continue;
                         }
                         vec3 ndir = normalize(vec3(neigh[i]));
-                        // Water leveling requires lateral moves; don't over-bias toward gravity here.
-                        float s = dot(ndir, vdir);
+                        float dg = dot(ndir, gdir);
+                        // Prevent pressure/turbulence from selecting clearly uphill moves that
+                        // make water climb walls/corners/ceiling.
+                        if (!need_relocate && dg < -0.05) {
+                            continue;
+                        }
+                        // Blend flow direction and gravity bias so large pours still drain.
+                        float s = dot(ndir, vdir) * 0.40 + dg * 0.60;
                         if (s > best_s) {
                             best_s = s;
                             best_i = i;
@@ -1072,7 +1112,7 @@ void main() {
                 if (!moved_cell) {
                     // Gravity bias: try the neighbor most aligned with gravity first if moving "down".
                     float grav_thresh = is_sand ? 0.005 : 0.05;
-                    if (dot(v, gdir) > grav_thresh || need_relocate || optional_transport_creep || (is_sand && optional_transport_sand)) {
+                    if (dot(v, gdir) > grav_thresh || need_relocate || optional_transport_creep || optional_transport_water || optional_transport_water_side || optional_transport_water_relax_high || (is_sand && optional_transport_sand)) {
                         ivec3 base = optional_transport ? old_cell : desired_cell;
                         ivec3 c = base + down_off;
                         if (!all(equal(c, old_cell)) && in_bounds(c) && bcc_parity(c)) {
@@ -1148,12 +1188,21 @@ void main() {
                     } else {
                         uint h = p * 1664525u + 1013904223u;
                         int start = int(h % 14u);
-                        for (int k = 0; k < 14 && (need_relocate || (is_sand && optional_transport_sand) || (!moved_cell && !all(equal(desired_cell, old_cell)))); k++) {
+                        for (int k = 0; k < 14 && (need_relocate || optional_transport_water || optional_transport_creep || optional_transport_water_side || optional_transport_water_relax_high || (is_sand && optional_transport_sand) || (!moved_cell && !all(equal(desired_cell, old_cell)))); k++) {
                             int i = (start + k) % 14;
                             ivec3 base = (is_sand && optional_transport_sand) ? old_cell : desired_cell;
                             ivec3 c = base + neigh[i];
                             if (all(equal(c, old_cell)) || !in_bounds(c) || !bcc_parity(c)) {
                                 continue;
+                            }
+                            if (is_water && !need_relocate) {
+                                float dg = dot(normalize(vec3(neigh[i])), gdir);
+                                if (dg < -0.01) {
+                                    continue;
+                                }
+                                if (water_high && dg < 0.18) {
+                                    continue;
+                                }
                             }
                             uint ai = atlas_index_for_cell(c);
                             if (ai == 0u || static_atlas.data[ai] != 0u) {
@@ -1169,6 +1218,32 @@ void main() {
                                 need_relocate = false;
                                 break;
                             }
+                        }
+                    }
+                }
+
+                // High-volume water de-jam: if local neighborhood search failed, attempt a short
+                // straight-down multi-cell claim. This helps clear lingering top/corner pockets
+                // that can otherwise remain suspended under single-occupancy contention.
+                if (!moved_cell && is_water && old_cell.y > 12) {
+                    ivec3 base = old_cell;
+                    for (int step = 2; step <= 4 && !moved_cell; step++) {
+                        ivec3 c = base + down_off * step;
+                        if (!in_bounds(c) || !bcc_parity(c)) {
+                            continue;
+                        }
+                        uint ai = atlas_index_for_cell(c);
+                        if (ai == 0u || static_atlas.data[ai] != 0u) {
+                            continue;
+                        }
+                        uint prev = atomicCompSwap(cell_claim.data[ai], 0u, pid);
+                        if (prev == 0u) {
+                            if (owns_old && old_ai != 0u) {
+                                atomicCompSwap(cell_claim.data[old_ai], pid, 0u);
+                            }
+                            final_cell = c;
+                            moved_cell = true;
+                            need_relocate = false;
                         }
                     }
                 }
@@ -1251,7 +1326,8 @@ void main() {
             // Keep a weak downward bias on blocked liquid so it can drain from ledges/walls.
             float vg = max(0.0, dot(v, gdir));
             float keep = max(0.08, vg * 0.40);
-            v = gdir * min(0.28, keep);
+            vec3 vt = v - gdir * dot(v, gdir);
+            v = gdir * min(0.28, keep) + vt * 0.20;
         } else {
             v = vec3(0.0);
         }
@@ -1271,8 +1347,19 @@ void main() {
                 sleep_speed = 0.02;
             }
         } else if (material_id == 2u) {
-            // Let water keep tiny residual motion longer so it drains instead of perching.
-            sleep_speed = 0.012;
+            // Keep water settling on hard static support, but avoid over-sleeping on granular
+            // sand support so it can continue draining off sand slopes.
+            if (down_static) {
+                sleep_speed = 0.010;
+            } else if (down_sand) {
+                sleep_speed = 0.0015;
+            } else if (side_static) {
+                sleep_speed = 0.001;
+            } else if (side_sand) {
+                sleep_speed = 0.0006;
+            } else {
+                sleep_speed = 0.006;
+            }
         }
         if ((material_id == 1u || material_id == 2u || material_id == 4u) && length(v) < sleep_speed) {
             v = vec3(0.0);
