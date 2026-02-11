@@ -565,6 +565,7 @@ void main() {
     uint material_id = meta.data[p].x;
     bool is_water = (material_id == 2u);
     bool is_sand = (material_id == 1u);
+    bool is_stone = (material_id == 4u);
     uint flags = meta.data[p].y;
     if (material_id == 0u) {
         pos_mass_out.data[p] = pos_mass_in.data[p];
@@ -885,6 +886,7 @@ void main() {
     // - Sand: use gravity-aligned speed so piles respond immediately to gravity direction changes.
     bool optional_transport_water = is_water && !need_relocate && all(equal(desired_cell, old_cell)) && (sp >= rest_speed);
     bool optional_transport_sand = is_sand && !need_relocate && all(equal(desired_cell, old_cell)) && (v_down >= transport_speed);
+    bool optional_transport_stone = is_stone && !need_relocate && all(equal(desired_cell, old_cell)) && (v_down >= transport_speed);
 
     bool down_static = false;
     bool side_static = false;
@@ -961,7 +963,7 @@ void main() {
     bool water_high = is_water && (old_cell.y > int(u.grid_info.y) - 24);
     bool optional_transport_water_side = is_water && side_support && !down_support
         && !need_relocate && all(equal(desired_cell, old_cell)) && (sp < rest_speed);
-    bool optional_transport = optional_transport_water || optional_transport_sand || optional_transport_creep || optional_transport_water_side || optional_transport_water_relax_high;
+    bool optional_transport = optional_transport_water || optional_transport_sand || optional_transport_stone || optional_transport_creep || optional_transport_water_side || optional_transport_water_relax_high;
     bool want_move = need_relocate || !all(equal(desired_cell, old_cell)) || optional_transport;
 
     if (want_move) {
@@ -989,7 +991,7 @@ void main() {
         if (need_search) {
             // For sand optional transport, don't gate on speed: the whole point is to allow a hop even
             // when continuous position didn't cross a cell boundary yet.
-            if (sp >= rest_speed || need_relocate || optional_transport_sand || optional_transport_creep || optional_transport_water_side || optional_transport_water_relax_high) {
+            if (sp >= rest_speed || need_relocate || optional_transport_sand || optional_transport_stone || optional_transport_creep || optional_transport_water_side || optional_transport_water_relax_high) {
                 if (is_water && (sp > 1e-6 || optional_transport_creep || optional_transport_water_side || optional_transport_water_relax_high)) {
                     if (optional_transport_creep || optional_transport_water_side || optional_transport_water_relax_high) {
                         // Deterministic downhill hop from rest (no random walk): choose the most
@@ -1112,7 +1114,7 @@ void main() {
                 if (!moved_cell) {
                     // Gravity bias: try the neighbor most aligned with gravity first if moving "down".
                     float grav_thresh = is_sand ? 0.005 : 0.05;
-                    if (dot(v, gdir) > grav_thresh || need_relocate || optional_transport_creep || optional_transport_water || optional_transport_water_side || optional_transport_water_relax_high || (is_sand && optional_transport_sand)) {
+                    if (dot(v, gdir) > grav_thresh || need_relocate || optional_transport_creep || optional_transport_water || optional_transport_water_side || optional_transport_water_relax_high || (is_sand && optional_transport_sand) || (is_stone && optional_transport_stone)) {
                         ivec3 base = optional_transport ? old_cell : desired_cell;
                         ivec3 c = base + down_off;
                         if (!all(equal(c, old_cell)) && in_bounds(c) && bcc_parity(c)) {
@@ -1188,9 +1190,12 @@ void main() {
                     } else {
                         uint h = p * 1664525u + 1013904223u;
                         int start = int(h % 14u);
-                        for (int k = 0; k < 14 && (need_relocate || optional_transport_water || optional_transport_creep || optional_transport_water_side || optional_transport_water_relax_high || (is_sand && optional_transport_sand) || (!moved_cell && !all(equal(desired_cell, old_cell)))); k++) {
+                        for (int k = 0; k < 14 && (need_relocate || optional_transport_water || optional_transport_creep || optional_transport_water_side || optional_transport_water_relax_high || (is_sand && optional_transport_sand) || (is_stone && optional_transport_stone) || (!moved_cell && !all(equal(desired_cell, old_cell)))); k++) {
                             int i = (start + k) % 14;
-                            ivec3 base = (is_sand && optional_transport_sand) ? old_cell : desired_cell;
+                            ivec3 base = desired_cell;
+                            if ((is_sand && optional_transport_sand) || (is_stone && optional_transport_stone)) {
+                                base = old_cell;
+                            }
                             ivec3 c = base + neigh[i];
                             if (all(equal(c, old_cell)) || !in_bounds(c) || !bcc_parity(c)) {
                                 continue;
@@ -1328,6 +1333,16 @@ void main() {
             float keep = max(0.08, vg * 0.40);
             vec3 vt = v - gdir * dot(v, gdir);
             v = gdir * min(0.28, keep) + vt * 0.20;
+        } else if (material_id == 4u) { // stone
+            // Preserve a small downhill drive for unsupported fragments under heavy occupancy
+            // contention so detached chunks still settle instead of freezing in place.
+            if (down_static) {
+                v = vec3(0.0);
+            } else {
+                float vg = max(0.0, dot(v, gdir));
+                float keep = max(0.05, vg * 0.30);
+                v = gdir * min(0.20, keep);
+            }
         } else {
             v = vec3(0.0);
         }
