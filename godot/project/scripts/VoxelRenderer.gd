@@ -28,6 +28,7 @@ extends Node
 @export var sim_enabled: bool = false
 @export var sim_every: int = 1
 @export var sim_clear_output: bool = true
+@export var sim_force_full_dispatch: bool = false
 @export var sim_mode: int = 1 # 1 = MPM (particles), 0 = legacy CA (grid)
 @export var mpm_dt: float = 1.0 / 60.0
 # If true, advance the simulation using the actual frame `delta` (clamped) so the sim
@@ -296,6 +297,22 @@ func mpm_get_last_stats_raw() -> Array:
 
 func mpm_get_last_stats() -> Dictionary:
     return mpm_last_stats
+
+func debug_ca_status() -> Dictionary:
+    return {
+        "sim_enabled": sim_enabled,
+        "sim_mode": sim_mode,
+        "sim_force_full_dispatch": sim_force_full_dispatch,
+        "sim_pipeline_valid": _sim_pipeline_rid.is_valid(),
+        "sim_set_ab_valid": _sim_uniform_set_ab.is_valid(),
+        "sim_set_ba_valid": _sim_uniform_set_ba.is_valid(),
+        "sim_dispatch_valid": _sim_dispatch_rid.is_valid(),
+        "active_list_pipeline_valid": _active_list_pipeline_rid.is_valid(),
+        "active_list_set_valid": _active_list_uniform_set_rid.is_valid(),
+        "active_dispatch_pipeline_valid": _active_dispatch_pipeline_rid.is_valid(),
+        "active_dispatch_set_valid": _active_dispatch_uniform_set_rid.is_valid(),
+        "active_list_ready": _active_list_ready,
+    }
 
 func mpm_request_discrete_audit() -> int:
     # Automation/test helper: compute discrete voxel invariants (no compression, no multi-material per cell,
@@ -3403,10 +3420,32 @@ func _dispatch_sim(_grid_extent: int) -> void:
     var uniform_set := _sim_uniform_set_ab if use_a else _sim_uniform_set_ba    
     if !uniform_set.is_valid():
         return
-    if !_sim_dispatch_rid.is_valid():
+    var groups_per_brick := int(ceil(float(chunk_size) / 4.0))
+    if groups_per_brick < 1:
+        groups_per_brick = 1
+    var brick_count := chunk_grid * chunk_grid * chunk_grid
+    if brick_count <= 0:
         return
-    if !_active_list_ready:
-        return
+
+    if sim_force_full_dispatch:
+        if !_active_list_rid.is_valid() or !_active_count_rid.is_valid():
+            return
+        # Fallback path for environments where active-list compute dispatch can fail.
+        # Write a deterministic full brick list and run the CA sim over the full domain.
+        var full_list := PackedInt32Array()
+        full_list.resize(brick_count)
+        for i in range(brick_count):
+            full_list[i] = i
+        var list_bytes := full_list.to_byte_array()
+        _rd.buffer_update(_active_list_rid, 0, list_bytes.size(), list_bytes)
+        var count_bytes := PackedInt32Array([brick_count]).to_byte_array()
+        _rd.buffer_update(_active_count_rid, 0, count_bytes.size(), count_bytes)
+    else:
+        if !_sim_dispatch_rid.is_valid():
+            return
+        if !_active_list_ready:
+            return
+
     if diag_enabled and (_debug_frame % max(1, diag_every) == 0):
         print("Sim dispatch | frame=%d atlas_in=%s" % [_debug_frame, "A" if use_a else "B"])
     var atlas_out := _atlas_b_rid if use_a else _atlas_a_rid
@@ -3418,7 +3457,10 @@ func _dispatch_sim(_grid_extent: int) -> void:
     var list := _rd.compute_list_begin()
     _rd.compute_list_bind_compute_pipeline(list, _sim_pipeline_rid)
     _rd.compute_list_bind_uniform_set(list, uniform_set, 0)
-    _rd.compute_list_dispatch_indirect(list, _sim_dispatch_rid, 0)
+    if sim_force_full_dispatch:
+        _rd.compute_list_dispatch(list, brick_count * groups_per_brick, groups_per_brick, groups_per_brick)
+    else:
+        _rd.compute_list_dispatch_indirect(list, _sim_dispatch_rid, 0)
     _rd.compute_list_end()
     _atlas_use_a = !use_a
 

@@ -44,6 +44,9 @@ text = "Plinko: Glass + Sand"
 [node name="PaintButton" type="Button" parent="Margin/VBox"]
 text = "Paint: Materials"
 
+[node name="VoxelGameButton" type="Button" parent="Margin/VBox"]
+text = "Voxel Game: FPS Pick + Place"
+
 [node name="StonePillarButton" type="Button" parent="Margin/VBox"]
 text = "Stone Pillar: Rigid + Fracture"
 

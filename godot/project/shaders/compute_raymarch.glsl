@@ -255,9 +255,15 @@ void main() {
         return;
     }
 
-    const int MAX_STEPS = 4096;
-    const int MAX_BRICK_STEPS = 2048;
-    float base_step = 0.01 * u.misc.x;
+    const int MAX_STEPS = 2048;
+    const int MAX_BRICK_STEPS = 1024;
+    bool cam_inside_grid = all(greaterThanEqual(ro, grid_min)) && all(lessThanEqual(ro, grid_max));
+    int max_steps_runtime = cam_inside_grid ? 1024 : MAX_STEPS;
+    int max_brick_steps_runtime = cam_inside_grid ? 512 : MAX_BRICK_STEPS;
+    int sdf_steps_runtime = cam_inside_grid ? 56 : 96;
+    int shadow_steps_runtime = cam_inside_grid ? 8 : 24;
+    int reflection_steps_runtime = cam_inside_grid ? 4 : 16;
+    float base_step = (cam_inside_grid ? 0.03 : 0.015) * u.misc.x;
     float empty_step = max(base_step, (t_exit - max(t_enter, 0.0)) / float(MAX_STEPS));
     vec3 ro_cell = (ro - grid_min) / u.misc.x;
     vec3 rd_cell = rd / u.misc.x;
@@ -297,6 +303,9 @@ void main() {
     );
 
     for (int b = 0; b < MAX_BRICK_STEPS; b++) {
+        if (b >= max_brick_steps_runtime) {
+            break;
+        }
         step_count++;
         if (t > t_exit || t > u.misc.y) {
             break;
@@ -328,6 +337,9 @@ void main() {
         if (brick_active) {
             float t_cell = t;
             for (int i = 0; i < MAX_STEPS; i++) {
+                if (i >= max_steps_runtime) {
+                    break;
+                }
                 step_count++;
                 if (t_cell > t_brick_limit || t_cell > u.misc.y) {
                     break;
@@ -386,6 +398,9 @@ void main() {
                             float min_step = a * 0.01;
                             bool glass_hit = false;
                             for (int j = 0; j < 128; j++) {
+                                if (j >= sdf_steps_runtime) {
+                                    break;
+                                }
                                 step_count++;
                                 if (t_voxel > t_cell_max) {
                                     break;
@@ -413,6 +428,9 @@ void main() {
                                     float shadow = 1.0;
                                     float t_shadow = 0.02;
                                     for (int s = 0; s < 24; s++) {
+                                        if (s >= shadow_steps_runtime) {
+                                            break;
+                                        }
                                         vec3 sp = hit_pos + light_dir * t_shadow;
                                         vec3 s_local = (sp - grid_min) / u.misc.x;
                                         ivec3 s_cell = nearest_bcc(s_local);
@@ -444,6 +462,9 @@ void main() {
                                     vec3 refl_dir = reflect(rd, n);
                                     float t_refl = 0.05;
                                     for (int r = 0; r < 16; r++) {
+                                        if (r >= reflection_steps_runtime) {
+                                            break;
+                                        }
                                         vec3 rp = hit_pos + refl_dir * t_refl;
                                         vec3 r_local = (rp - grid_min) / u.misc.x;
                                         ivec3 r_cell = nearest_bcc(r_local);

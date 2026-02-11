@@ -1,0 +1,79 @@
+[gd_scene load_steps=5 format=3]
+
+[ext_resource type="Script" path="res://scripts/VoxelRenderer.gd" id="1"]
+[ext_resource type="Shader" path="res://shaders/compute_display.gdshader" id="2"]
+[ext_resource type="Script" path="res://scripts/VoxelGameController.gd" id="3"]
+
+[sub_resource type="QuadMesh" id="1"]
+size = Vector2(2, 2)
+
+[sub_resource type="ShaderMaterial" id="2"]
+shader = ExtResource("2")
+
+[node name="VoxelGame" type="Node3D"]
+
+[node name="Player" type="Node3D" parent="."]
+
+[node name="Camera3D" type="Camera3D" parent="Player"]
+current = true
+fov = 75.0
+
+[node name="RaymarchQuad" type="MeshInstance3D" parent="Player/Camera3D"]
+position = Vector3(0, 0, -1)
+scale = Vector3(2, 2, 2)
+mesh = SubResource("1")
+material_override = SubResource("2")
+
+[node name="VoxelRenderer" type="Node" parent="."]
+script = ExtResource("1")
+quad_path = NodePath("../Player/Camera3D/RaymarchQuad")
+camera_path = NodePath("../Player/Camera3D")
+width = 640
+height = 360
+chunk_size = 8
+chunk_grid = 8
+max_distance = 48.0
+auto_max_distance = false
+light_every = 2
+sim_enabled = true
+sim_every = 1
+sim_force_full_dispatch = true
+sim_mode = 0
+
+[node name="VoxelGameController" type="Node3D" parent="."]
+script = ExtResource("3")
+voxel_renderer_path = NodePath("../VoxelRenderer")
+player_path = NodePath("../Player")
+camera_path = NodePath("../Player/Camera3D")
+overlay_path = NodePath("../HUD/InfoLabel")
+chunk_radius_cells = 16
+terrain_height = 8
+top_material_id = 4
+default_place_material = 1
+alt_place_material = 4
+
+[node name="HUD" type="CanvasLayer" parent="."]
+
+[node name="InfoLabel" type="Label" parent="HUD"]
+anchor_right = 0.0
+anchor_bottom = 0.0
+offset_left = 16.0
+offset_top = 16.0
+offset_right = 860.0
+offset_bottom = 130.0
+text = "Voxel Game Prototype"
+theme_override_font_sizes/font_size = 16
+
+[node name="Crosshair" type="Label" parent="HUD"]
+anchor_left = 0.5
+anchor_top = 0.5
+anchor_right = 0.5
+anchor_bottom = 0.5
+offset_left = -8.0
+offset_top = -18.0
+offset_right = 8.0
+offset_bottom = 18.0
+text = "+"
+horizontal_alignment = 1
+vertical_alignment = 1
+theme_override_font_sizes/font_size = 28
