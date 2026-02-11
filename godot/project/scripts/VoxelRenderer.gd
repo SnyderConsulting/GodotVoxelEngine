@@ -391,6 +391,147 @@ func mpm_get_material_column_metrics(mat_id: int) -> Dictionary:
     out["range_h"] = maxi(0, max_h - min_h)
     return out
 
+func mpm_get_particle_snapshot(material_id: int = -1, limit: int = 0) -> Dictionary:
+    var out: Dictionary = {
+        "count": 0,
+        "gravity_grid": [0.0, -1.0, 0.0],
+        "particles": [],
+        "contact": {
+            "near_static": 0,
+            "down_static": 0,
+            "near_static_slow": 0,
+            "near_static_slow_ratio": 0.0
+        }
+    }
+    if _rd == null or sim_mode != 1:
+        return out
+    if !_mpm_particle_count_rid.is_valid() or !_mpm_meta_rid.is_valid():
+        return out
+    var pos_rid: RID = _mpm_pos_mass_a_rid if _mpm_particles_use_a else _mpm_pos_mass_b_rid
+    var vel_rid: RID = _mpm_vel_vol_a_rid if _mpm_particles_use_a else _mpm_vel_vol_b_rid
+    if !pos_rid.is_valid() or !vel_rid.is_valid() or !_atlas_static_rid.is_valid():
+        return out
+
+    var count_bytes := _rd.buffer_get_data(_mpm_particle_count_rid, 0, 4)
+    if count_bytes.size() < 4:
+        return out
+    var count_vals := count_bytes.to_int32_array()
+    if count_vals.size() == 0:
+        return out
+    var count := maxi(0, int(count_vals[0]))
+    if count <= 0:
+        return out
+
+    var bytes_per_particle := 16 # vec4 / uvec4
+    var max_bytes := count * bytes_per_particle
+    var pos_bytes := _rd.buffer_get_data(pos_rid, 0, max_bytes)
+    var vel_bytes := _rd.buffer_get_data(vel_rid, 0, max_bytes)
+    var meta_bytes := _rd.buffer_get_data(_mpm_meta_rid, 0, max_bytes)
+    if pos_bytes.size() < max_bytes or vel_bytes.size() < max_bytes or meta_bytes.size() < max_bytes:
+        return out
+    var pos_vals := pos_bytes.to_float32_array()
+    var vel_vals := vel_bytes.to_float32_array()
+    var meta_vals := meta_bytes.to_int32_array()
+    if pos_vals.size() < count * 4 or vel_vals.size() < count * 4 or meta_vals.size() < count * 4:
+        return out
+
+    var static_vals := _rd.buffer_get_data(_atlas_static_rid).to_int32_array()
+    var world_basis := Basis.from_euler(world_rotation)
+    var gravity_world := gravity_dir
+    if gravity_world.length() < 0.001:
+        gravity_world = Vector3.DOWN
+    gravity_world = gravity_world.normalized()
+    var gravity_grid := (world_basis.inverse() * gravity_world).normalized()
+    out["gravity_grid"] = [gravity_grid.x, gravity_grid.y, gravity_grid.z]
+
+    var neigh: Array[Vector3i] = [
+        Vector3i(2, 0, 0), Vector3i(-2, 0, 0),
+        Vector3i(0, 2, 0), Vector3i(0, -2, 0),
+        Vector3i(0, 0, 2), Vector3i(0, 0, -2),
+        Vector3i(1, 1, 1), Vector3i(1, 1, -1),
+        Vector3i(1, -1, 1), Vector3i(1, -1, -1),
+        Vector3i(-1, 1, 1), Vector3i(-1, 1, -1),
+        Vector3i(-1, -1, 1), Vector3i(-1, -1, -1),
+    ]
+    var axis_neigh: Array[Vector3i] = [
+        Vector3i(2, 0, 0), Vector3i(-2, 0, 0),
+        Vector3i(0, 2, 0), Vector3i(0, -2, 0),
+        Vector3i(0, 0, 2), Vector3i(0, 0, -2),
+    ]
+    var down_off := Vector3i(0, -2, 0)
+    var best_g := -1e9
+    for o in neigh:
+        var d := gravity_grid.dot(Vector3(o).normalized())
+        if d > best_g:
+            best_g = d
+            down_off = o
+
+    var particles: Array = []
+    particles.resize(0)
+    var max_out := count
+    if limit > 0:
+        max_out = mini(max_out, limit)
+    var near_static := 0
+    var down_static := 0
+    var near_static_slow := 0
+    const SLOW_SPEED := 0.2
+
+    var emitted := 0
+    var filtered_count := 0
+    for i in range(count):
+        var mat_id := int(meta_vals[i * 4 + 0])
+        if material_id > 0 and mat_id != material_id:
+            continue
+        filtered_count += 1
+        var pos := Vector3(pos_vals[i * 4 + 0], pos_vals[i * 4 + 1], pos_vals[i * 4 + 2])
+        var vel := Vector3(vel_vals[i * 4 + 0], vel_vals[i * 4 + 1], vel_vals[i * 4 + 2])
+        var cell := _snap_cell_in_bounds_to_bcc(Vector3i(int(round(pos.x)), int(round(pos.y)), int(round(pos.z))))
+        if cell.x < 0:
+            continue
+
+        var has_near_static := false
+        for o in axis_neigh:
+            var c := cell + o
+            var ai := _atlas_index_for_cell(c)
+            if ai >= 0 and ai < static_vals.size() and static_vals[ai] != 0:
+                has_near_static = true
+                break
+        var has_down_static := false
+        var dcell := cell + down_off
+        var dai := _atlas_index_for_cell(dcell)
+        if dai >= 0 and dai < static_vals.size() and static_vals[dai] != 0:
+            has_down_static = true
+
+        if has_near_static:
+            near_static += 1
+            if vel.length() <= SLOW_SPEED:
+                near_static_slow += 1
+        if has_down_static:
+            down_static += 1
+
+        if emitted < max_out:
+            particles.append({
+                "i": i,
+                "mat": mat_id,
+                "pos": [pos.x, pos.y, pos.z],
+                "vel": [vel.x, vel.y, vel.z],
+                "speed": vel.length(),
+                "cell": [cell.x, cell.y, cell.z],
+                "near_static": has_near_static,
+                "down_static": has_down_static
+            })
+            emitted += 1
+
+    out["count"] = filtered_count
+    out["particles"] = particles
+    out["contact"] = {
+        "near_static": near_static,
+        "down_static": down_static,
+        "near_static_slow": near_static_slow,
+        "near_static_slow_ratio": float(near_static_slow) / float(maxi(1, near_static))
+    }
+    return out
+
 func _mpm_discrete_audit_on_render_thread(request_id: int) -> void:
     if _rd == null:
         return
@@ -4959,6 +5100,69 @@ func mpm_spawn_cells(cells: Array, material: int, velocity: Vector3 = Vector3.ZE
 
 func mpm_spawn_particle(cell: Vector3i, material: int, velocity: Vector3 = Vector3.ZERO, flags: int = 0) -> bool:
     return mpm_spawn_cells([cell], material, velocity, 4.0, flags) > 0
+
+func _variant_to_vec3i(v: Variant) -> Vector3i:
+    if typeof(v) == TYPE_VECTOR3I:
+        return v as Vector3i
+    if typeof(v) == TYPE_VECTOR3:
+        var vv: Vector3 = v as Vector3
+        return Vector3i(int(round(vv.x)), int(round(vv.y)), int(round(vv.z)))
+    if typeof(v) == TYPE_ARRAY:
+        var a: Array = v as Array
+        if a.size() >= 3:
+            return Vector3i(int(a[0]), int(a[1]), int(a[2]))
+    if typeof(v) == TYPE_DICTIONARY:
+        var d: Dictionary = v as Dictionary
+        return Vector3i(int(d.get("x", 0)), int(d.get("y", 0)), int(d.get("z", 0)))
+    return Vector3i(-1, -1, -1)
+
+func _variant_to_vec3(v: Variant) -> Vector3:
+    if typeof(v) == TYPE_VECTOR3:
+        return v as Vector3
+    if typeof(v) == TYPE_VECTOR3I:
+        var vi: Vector3i = v as Vector3i
+        return Vector3(float(vi.x), float(vi.y), float(vi.z))
+    if typeof(v) == TYPE_ARRAY:
+        var a: Array = v as Array
+        if a.size() >= 3:
+            return Vector3(float(a[0]), float(a[1]), float(a[2]))
+    if typeof(v) == TYPE_DICTIONARY:
+        var d: Dictionary = v as Dictionary
+        return Vector3(float(d.get("x", 0.0)), float(d.get("y", 0.0)), float(d.get("z", 0.0)))
+    return Vector3.ZERO
+
+func automation_spawn_cells(cells_xyz: Array, material: int, velocity_xyz: Variant = Vector3.ZERO, volume: float = 4.0, flags: int = 0) -> int:
+    var cells: Array = []
+    for v in cells_xyz:
+        var c := _variant_to_vec3i(v)
+        if c.x >= 0:
+            cells.append(c)
+    return mpm_spawn_cells(cells, material, _variant_to_vec3(velocity_xyz), volume, flags)
+
+func automation_set_voxels(cells_xyz: Array, material: int) -> int:
+    var n := 0
+    for v in cells_xyz:
+        var c := _variant_to_vec3i(v)
+        if c.x < 0:
+            continue
+        set_voxel_at(c, material)
+        n += 1
+    return n
+
+func automation_get_cell_materials(cells_xyz: Array) -> Dictionary:
+    var out: Dictionary = {}
+    for v in cells_xyz:
+        var c := _variant_to_vec3i(v)
+        if c.x < 0:
+            continue
+        out["%d,%d,%d" % [c.x, c.y, c.z]] = get_cell_material(c)
+    return out
+
+func automation_reset_empty() -> void:
+    if sim_mode == 1:
+        set_voxel_entries_mpm([])
+    else:
+        set_voxel_entries([], true)
 
 func set_voxel_at(cell: Vector3i, material: int) -> void:
     if _rd == null:

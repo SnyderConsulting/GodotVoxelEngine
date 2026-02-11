@@ -113,6 +113,47 @@ bool bcc_parity(ivec3 cell) {
     return ((cell.x & 1) == (cell.y & 1)) && ((cell.y & 1) == (cell.z & 1));
 }
 
+uint hash_u32(uint x) {
+    x ^= x >> 16;
+    x *= 0x7feb352du;
+    x ^= x >> 15;
+    x *= 0x846ca68bu;
+    x ^= x >> 16;
+    return x;
+}
+
+float hash01(uint x) {
+    return float(hash_u32(x) & 0x00ffffffu) / 16777215.0;
+}
+
+vec3 gravity_dir_norm() {
+    vec3 g = u.debug_info.xyz;
+    float gl = length(g);
+    if (gl < 1e-6) {
+        return vec3(0.0, -1.0, 0.0);
+    }
+    return g / gl;
+}
+
+vec3 apply_contact_friction(vec3 v_in, vec3 n, float mu) {
+    float mu_c = clamp(mu, 0.0, 0.95);
+    vec3 vn = n * dot(v_in, n);
+    vec3 vt = v_in - vn;
+
+    // Preserve tangential motion aligned with gravity projected on the contact plane.
+    // This allows sand/water to slide down walls instead of appearing glued.
+    vec3 g = gravity_dir_norm();
+    vec3 g_tan = g - n * dot(g, n);
+    float gl = length(g_tan);
+    if (gl < 1e-6) {
+        return v_in - vt * mu_c;
+    }
+    vec3 tdir = g_tan / gl;
+    vec3 vt_g = tdir * dot(vt, tdir);
+    vec3 vt_cross = vt - vt_g;
+    return v_in - vt_cross * mu_c;
+}
+
 float sdf_truncated_octahedron(vec3 p) {
     const float inv_sqrt3 = 0.57735026919;
     const float scale = 2.0;
@@ -322,7 +363,8 @@ void material_params(uint material_id, out float shear_relax, out float damping,
         // shows up as "voxel compression" in the UI). Use PIC transfer for stability.
         shear_relax = 0.10;
         // Slightly less damping so gravity-driven settling doesn't feel "floaty".
-        damping = 0.996;
+        // Keep enough damping to settle, but avoid "glued to wall" behavior after world rotation.
+        damping = 0.985;
         j_min = 0.97;
         j_max = 1.03;
         apic = 0.0;
@@ -619,6 +661,14 @@ void main() {
     if (pvm > pvmax) {
         v *= pvmax / pvm;
     }
+    if (is_sand) {
+        // Sand should not retain runaway velocities after contact-rich tumbler motion.
+        float sand_vmax = sand_wet ? 8.0 : 10.0;
+        float sv = length(v);
+        if (sv > sand_vmax) {
+            v *= sand_vmax / sv;
+        }
+    }
 
     float dt = max(0.0, u.grid_info.w);
     // Clamp to simulation bounds (grid space).
@@ -628,9 +678,9 @@ void main() {
     // Friction depends on material.
     float mu = 0.35;
     if (material_id == 1u) { // sand
-        mu = 0.55;
+        mu = 0.35;
         if (sand_wet) {
-            mu = 0.22;
+            mu = 0.16;
         }
     } else if (material_id == 2u) { // water
         mu = 0.02;
@@ -673,8 +723,7 @@ void main() {
                 if (vn0 < 0.0) {
                     v = v - vn0 * n0;
                 }
-                vec3 vt0 = v - dot(v, n0) * n0;
-                v = v - vt0 * clamp(mu, 0.0, 0.95);
+                v = apply_contact_friction(v, n0, mu);
                 C = mat3(0.0);
                 // Small extra damping at contact to reduce jitter.
                 v *= 0.85;
@@ -710,8 +759,7 @@ void main() {
                 v = v - vn * n;
             }
 
-            vec3 vt = v - dot(v, n) * n;
-            v = v - vt * clamp(mu, 0.0, 0.95);
+            v = apply_contact_friction(v, n, mu);
             C = mat3(0.0);
             v *= 0.9;
         } else {
@@ -767,7 +815,9 @@ void main() {
     // hop to a neighboring cell once the velocity is sufficiently aligned with gravity.
     float transport_speed = 0.02;
     if (material_id == 1u) { // sand
-        transport_speed = sand_wet ? 0.015 : 0.02;
+        // Moderate threshold keeps responsiveness when gravity direction changes (world rotation)
+        // without reintroducing high-frequency jitter.
+        transport_speed = sand_wet ? 0.06 : 0.08;
     } else if (material_id == 4u) { // stone
         transport_speed = 0.06;
     }
@@ -830,12 +880,26 @@ void main() {
     bool optional_transport_sand = is_sand && !need_relocate && all(equal(desired_cell, old_cell)) && (v_down >= transport_speed);
 
     bool down_static = false;
+    bool side_static = false;
     if (!need_relocate) {
         ivec3 cdown = old_cell + down_off;
         if (in_bounds(cdown) && bcc_parity(cdown)) {
             uint dai = atlas_index_for_cell(cdown);
             if (dai != 0u && static_atlas.data[dai] != 0u) {
                 down_static = true;
+            }
+        }
+        for (int i = 0; i < 14; i++) {
+            ivec3 cside = old_cell + neigh[i];
+            if (!in_bounds(cside) || !bcc_parity(cside)) {
+                continue;
+            }
+            uint sai = atlas_index_for_cell(cside);
+            if (sai == 0u || static_atlas.data[sai] == 0u) {
+                continue;
+            }
+            if (!all(equal(neigh[i], down_off))) {
+                side_static = true;
             }
         }
     }
@@ -848,7 +912,7 @@ void main() {
     // Only enable creep near the top of the grid. This targets the Paint scene's "glass lip" edge
     // artifacts without affecting the broader water equilibrium behavior in regression scenes.
     bool near_top = (old_cell.y >= int(u.grid_info.y) - 3);
-    if (near_top && down_static && (is_water || is_sand) && !need_relocate && all(equal(desired_cell, old_cell)) && (sp < rest_speed)) {
+    if (near_top && down_static && is_water && !need_relocate && all(equal(desired_cell, old_cell)) && (sp < rest_speed)) {
         for (int i = 0; i < 14; i++) {
             if (all(equal(neigh[i], down_off))) {
                 continue;
@@ -902,52 +966,6 @@ void main() {
             // For sand optional transport, don't gate on speed: the whole point is to allow a hop even
             // when continuous position didn't cross a cell boundary yet.
             if (sp >= rest_speed || need_relocate || optional_transport_sand || optional_transport_creep) {
-                if (optional_transport_creep && is_sand && !moved_cell) {
-                    // Same "ledge creep" as water, but for sand: pick the most gravity-aligned empty
-                    // neighbor that isn't the blocked straight-down cell.
-                    ivec3 base = old_cell;
-                    int best_i = -1;
-                    float best_d = -1e9;
-                    for (int i = 0; i < 14; i++) {
-                        if (all(equal(neigh[i], down_off))) {
-                            continue;
-                        }
-                        vec3 ndir = normalize(vec3(neigh[i]));
-                        float d = dot(ndir, gdir);
-                        if (d < 0.25) {
-                            continue;
-                        }
-                        ivec3 c = base + neigh[i];
-                        if (all(equal(c, old_cell)) || !in_bounds(c) || !bcc_parity(c)) {
-                            continue;
-                        }
-                        uint ai = atlas_index_for_cell(c);
-                        if (ai == 0u || static_atlas.data[ai] != 0u || cell_claim.data[ai] != 0u) {
-                            continue;
-                        }
-                        if (d > best_d) {
-                            best_d = d;
-                            best_i = i;
-                        }
-                    }
-
-                    if (best_i >= 0) {
-                        ivec3 c = base + neigh[best_i];
-                        uint ai = atlas_index_for_cell(c);
-                        if (ai != 0u && static_atlas.data[ai] == 0u) {
-                            uint prev = atomicCompSwap(cell_claim.data[ai], 0u, pid);
-                            if (prev == 0u) {
-                                if (owns_old && old_ai != 0u) {
-                                    atomicCompSwap(cell_claim.data[old_ai], pid, 0u);
-                                }
-                                final_cell = c;
-                                moved_cell = true;
-                                need_relocate = false;
-                            }
-                        }
-                    }
-                }
-
                 if (is_water && (sp > 1e-6 || optional_transport_creep)) {
                     if (optional_transport_creep) {
                         // Deterministic downhill hop from rest (no random walk): choose the most
@@ -1072,28 +1090,80 @@ void main() {
                         }
                     }
 
-                    uint h = p * 1664525u + 1013904223u;
-                    int start = int(h % 14u);
-                    for (int k = 0; k < 14 && (need_relocate || (is_sand && optional_transport_sand) || (!moved_cell && !all(equal(desired_cell, old_cell)))); k++) {
-                        int i = (start + k) % 14;
-                        ivec3 base = (is_sand && optional_transport_sand) ? old_cell : desired_cell;
-                        ivec3 c = base + neigh[i];
-                        if (all(equal(c, old_cell)) || !in_bounds(c) || !bcc_parity(c)) {
-                            continue;
+                    if (is_sand) {
+                        // Deterministic fallback for sand: choose the most gravity-aligned
+                        // available neighbor (avoid randomized lateral scattering).
+                        ivec3 base = optional_transport_sand ? old_cell : desired_cell;
+                        bool tried[14];
+                        for (int i = 0; i < 14; i++) {
+                            tried[i] = false;
                         }
-                        uint ai = atlas_index_for_cell(c);
-                        if (ai == 0u || static_atlas.data[ai] != 0u) {
-                            continue;
-                        }
-                        uint prev = atomicCompSwap(cell_claim.data[ai], 0u, pid);
-                        if (prev == 0u) {
-                            if (owns_old && old_ai != 0u) {
-                                atomicCompSwap(cell_claim.data[old_ai], pid, 0u);
+                        for (int attempt = 0; attempt < 14 && !moved_cell; attempt++) {
+                            int best_i = -1;
+                            float best_d = -1e9;
+                            for (int i = 0; i < 14; i++) {
+                                if (tried[i]) {
+                                    continue;
+                                }
+                                ivec3 c = base + neigh[i];
+                                if (all(equal(c, old_cell)) || !in_bounds(c) || !bcc_parity(c)) {
+                                    continue;
+                                }
+                                uint ai = atlas_index_for_cell(c);
+                                if (ai == 0u || static_atlas.data[ai] != 0u) {
+                                    continue;
+                                }
+                                float d = dot(normalize(vec3(neigh[i])), gdir);
+                                // Keep gravity as the dominant direction, but break ties with a
+                                // tiny per-particle stochastic term so tall columns don't collapse
+                                // in perfectly uniform lateral lanes.
+                                float jitter = (hash01(pid * 73856093u + uint(i) * 19349663u + uint(attempt) * 83492791u) - 0.5) * 0.06;
+                                float score = d + jitter;
+                                if (score > best_d) {
+                                    best_d = score;
+                                    best_i = i;
+                                }
                             }
-                            final_cell = c;
-                            moved_cell = true;
-                            need_relocate = false;
-                            break;
+                            if (best_i < 0) {
+                                break;
+                            }
+                            tried[best_i] = true;
+                            ivec3 c = base + neigh[best_i];
+                            uint ai = atlas_index_for_cell(c);
+                            uint prev = atomicCompSwap(cell_claim.data[ai], 0u, pid);
+                            if (prev == 0u) {
+                                if (owns_old && old_ai != 0u) {
+                                    atomicCompSwap(cell_claim.data[old_ai], pid, 0u);
+                                }
+                                final_cell = c;
+                                moved_cell = true;
+                                need_relocate = false;
+                            }
+                        }
+                    } else {
+                        uint h = p * 1664525u + 1013904223u;
+                        int start = int(h % 14u);
+                        for (int k = 0; k < 14 && (need_relocate || (is_sand && optional_transport_sand) || (!moved_cell && !all(equal(desired_cell, old_cell)))); k++) {
+                            int i = (start + k) % 14;
+                            ivec3 base = (is_sand && optional_transport_sand) ? old_cell : desired_cell;
+                            ivec3 c = base + neigh[i];
+                            if (all(equal(c, old_cell)) || !in_bounds(c) || !bcc_parity(c)) {
+                                continue;
+                            }
+                            uint ai = atlas_index_for_cell(c);
+                            if (ai == 0u || static_atlas.data[ai] != 0u) {
+                                continue;
+                            }
+                            uint prev = atomicCompSwap(cell_claim.data[ai], 0u, pid);
+                            if (prev == 0u) {
+                                if (owns_old && old_ai != 0u) {
+                                    atomicCompSwap(cell_claim.data[old_ai], pid, 0u);
+                                }
+                                final_cell = c;
+                                moved_cell = true;
+                                need_relocate = false;
+                                break;
+                            }
                         }
                     }
                 }
@@ -1162,17 +1232,42 @@ void main() {
         // every time they fail to claim an empty neighbor.
         F = f_in.data[p];
         if (material_id == 1u) { // sand
-            v *= 0.6;
+            // Preserve a small gravity-aligned drive so tall columns keep collapsing instead of
+            // freezing when many particles contend for nearby cells in one substep.
+            float vg = max(0.0, dot(v, gdir));
+            float keep = max(0.08, vg * 0.35);
+            v = gdir * min(0.35, keep);
         } else {
             v = vec3(0.0);
         }
         C = mat3(0.0);
     } else if (!moved_cell) {
-        // For sand, keep small residual velocity so piles respond immediately to gravity changes.
-        // For water/stone, kill tiny velocities at rest to reduce churn/noise and help equilibrium.
-        if ((material_id == 2u || material_id == 4u) && length(v) < rest_speed) {
+        // Sleep tiny velocities at rest. Sand uses a lower threshold so it still responds quickly
+        // to gravity changes, but settled piles become truly static instead of jittering.
+        float sleep_speed = rest_speed;
+        if (material_id == 1u) {
+            // Only use a larger sleep threshold when supported from below.
+            // On side walls (no downward support), keep a tiny threshold so sand can slide.
+            if (down_static) {
+                sleep_speed = 0.08;
+            } else if (side_static) {
+                sleep_speed = 0.01;
+            } else {
+                sleep_speed = 0.015;
+            }
+        }
+        if ((material_id == 1u || material_id == 2u || material_id == 4u) && length(v) < sleep_speed) {
             v = vec3(0.0);
             C = mat3(0.0);
+        }
+    }
+
+    if (material_id == 1u) {
+        // Final safety cap after collision / sleep logic to avoid visible "exploding" outliers.
+        float sand_vmax_final = sand_wet ? 7.0 : 8.0;
+        float svf = length(v);
+        if (svf > sand_vmax_final) {
+            v *= sand_vmax_final / svf;
         }
     }
 
