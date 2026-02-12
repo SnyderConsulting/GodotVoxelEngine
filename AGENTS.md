@@ -5,25 +5,53 @@ Operational notes for agents working in this repository, especially around launc
 
 ## macOS Launch Runbook
 
-### Reliable interactive launch (works)
-When launched from non-interactive/background shell contexts, Godot may run but no window appears.  
-Use a real desktop Terminal session:
-
-```bash
-osascript <<'APPLESCRIPT'
-tell application "Terminal"
-  activate
-  do script "cd /Users/andrewsnyder/AI-Projects/GodotVoxelEngine && /usr/local/bin/godot --path /Users/andrewsnyder/AI-Projects/GodotVoxelEngine/godot/project --scene res://scenes/ProtoHub.tscn --windowed --resolution 1280x720 --position 80,80"
-end tell
-APPLESCRIPT
-```
-
-### Standard direct launch command
-Run from a local user shell:
+### Preferred interactive launch (stable)
+Use the local engine app wrapper via macOS LaunchServices. This is the most reliable way to keep the GUI process alive:
 
 ```bash
 cd /Users/andrewsnyder/AI-Projects/GodotVoxelEngine
-/usr/local/bin/godot --path godot/project --scene res://scenes/ProtoHub.tscn
+open -n "$(pwd)/godot/engine-src/bin/godot_macos_editor.app" \
+  --args \
+  --path "$(pwd)/godot/project" \
+  --scene res://scenes/ProtoHub.tscn \
+  --disable-crash-handler
+```
+
+### Why this is needed
+- Launching the raw binary from non-interactive shells can spawn briefly, then close.
+- `open ... godot_macos_editor.app --args ...` keeps app lifecycle under LaunchServices so the window persists.
+
+### If the app wrapper is broken (empty `.app` or missing executable)
+Symptoms:
+- `open` returns: "The application cannot be opened because its executable is missing."
+
+Repair:
+
+```bash
+cd /Users/andrewsnyder/AI-Projects/GodotVoxelEngine
+mkdir -p godot/engine-src/bin/godot_macos_editor.app/Contents/MacOS
+
+cat > godot/engine-src/bin/godot_macos_editor.app/Contents/Info.plist <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleName</key><string>GodotVoxelEditor</string>
+  <key>CFBundleIdentifier</key><string>org.godotengine.voxeland.editor</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleExecutable</key><string>godot_macos_editor</string>
+</dict>
+</plist>
+PLIST
+
+cat > godot/engine-src/bin/godot_macos_editor.app/Contents/MacOS/godot_macos_editor <<'SH'
+#!/bin/zsh
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+exec "$SCRIPT_DIR/../../../godot.macos.editor.arm64" "$@"
+SH
+
+chmod +x godot/engine-src/bin/godot_macos_editor.app/Contents/MacOS/godot_macos_editor
 ```
 
 ### Recording controls
@@ -49,7 +77,8 @@ cd /Users/andrewsnyder/AI-Projects/GodotVoxelEngine
 - `godot/project/data/`: voxel/material data JSONs.
 
 ### Engine build outputs
-- `godot/engine-src/bin/godot.macos.editor.x86_64`: custom engine binary currently present.
+- `godot/engine-src/bin/godot.macos.editor.arm64`: primary binary for Apple Silicon.
+- `godot/engine-src/bin/godot.macos.editor.x86_64`: optional legacy Intel build (if present).
 - `godot/engine-src/bin/obj/`: object files/intermediates.
 
 ### Automation and tests
@@ -69,6 +98,6 @@ cd /Users/andrewsnyder/AI-Projects/GodotVoxelEngine
   - `screenshot.png`
 
 ## Practical Notes
-- For user-visible app launches on macOS, prefer the Terminal AppleScript method above.
+- For user-visible launches on macOS, prefer the `open ... godot_macos_editor.app --args ...` method above.
 - In this repo, `ProtoHub` is the main menu scene used for interactive testing.
 - If someone says "launch the app", use `ProtoHub` unless they request a specific scene.

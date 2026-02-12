@@ -5,11 +5,11 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 layout(set = 0, binding = 0, rgba8) uniform writeonly image2D dest;
 layout(set = 0, binding = 1, std140) uniform Params {
     vec4 grid_info;   // xyz = grid size
-    vec4 origin;      // xyz = grid origin
-    vec4 cam_pos;
-    vec4 cam_right;
-    vec4 cam_up;
-    vec4 cam_forward;
+    vec4 origin;      // xyz = grid origin, w = AO radius in cells
+    vec4 cam_pos;     // xyz = camera position, w = AO strength
+    vec4 cam_right;   // xyz = camera basis right, w = sun dir local x
+    vec4 cam_up;      // xyz = camera basis up,    w = sun dir local y
+    vec4 cam_forward; // xyz = camera basis fwd,   w = sun dir local z
     vec4 screen;      // xy = screen size, z = tan_half_fov, w = aspect
     vec4 misc;        // x = voxel_size, y = max_dist, z = shadow_strength, w = reflection_strength
     vec4 brick_info;  // xyz = brick grid dims, w = brick size
@@ -48,11 +48,20 @@ layout(set = 0, binding = 9, std430) readonly buffer PreviewOcc {
 layout(set = 0, binding = 10, std430) readonly buffer CellPos {
     vec4 data[];
 } cell_pos;
+layout(set = 0, binding = 11, std430) readonly buffer MaterialProps {
+    vec4 data[];
+} material_props;
 
 const uint GLASS_MATERIAL = 8u;
 const uint INVISIBLE_MATERIAL = 9u;
 const uint PREVIEW_MATERIAL = 10u;
 const uint CURSOR_MATERIAL = 11u;
+const uint FIRE_MATERIAL = 5u;
+const uint MATERIAL_PROPS_STRIDE = 5u;
+
+ivec3 nearest_bcc(vec3 p);
+bool in_bounds(ivec3 p);
+uint atlas_index_for_cell(ivec3 cell);
 
 float sdf_truncated_octahedron(vec3 p) {
     const float inv_sqrt3 = 0.57735026919;
@@ -86,8 +95,86 @@ vec3 material_color(uint mat_id) {
     if (mat_id == 0u) {
         return vec3(0.0);
     }
+    uint base = mat_id * MATERIAL_PROPS_STRIDE;
+    vec3 color = material_props.data[base + 2u].xyz;
+    if (max(color.r, max(color.g, color.b)) > 1e-4) {
+        return color;
+    }
     uint idx = (mat_id - 1u) % uint(palette_size);
     return palette[int(idx)];
+}
+
+float material_roughness(uint mat_id) {
+    if (mat_id == 0u) {
+        return 1.0;
+    }
+    uint base = mat_id * MATERIAL_PROPS_STRIDE;
+    return clamp(material_props.data[base + 2u].w, 0.02, 1.0);
+}
+
+vec3 material_emissive(uint mat_id) {
+    if (mat_id == 0u) {
+        return vec3(0.0);
+    }
+    uint base = mat_id * MATERIAL_PROPS_STRIDE;
+    vec4 e = material_props.data[base + 3u];
+    return e.xyz * max(e.w, 0.0);
+}
+
+float material_metallic(uint mat_id) {
+    if (mat_id == 0u) {
+        return 0.0;
+    }
+    uint base = mat_id * MATERIAL_PROPS_STRIDE;
+    return clamp(material_props.data[base + 4u].x, 0.0, 1.0);
+}
+
+float material_specular(uint mat_id) {
+    if (mat_id == 0u) {
+        return 0.5;
+    }
+    uint base = mat_id * MATERIAL_PROPS_STRIDE;
+    return clamp(material_props.data[base + 4u].y, 0.0, 1.0);
+}
+
+bool material_blocks_ao(uint mat_id) {
+    return mat_id != 0u
+        && mat_id != INVISIBLE_MATERIAL
+        && mat_id != PREVIEW_MATERIAL
+        && mat_id != CURSOR_MATERIAL;
+}
+
+float ao_sample(vec3 sample_cell_pos) {
+    ivec3 sample_cell = nearest_bcc(sample_cell_pos);
+    if (!in_bounds(sample_cell)) {
+        return 0.0;
+    }
+    uint idx = atlas_index_for_cell(sample_cell);
+    if (idx == 0u) {
+        return 0.0;
+    }
+    return material_blocks_ao(atlas.data[idx]) ? 1.0 : 0.0;
+}
+
+float compute_ao(ivec3 cell, vec3 normal, float radius_cells, float strength) {
+    vec3 n = normalize(normal);
+    vec3 tangent = normalize(
+        (abs(n.y) < 0.99) ? cross(n, vec3(0.0, 1.0, 0.0)) : cross(n, vec3(1.0, 0.0, 0.0))
+    );
+    vec3 bitangent = normalize(cross(n, tangent));
+    vec3 c = vec3(cell);
+
+    float occ = 0.0;
+    occ += ao_sample(c + n * (radius_cells * 0.85));
+    occ += ao_sample(c + n * (radius_cells * 1.35));
+    occ += ao_sample(c + (n + tangent * 0.55) * radius_cells);
+    occ += ao_sample(c + (n - tangent * 0.55) * radius_cells);
+    occ += ao_sample(c + (n + bitangent * 0.55) * radius_cells);
+    occ += ao_sample(c + (n - bitangent * 0.55) * radius_cells);
+    occ *= (1.0 / 6.0);
+
+    float ao = 1.0 - clamp(occ * strength, 0.0, 1.0);
+    return clamp(ao * ao, 0.0, 1.0);
 }
 
 void clip_plane(vec3 n, float d, vec3 rc, vec3 rd, inout float tmin, inout float tmax, inout bool valid) {
@@ -231,7 +318,8 @@ void main() {
     ro = world_center + inv_world * (ro - world_center);
     rd = normalize(inv_world * rd);
 
-    vec3 color = vec3(0.12);
+    float sky = clamp(rd.y * 0.5 + 0.5, 0.0, 1.0);
+    vec3 color = mix(vec3(0.08, 0.09, 0.10), vec3(0.19, 0.22, 0.26), sky);
     vec3 overlay_color = vec3(0.0);
     float overlay_alpha = 0.0;
     bool hit = false;
@@ -421,8 +509,17 @@ void main() {
                                     }
                                     vec3 n = estimate_normal(lp);
                                     vec3 hit_pos = ro + rd * t_voxel;
-                                    vec3 light_dir = normalize(ro - hit_pos);
-                                    float diff = max(dot(n, light_dir), 0.0);   
+                                    vec3 sun_dir_local = vec3(u.cam_right.w, u.cam_up.w, u.cam_forward.w);
+                                    if (length(sun_dir_local) < 1e-4) {
+                                        sun_dir_local = normalize(vec3(0.45, -0.85, 0.30));
+                                    } else {
+                                        sun_dir_local = normalize(sun_dir_local);
+                                    }
+                                    vec3 light_dir = normalize(-sun_dir_local);
+                                    float diff = max(dot(n, light_dir), 0.0);
+                                    float ao_radius = max(u.origin.w, 0.5);
+                                    float ao_strength = max(u.cam_pos.w, 0.0);
+                                    float ao = compute_ao(cell, n, ao_radius, ao_strength);
 
                                     // Soft shadow ray
                                     float shadow = 1.0;
@@ -441,7 +538,10 @@ void main() {
                                             ivec3 s_brick = s_cell / brick_size;
                                             if (occ.data[idx_brick(s_brick)] != 0u) {
                                                 uint s_val = atlas.data[atlas_index_for_cell(s_cell)];
-                                                if (s_val != 0u && s_val != GLASS_MATERIAL && s_val != INVISIBLE_MATERIAL) {
+                                                if (s_val != 0u
+                                                    && s_val != GLASS_MATERIAL
+                                                    && s_val != INVISIBLE_MATERIAL
+                                                    && s_val != FIRE_MATERIAL) {
                                                     vec3 s_center = u.origin.xyz + vec3(s_cell) * u.misc.x;
                                                     vec3 s_lp = (sp - s_center) / u.misc.x;
                                                     float sd = sdf_truncated_octahedron(s_lp) * u.misc.x;
@@ -475,7 +575,10 @@ void main() {
                                             ivec3 r_brick = r_cell / brick_size;
                                             if (occ.data[idx_brick(r_brick)] != 0u) {
                                                 uint r_val = atlas.data[atlas_index_for_cell(r_cell)];
-                                                if (r_val != 0u && r_val != GLASS_MATERIAL && r_val != INVISIBLE_MATERIAL) {
+                                                if (r_val != 0u
+                                                    && r_val != GLASS_MATERIAL
+                                                    && r_val != INVISIBLE_MATERIAL
+                                                    && r_val != FIRE_MATERIAL) {
                                                     vec3 r_center = u.origin.xyz + vec3(r_cell) * u.misc.x;
                                                     vec3 r_lp = (rp - r_center) / u.misc.x;
                                                     float rdv = sdf_truncated_octahedron(r_lp) * u.misc.x;
@@ -489,16 +592,45 @@ void main() {
                                         t_refl += 0.08;
                                     }
 
-                            vec3 view_dir = normalize(-rd);
-                            vec3 half_dir = normalize(light_dir + view_dir);
-                            float spec = pow(max(dot(n, half_dir), 0.0), 32.0);
+                                    vec3 view_dir = normalize(-rd);
+                                    vec3 base = material_color(cell_val);
+                                    float roughness = material_roughness(cell_val);
+                                    float metallic = material_metallic(cell_val);
+                                    float specular_level = material_specular(cell_val);
+                                    vec3 half_dir = normalize(light_dir + view_dir);
+                                    float spec_power = mix(96.0, 10.0, roughness * roughness);
+                                    float spec = pow(max(dot(n, half_dir), 0.0), spec_power);
 
-                            uint light_val = light_for_voxel(cell);
-                            float light_factor = float(light_val) / 15.0;
-                            float ambient = mix(0.06, 0.28, light_factor);
-                            float diffuse = diff * shadow * mix(0.2, 1.0, light_factor);
-                            vec3 base = material_color(cell_val);
-                            color = base * (ambient + diffuse) + base * reflection * light_factor + vec3(1.0) * spec * 0.25 * light_factor;
+                                    uint light_val = light_for_voxel(cell);
+                                    float light_factor = float(light_val) / 15.0;
+                                    float ambient = mix(0.03, 0.16, light_factor);
+                                    ambient *= mix(1.0, ao, clamp(ao_strength, 0.0, 1.0));
+                                    float diffuse = diff * shadow * mix(0.35, 1.0, light_factor);
+                                    float fill = 0.06 * light_factor;
+                                    float specular = spec * shadow * mix(0.22, 0.03, roughness) * mix(0.45, 1.0, light_factor);
+
+                                    float dielectric_f0 = mix(0.02, 0.10, specular_level);
+                                    vec3 f0 = mix(vec3(dielectric_f0), base, metallic);
+                                    float view_half = clamp(dot(view_dir, half_dir), 0.0, 1.0);
+                                    vec3 fresnel_term = f0 + (vec3(1.0) - f0) * pow(1.0 - view_half, 5.0);
+                                    float diffuse_energy = (1.0 - metallic)
+                                        * (1.0 - clamp((f0.r + f0.g + f0.b) * (1.0 / 3.0), 0.0, 0.9));
+                                    float reflection_scale = (1.0 - roughness * 0.7)
+                                        * (0.35 + 0.65 * specular_level)
+                                        * mix(1.0, 1.3, metallic);
+                                    vec3 reflection_tint = mix(vec3(1.0, 0.98, 0.94), base, metallic);
+
+                                    color = base * (ambient + (diffuse + fill) * diffuse_energy)
+                                        + reflection_tint * reflection * light_factor * reflection_scale
+                                        + fresnel_term * specular;
+                                    vec3 emissive = material_emissive(cell_val);
+                                    if (cell_val == FIRE_MATERIAL && max(emissive.r, max(emissive.g, emissive.b)) > 0.0) {
+                                        float flicker = 0.85 + 0.15 * fract(
+                                            sin(dot(vec3(cell), vec3(12.9898, 78.233, 37.719))) * 43758.5453
+                                        );
+                                        emissive *= (1.25 + 0.75 * flicker);
+                                    }
+                                    color += emissive;
                                     hit = true;
                                     atomicAdd(metrics.data[1], 1u);
                                     break;

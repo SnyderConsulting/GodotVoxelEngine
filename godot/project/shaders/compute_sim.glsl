@@ -47,6 +47,8 @@ const uint GLASS_MATERIAL = 8u;
 const uint INVISIBLE_MATERIAL = 9u;
 const uint WATER_MATERIAL = 2u;
 const uint OXYGEN_MATERIAL = 3u;
+const uint FIRE_MATERIAL = 5u;
+const uint MATERIAL_PROPS_STRIDE = 5u;
 
 uint idx_brick(ivec3 b) {
     return uint(b.x) + uint(b.y) * uint(u.brick_info.x)
@@ -129,6 +131,7 @@ void main() {
         return;
     }
     bool is_water = material == WATER_MATERIAL;
+    bool is_fire = material == FIRE_MATERIAL;
     uint seed = seed_in.data[self_idx];
     if (material == GLASS_MATERIAL || material == INVISIBLE_MATERIAL) {
         if (atomicCompSwap(atlas_out.data[self_idx], 0u, material) == 0u) {
@@ -142,8 +145,13 @@ void main() {
         gravity = vec3(0.0, -1.0, 0.0);
     }
     gravity = normalize(gravity);
+    vec3 motion_gravity = gravity;
+    if (is_fire) {
+        // Fire drifts opposite gravity while still using the same material model.
+        motion_gravity = -gravity;
+    }
 
-    uint mat_index = material * 2u;
+    uint mat_index = material * MATERIAL_PROPS_STRIDE;
     vec4 props0 = material_props.data[mat_index + 0u];
     vec4 props1 = material_props.data[mat_index + 1u];
     float mass = props0.x;
@@ -175,7 +183,7 @@ void main() {
     );
     float gravity_align[NEIGHBOR_COUNT];
     for (int i = 0; i < NEIGHBOR_COUNT; i++) {
-        gravity_align[i] = dot(vec3(offsets[i]), gravity);
+        gravity_align[i] = dot(vec3(offsets[i]), motion_gravity);
     }
     int down_index = 0;
     float down_best = -1e9;
@@ -230,13 +238,13 @@ void main() {
     }
     // Pressure proxy: count same-material voxels above along dominant gravity axis.
     ivec3 gstep = ivec3(0, 0, 0);
-    vec3 gabs = abs(gravity);
+    vec3 gabs = abs(motion_gravity);
     if (gabs.x >= gabs.y && gabs.x >= gabs.z) {
-        gstep = ivec3(gravity.x >= 0.0 ? 2 : -2, 0, 0);
+        gstep = ivec3(motion_gravity.x >= 0.0 ? 2 : -2, 0, 0);
     } else if (gabs.y >= gabs.x && gabs.y >= gabs.z) {
-        gstep = ivec3(0, gravity.y >= 0.0 ? 2 : -2, 0);
+        gstep = ivec3(0, motion_gravity.y >= 0.0 ? 2 : -2, 0);
     } else {
-        gstep = ivec3(0, 0, gravity.z >= 0.0 ? 2 : -2);
+        gstep = ivec3(0, 0, motion_gravity.z >= 0.0 ? 2 : -2);
     }
     ivec3 up_step = -gstep;
     int self_pressure = 0;
@@ -279,8 +287,8 @@ void main() {
     if (is_water) {
         self_pressure += 2;
     }
-    float base_height = -dot(vec3(cell), gravity);
-    float surface_height = -dot(vec3(cell + up_step * self_pressure), gravity);
+    float base_height = -dot(vec3(cell), motion_gravity);
+    float surface_height = -dot(vec3(cell + up_step * self_pressure), motion_gravity);
     float cohesion_scale = is_water ? 0.6 : 1.0;
     if (is_water && down_is_sand) {
         cohesion_scale = 0.4;
@@ -325,7 +333,7 @@ void main() {
                 }
             } else {
                 // Swap down if we can displace the target.
-                uint t_index = d_mat * 2u;
+                uint t_index = d_mat * MATERIAL_PROPS_STRIDE;
                 vec4 t_props0 = material_props.data[t_index + 0u];
                 float t_resistance = t_props0.w;
                 if (wealth > t_resistance) {
@@ -397,7 +405,7 @@ void main() {
                     break;
                 }
             }
-            float target_surface_height = -dot(vec3(target + up_step * target_pressure), gravity);
+            float target_surface_height = -dot(vec3(target + up_step * target_pressure), motion_gravity);
             if (target_surface_height + 0.5 < best_surface) {
                 best_surface = target_surface_height;
                 best_eq_offset = offset;
@@ -472,7 +480,7 @@ void main() {
                             break;
                         }
                     }
-                    float target_surface_height = -dot(vec3(hop + up_step * target_pressure), gravity);
+                    float target_surface_height = -dot(vec3(hop + up_step * target_pressure), motion_gravity);
                     if (target_surface_height + 0.5 < best_surface) {
                         best_surface = target_surface_height;
                         best_eq_offset = step1 + step2;
@@ -508,7 +516,7 @@ void main() {
         }
         uint t_mat = atlas_in.data[t_idx];
         float down = gravity_align[i];
-        float target_height = -dot(vec3(target), gravity);
+        float target_height = -dot(vec3(target), motion_gravity);
         float height_drop = base_height - target_height;
         // Compute target pressure for equalization.
         int target_pressure = 0;
@@ -546,7 +554,7 @@ void main() {
             }
         }
         int target_column = target_pressure + target_below + 1;
-        float target_surface_height = -dot(vec3(target + up_step * target_pressure), gravity);
+        float target_surface_height = -dot(vec3(target + up_step * target_pressure), motion_gravity);
         float target_comfort = -target_height * gravity_bias;
         float gain = target_comfort - comfort + down * gravity_bias * 0.5;
         // Pressure equalization: prefer moves toward lower pressure columns.
@@ -725,7 +733,7 @@ void main() {
             if (t_mat == material) {
                 continue;
             }
-            uint t_index = t_mat * 2u;
+            uint t_index = t_mat * MATERIAL_PROPS_STRIDE;
             vec4 t_props0 = material_props.data[t_index + 0u];
             float t_resistance = t_props0.w;
             displacement_cost = t_resistance;

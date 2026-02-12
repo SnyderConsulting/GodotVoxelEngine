@@ -4,13 +4,19 @@ extends Node3D
 @export var player_path: NodePath
 @export var camera_path: NodePath
 @export var overlay_path: NodePath
+@export var hotbar_slots_path: NodePath
 @export var hub_scene: String = "res://scenes/ProtoHub.tscn"
 
 @export var move_speed: float = 18.0
 @export var sprint_multiplier: float = 1.8
 @export var vertical_speed: float = 14.0
+@export var enable_fly_controls: bool = false
 @export var mouse_sensitivity: float = 0.0024
 @export var max_reach_world: float = 14.0
+@export var keep_player_grounded: bool = true
+@export var ground_clearance_cells: float = 2.4
+@export var ground_snap_speed: float = 16.0
+@export var ground_probe_radius_cells: int = 1
 
 @export var chunk_radius_cells: int = 22
 @export var base_y: int = 4
@@ -24,27 +30,39 @@ extends Node3D
 @export var spawn_demo_physics: bool = true
 @export var demo_sand_material_id: int = 1
 @export var demo_water_material_id: int = 2
+@export var hotbar_size: int = 9
+@export var starter_stack_count: int = 0
 
 var _renderer: Node = null
 var _player: Node3D = null
 var _camera: Camera3D = null
 var _overlay: Label = null
+var _hotbar_slots: HBoxContainer = null
+var _hotbar_slot_panels: Array = []
+var _hotbar_slot_labels: Array = []
 
 var _yaw: float = 0.0
 var _pitch: float = 0.0
 var _held_material: int = 4
+var _active_slot: int = 0
 var _init_attempts: int = 0
 var _last_scan: Dictionary = {}
+var _hotbar_materials: Array = []
+var _inventory_counts: Dictionary = {}
 
 func _ready() -> void:
     _renderer = get_node_or_null(voxel_renderer_path)
     _player = get_node_or_null(player_path) as Node3D
     _camera = get_node_or_null(camera_path) as Camera3D
     _overlay = get_node_or_null(overlay_path) as Label
+    _hotbar_slots = get_node_or_null(hotbar_slots_path) as HBoxContainer
     if _renderer == null or _player == null or _camera == null:
         push_error("VoxelGameController missing required scene references.")
         return
     _held_material = default_place_material
+    _setup_inventory()
+    _build_hotbar_ui()
+    _refresh_hotbar_ui()
     call_deferred("_initialize_scene")
 
 func _initialize_scene() -> void:
@@ -63,6 +81,8 @@ func _initialize_scene() -> void:
 
     _build_chunk_world()
     _spawn_player_above_chunk()
+    if keep_player_grounded:
+        _snap_player_to_ground(0.0, true)
 
     _capture_mouse()
     _apply_view_rotation()
@@ -108,12 +128,9 @@ func _unhandled_input(event: InputEvent) -> void:
 
     if event is InputEventKey and event.pressed and !event.echo:
         var key_ev := event as InputEventKey
-        if key_ev.keycode == KEY_1:
-            _held_material = default_place_material
-        elif key_ev.keycode == KEY_2:
-            _held_material = alt_place_material
-        elif key_ev.keycode == KEY_3:
-            _held_material = fluid_place_material
+        var slot_idx: int = _slot_index_from_keycode(key_ev.keycode)
+        if slot_idx >= 0:
+            _set_active_slot(slot_idx)
 
 func _physics_process(delta: float) -> void:
     if _renderer == null or _player == null:
@@ -132,14 +149,16 @@ func _update_movement(delta: float) -> void:
         move_x -= 1.0
     if Input.is_physical_key_pressed(KEY_D):
         move_x += 1.0
+    # Positive move_z follows the player's forward vector. This keeps W/S intuitive.
     if Input.is_physical_key_pressed(KEY_W):
-        move_z -= 1.0
-    if Input.is_physical_key_pressed(KEY_S):
         move_z += 1.0
-    if Input.is_physical_key_pressed(KEY_SPACE):
-        move_y += 1.0
-    if Input.is_physical_key_pressed(KEY_CTRL) or Input.is_physical_key_pressed(KEY_C):
-        move_y -= 1.0
+    if Input.is_physical_key_pressed(KEY_S):
+        move_z -= 1.0
+    if enable_fly_controls:
+        if Input.is_physical_key_pressed(KEY_SPACE):
+            move_y += 1.0
+        if Input.is_physical_key_pressed(KEY_CTRL) or Input.is_physical_key_pressed(KEY_C):
+            move_y -= 1.0
 
     var move_h := Vector2(move_x, move_z)
     if move_h.length() > 1.0:
@@ -163,8 +182,11 @@ func _update_movement(delta: float) -> void:
     if world_move.length() > 0.0:
         _player.global_position += world_move.normalized() * speed * delta
 
-    if abs(move_y) > 0.0:
+    if enable_fly_controls and abs(move_y) > 0.0:
         _player.global_position += Vector3.UP * move_y * vertical_speed * delta
+
+    if keep_player_grounded and !enable_fly_controls:
+        _snap_player_to_ground(delta, false)
 
 func _capture_mouse() -> void:
     Input.set_mouse_mode(Input.MOUSE_MODE_CAPTURED)
@@ -246,15 +268,20 @@ func _pickup_block() -> void:
     if mat == 0:
         return
     _renderer.set_voxel_at(hit_cell, 0)
-    _held_material = mat
+    _inventory_add(mat, 1)
+    _ensure_material_on_hotbar(mat)
     _last_scan = hit
+    _refresh_hotbar_ui()
     _apply_preview(hit)
     _update_overlay(hit)
 
 func _place_block() -> void:
     if _renderer == null:
         return
-    if _held_material <= 0:
+    var mat_id: int = _active_slot_material()
+    if mat_id <= 0:
+        return
+    if _inventory_get(mat_id) <= 0:
         return
     var hit := _raycast_from_camera()
     var place_cell := hit.get("empty_cell", Vector3i(-1, -1, -1)) as Vector3i
@@ -262,8 +289,13 @@ func _place_block() -> void:
         return
     if int(_renderer.get_cell_material(place_cell)) != 0:
         return
-    _renderer.set_voxel_at(place_cell, _held_material)
+    _renderer.set_voxel_at(place_cell, mat_id)
+    _inventory_add(mat_id, -1)
+    if _inventory_get(mat_id) <= 0:
+        _hotbar_materials[_active_slot] = 0
+    _held_material = _active_slot_material()
     _last_scan = hit
+    _refresh_hotbar_ui()
     _apply_preview(hit)
     _update_overlay(hit)
 
@@ -289,12 +321,17 @@ func _update_overlay(hit: Dictionary) -> void:
     var target := "none"
     if bool(hit.get("hit", false)):
         target = _material_name(int(hit.get("material", 0)))
+    var movement_hint := "WASD move | Shift sprint | Esc release/back"
+    if enable_fly_controls:
+        movement_hint = "WASD move | Shift sprint | Space/Ctrl vertical | Esc release/back"
+    var held_mat: int = _active_slot_material()
+    var held_count: int = _inventory_get(held_mat)
     _overlay.text = (
         "Voxel Game Prototype\n"
-        + "WASD move | Shift sprint | Space/Ctrl vertical | Esc release/back\n"
-        + "Left click pickup | Right click place | 1 %s | 2 %s | 3 %s\n"
-        + "Held: %s  |  Target: %s  |  Mouse: %s"
-    ) % [_material_name(default_place_material), _material_name(alt_place_material), _material_name(fluid_place_material), _material_name(_held_material), target, capture_hint]
+        + movement_hint + "\n"
+        + "Left click pickup | Right click place | Number keys select hotbar slot\n"
+        + "Active Slot: %d  |  Held: %s x%d  |  Target: %s  |  Mouse: %s"
+    ) % [_active_slot + 1, _material_name(held_mat), held_count, target, capture_hint]
 
 func _material_name(material_id: int) -> String:
     match material_id:
@@ -302,6 +339,10 @@ func _material_name(material_id: int) -> String:
             return "Sand (1)"
         2:
             return "Water (2)"
+        6:
+            return "Metal (6)"
+        5:
+            return "Fire (5)"
         4:
             return "Stone (4)"
         8:
@@ -491,3 +532,219 @@ func _append_demo_blob(entries: Array, center_cell: Vector3i, radius: int, mater
                 if !_is_bcc_cell(c.x, c.y, c.z):
                     continue
                 entries.append({"pos": Vector3(c), "material": material_id})
+
+func _setup_inventory() -> void:
+    _inventory_counts.clear()
+    _hotbar_materials = []
+    var slots: int = clampi(hotbar_size, 1, 9)
+    for i in range(slots):
+        _hotbar_materials.append(0)
+
+    var defaults: Array = [default_place_material, alt_place_material, fluid_place_material]
+    var write_idx: int = 0
+    for m in defaults:
+        var mid: int = int(m)
+        if mid <= 0:
+            continue
+        var exists: bool = false
+        for i in range(_hotbar_materials.size()):
+            if int(_hotbar_materials[i]) == mid:
+                exists = true
+                break
+        if exists:
+            continue
+        if write_idx >= _hotbar_materials.size():
+            break
+        _hotbar_materials[write_idx] = mid
+        write_idx += 1
+        if starter_stack_count > 0:
+            _inventory_counts[mid] = starter_stack_count
+
+    _active_slot = 0
+    _held_material = _active_slot_material()
+
+func _build_hotbar_ui() -> void:
+    if _hotbar_slots == null:
+        return
+    for c in _hotbar_slots.get_children():
+        c.queue_free()
+    _hotbar_slot_panels.clear()
+    _hotbar_slot_labels.clear()
+
+    for i in range(_hotbar_materials.size()):
+        var panel := PanelContainer.new()
+        panel.custom_minimum_size = Vector2(70.0, 56.0)
+
+        var label := Label.new()
+        label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+        label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+        label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+        label.custom_minimum_size = Vector2(66.0, 52.0)
+
+        panel.add_child(label)
+        _hotbar_slots.add_child(panel)
+        _hotbar_slot_panels.append(panel)
+        _hotbar_slot_labels.append(label)
+
+func _refresh_hotbar_ui() -> void:
+    if _hotbar_slots == null:
+        return
+    var slot_count: int = mini(_hotbar_materials.size(), _hotbar_slot_labels.size())
+    for i in range(slot_count):
+        var mat_id: int = int(_hotbar_materials[i])
+        var count: int = _inventory_get(mat_id)
+        var title: String = "-"
+        if mat_id > 0:
+            title = _material_short_name(mat_id)
+        var txt := "%d\n%s\n%d" % [i + 1, title, count]
+        var label: Label = _hotbar_slot_labels[i] as Label
+        var panel: PanelContainer = _hotbar_slot_panels[i] as PanelContainer
+        if label != null:
+            label.text = txt
+            label.self_modulate = Color(1.0, 1.0, 1.0, 1.0) if i == _active_slot else Color(0.92, 0.92, 0.92, 1.0)
+        if panel != null:
+            panel.self_modulate = Color(1.0, 0.94, 0.72, 1.0) if i == _active_slot else Color(1.0, 1.0, 1.0, 1.0)
+
+func _slot_index_from_keycode(keycode: Key) -> int:
+    match keycode:
+        KEY_1:
+            return 0
+        KEY_2:
+            return 1
+        KEY_3:
+            return 2
+        KEY_4:
+            return 3
+        KEY_5:
+            return 4
+        KEY_6:
+            return 5
+        KEY_7:
+            return 6
+        KEY_8:
+            return 7
+        KEY_9:
+            return 8
+        _:
+            return -1
+
+func _set_active_slot(slot_idx: int) -> void:
+    if slot_idx < 0 or slot_idx >= _hotbar_materials.size():
+        return
+    _active_slot = slot_idx
+    _held_material = _active_slot_material()
+    _refresh_hotbar_ui()
+
+func _active_slot_material() -> int:
+    if _active_slot < 0 or _active_slot >= _hotbar_materials.size():
+        return 0
+    return int(_hotbar_materials[_active_slot])
+
+func _inventory_get(mat_id: int) -> int:
+    if mat_id <= 0:
+        return 0
+    return int(_inventory_counts.get(mat_id, 0))
+
+func _inventory_add(mat_id: int, delta: int) -> void:
+    if mat_id <= 0 or delta == 0:
+        return
+    var next: int = _inventory_get(mat_id) + delta
+    if next <= 0:
+        _inventory_counts.erase(mat_id)
+    else:
+        _inventory_counts[mat_id] = next
+
+func _ensure_material_on_hotbar(mat_id: int) -> void:
+    if mat_id <= 0:
+        return
+    for i in range(_hotbar_materials.size()):
+        if int(_hotbar_materials[i]) == mat_id:
+            return
+    for i in range(_hotbar_materials.size()):
+        if int(_hotbar_materials[i]) == 0:
+            _hotbar_materials[i] = mat_id
+            return
+
+func _material_short_name(material_id: int) -> String:
+    match material_id:
+        1:
+            return "Sand"
+        2:
+            return "Water"
+        3:
+            return "Oxy"
+        6:
+            return "Metal"
+        5:
+            return "Fire"
+        4:
+            return "Stone"
+        8:
+            return "Glass"
+        9:
+            return "Invis"
+        _:
+            return "M%d" % material_id
+
+func _snap_player_to_ground(delta: float, instant: bool) -> void:
+    if _renderer == null or _player == null:
+        return
+    var ground_cell := _find_ground_cell_below(_player.global_position)
+    if ground_cell.x < 0:
+        return
+    var grid_extent: int = int(_renderer.chunk_grid) * int(_renderer.chunk_size)
+    var spacing: float = float(_renderer.lattice_spacing)
+    var ground_world := _cell_to_world(ground_cell, grid_extent, spacing)
+    var target_y := ground_world.y + ground_clearance_cells * spacing
+    var pos := _player.global_position
+    if instant:
+        pos.y = target_y
+        _player.global_position = pos
+        return
+
+    if pos.y < target_y:
+        pos.y = target_y
+    else:
+        var alpha: float = clampf(ground_snap_speed * delta, 0.0, 1.0)
+        pos.y = lerpf(pos.y, target_y, alpha)
+    _player.global_position = pos
+
+func _find_ground_cell_below(world_pos: Vector3) -> Vector3i:
+    if _renderer == null or !_renderer.has_method("get_cell_material"):
+        return Vector3i(-1, -1, -1)
+    var grid_extent: int = int(_renderer.chunk_grid) * int(_renderer.chunk_size)
+    var spacing: float = float(_renderer.lattice_spacing)
+    var world_extent: float = float(grid_extent) * spacing
+    var origin := Vector3(-0.5 * world_extent, -0.5 * world_extent, -0.5 * world_extent)
+    var world_basis := Basis.from_euler(_renderer.world_rotation as Vector3)
+    var inv_world := world_basis.transposed()
+    var center := origin + Vector3.ONE * (0.5 * world_extent)
+    var local_pos := center + inv_world * (world_pos - center)
+    var grid_pos := (local_pos - origin) / spacing
+    var px := clampi(int(round(grid_pos.x)), 0, grid_extent - 1)
+    var pz := clampi(int(round(grid_pos.z)), 0, grid_extent - 1)
+    var py := clampi(int(round(grid_pos.y)), 0, grid_extent - 1)
+
+    var best := Vector3i(-1, -1, -1)
+    var best_y := -2147483647
+    var best_dist2 := 1e20
+    var radius := maxi(0, ground_probe_radius_cells)
+    for dz in range(-radius, radius + 1):
+        for dx in range(-radius, radius + 1):
+            var x := clampi(px + dx, 0, grid_extent - 1)
+            var z := clampi(pz + dz, 0, grid_extent - 1)
+            for y in range(py + 2, -1, -1):
+                var raw_cell := Vector3i(x, y, z)
+                var cell := _snap_to_bcc(raw_cell, grid_extent)
+                if cell.x < 0 or cell.y < 0:
+                    continue
+                var mat := int(_renderer.get_cell_material(cell))
+                if mat == 0:
+                    continue
+                var d2 := float((cell.x - px) * (cell.x - px) + (cell.z - pz) * (cell.z - pz))
+                if cell.y > best_y or (cell.y == best_y and d2 < best_dist2):
+                    best = cell
+                    best_y = cell.y
+                    best_dist2 = d2
+                break
+    return best

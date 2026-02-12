@@ -46,11 +46,12 @@ voxel_renderer_path = NodePath("../VoxelRenderer")
 player_path = NodePath("../Player")
 camera_path = NodePath("../Player/Camera3D")
 overlay_path = NodePath("../HUD/InfoLabel")
+hotbar_slots_path = NodePath("../HUD/Hotbar/Margin/Slots")
 chunk_radius_cells = 16
 terrain_height = 8
-top_material_id = 4
-default_place_material = 1
-alt_place_material = 4
+top_material_id = 6
+default_place_material = 6
+alt_place_material = 1
 
 [node name="HUD" type="CanvasLayer" parent="."]
 
@@ -63,6 +64,29 @@ offset_right = 860.0
 offset_bottom = 130.0
 text = "Voxel Game Prototype"
 theme_override_font_sizes/font_size = 16
+
+[node name="Hotbar" type="PanelContainer" parent="HUD"]
+anchor_left = 0.5
+anchor_top = 1.0
+anchor_right = 0.5
+anchor_bottom = 1.0
+offset_left = -340.0
+offset_top = -86.0
+offset_right = 340.0
+offset_bottom = -16.0
+
+[node name="Margin" type="MarginContainer" parent="HUD/Hotbar"]
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 8.0
+offset_top = 8.0
+offset_right = -8.0
+offset_bottom = -8.0
+
+[node name="Slots" type="HBoxContainer" parent="HUD/Hotbar/Margin"]
+anchor_right = 1.0
+anchor_bottom = 1.0
+theme_override_constants/separation = 6
 
 [node name="Crosshair" type="Label" parent="HUD"]
 anchor_left = 0.5

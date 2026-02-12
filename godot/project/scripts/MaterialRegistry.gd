@@ -5,6 +5,8 @@ const SAND_ID := 1
 const WATER_ID := 2
 const OXYGEN_ID := 3
 const STONE_ID := 4
+const FIRE_ID := 5
+const METAL_ID := 6
 const GLASS_ID := 8
 const INVISIBLE_ID := 9
 
@@ -20,6 +22,16 @@ const DEFAULT_MATERIALS := {
         "support_bonus": 0.0,
         "lateral_bias": -0.15,
         "gravity_bias": 1.2,
+        "albedo_r": 0.90,
+        "albedo_g": 0.70,
+        "albedo_b": 0.40,
+        "roughness": 0.90,
+        "metallic": 0.0,
+        "specular": 0.08,
+        "emissive_r": 0.0,
+        "emissive_g": 0.0,
+        "emissive_b": 0.0,
+        "emissive_strength": 0.0,
     },
     WATER_ID: {
         "id": WATER_ID,
@@ -32,6 +44,16 @@ const DEFAULT_MATERIALS := {
         "support_bonus": 0.02,
         "lateral_bias": 1.2,
         "gravity_bias": 1.0,
+        "albedo_r": 0.18,
+        "albedo_g": 0.58,
+        "albedo_b": 0.92,
+        "roughness": 0.015,
+        "metallic": 0.0,
+        "specular": 0.98,
+        "emissive_r": 0.0,
+        "emissive_g": 0.0,
+        "emissive_b": 0.0,
+        "emissive_strength": 0.0,
     },
     OXYGEN_ID: {
         "id": OXYGEN_ID,
@@ -44,6 +66,16 @@ const DEFAULT_MATERIALS := {
         "support_bonus": 0.0,
         "lateral_bias": 0.0,
         "gravity_bias": 0.0,
+        "albedo_r": 0.65,
+        "albedo_g": 0.72,
+        "albedo_b": 0.84,
+        "roughness": 1.0,
+        "metallic": 0.0,
+        "specular": 0.0,
+        "emissive_r": 0.0,
+        "emissive_g": 0.0,
+        "emissive_b": 0.0,
+        "emissive_strength": 0.0,
     },
     STONE_ID: {
         "id": STONE_ID,
@@ -56,6 +88,60 @@ const DEFAULT_MATERIALS := {
         "support_bonus": 0.0,
         "lateral_bias": -0.5,
         "gravity_bias": 0.0,
+        "albedo_r": 0.48,
+        "albedo_g": 0.50,
+        "albedo_b": 0.53,
+        "roughness": 0.96,
+        "metallic": 0.0,
+        "specular": 0.06,
+        "emissive_r": 0.0,
+        "emissive_g": 0.0,
+        "emissive_b": 0.0,
+        "emissive_strength": 0.0,
+    },
+    FIRE_ID: {
+        "id": FIRE_ID,
+        "name": "fire",
+        "mass": 0.08,
+        "friction": 0.0,
+        "cohesion": 0.02,
+        "resistance": 0.01,
+        "drag": 0.05,
+        "support_bonus": 0.0,
+        "lateral_bias": 0.8,
+        "gravity_bias": -0.9,
+        "albedo_r": 1.00,
+        "albedo_g": 0.42,
+        "albedo_b": 0.08,
+        "roughness": 0.22,
+        "metallic": 0.0,
+        "specular": 0.02,
+        "emissive_r": 1.00,
+        "emissive_g": 0.44,
+        "emissive_b": 0.12,
+        "emissive_strength": 1.8,
+    },
+    METAL_ID: {
+        "id": METAL_ID,
+        "name": "metal",
+        "mass": 6.8,
+        "friction": 0.9,
+        "cohesion": 1.2,
+        "resistance": 9.5,
+        "drag": 0.18,
+        "support_bonus": 0.0,
+        "lateral_bias": -0.45,
+        "gravity_bias": 0.0,
+        "albedo_r": 0.72,
+        "albedo_g": 0.75,
+        "albedo_b": 0.80,
+        "roughness": 0.16,
+        "metallic": 1.0,
+        "specular": 0.95,
+        "emissive_r": 0.0,
+        "emissive_g": 0.0,
+        "emissive_b": 0.0,
+        "emissive_strength": 0.0,
     },
     GLASS_ID: {
         "id": GLASS_ID,
@@ -68,6 +154,16 @@ const DEFAULT_MATERIALS := {
         "support_bonus": 0.0,
         "lateral_bias": -1.0,
         "gravity_bias": 0.0,
+        "albedo_r": 0.80,
+        "albedo_g": 0.90,
+        "albedo_b": 1.00,
+        "roughness": 0.01,
+        "metallic": 0.0,
+        "specular": 1.0,
+        "emissive_r": 0.0,
+        "emissive_g": 0.0,
+        "emissive_b": 0.0,
+        "emissive_strength": 0.0,
     },
     INVISIBLE_ID: {
         "id": INVISIBLE_ID,
@@ -80,6 +176,16 @@ const DEFAULT_MATERIALS := {
         "support_bonus": 0.0,
         "lateral_bias": -1.0,
         "gravity_bias": 0.0,
+        "albedo_r": 0.0,
+        "albedo_g": 0.0,
+        "albedo_b": 0.0,
+        "roughness": 1.0,
+        "metallic": 0.0,
+        "specular": 0.0,
+        "emissive_r": 0.0,
+        "emissive_g": 0.0,
+        "emissive_b": 0.0,
+        "emissive_strength": 0.0,
     },
 }
 
@@ -135,29 +241,64 @@ static func load_mass_map(path: String) -> Dictionary:
     return out
 
 static func build_props_buffer(path: String, gravity_bias_default: float = 1.0) -> PackedByteArray:
-    # Each material uses 8 floats:
-    # [mass, friction, cohesion, resistance, drag, support_bonus, lateral_bias, gravity_bias]
+    # Each material uses 20 floats (5 x vec4):
+    # vec4[0] = [mass, friction, cohesion, resistance]
+    # vec4[1] = [drag, support_bonus, lateral_bias, gravity_bias]
+    # vec4[2] = [albedo_r, albedo_g, albedo_b, roughness]
+    # vec4[3] = [emissive_r, emissive_g, emissive_b, emissive_strength]
+    # vec4[4] = [metallic, specular, reserved, reserved]
     var materials: Dictionary = load_materials(path)
     var max_id := 0
     for id_variant in materials.keys():
         max_id = maxi(max_id, int(id_variant))
     var count := max_id + 1
     var floats := PackedFloat32Array()
-    floats.resize(count * 8)
+    floats.resize(count * 20)
     for i in range(count):
         var src: Variant = materials.get(i, {})
         var d: Dictionary = {}
         if typeof(src) == TYPE_DICTIONARY:
             d = src
-        floats[i * 8 + 0] = float(d.get("mass", 0.0))
-        floats[i * 8 + 1] = float(d.get("friction", 0.0))
-        floats[i * 8 + 2] = float(d.get("cohesion", 0.0))
-        floats[i * 8 + 3] = float(d.get("resistance", 0.0))
-        floats[i * 8 + 4] = float(d.get("drag", 0.0))
-        floats[i * 8 + 5] = float(d.get("support_bonus", 0.0))
-        floats[i * 8 + 6] = float(d.get("lateral_bias", 0.0))
-        floats[i * 8 + 7] = float(d.get("gravity_bias", gravity_bias_default))
+        var base := i * 20
+        var fallback_albedo: Vector3 = _fallback_albedo(i)
+        floats[base + 0] = float(d.get("mass", 0.0))
+        floats[base + 1] = float(d.get("friction", 0.0))
+        floats[base + 2] = float(d.get("cohesion", 0.0))
+        floats[base + 3] = float(d.get("resistance", 0.0))
+        floats[base + 4] = float(d.get("drag", 0.0))
+        floats[base + 5] = float(d.get("support_bonus", 0.0))
+        floats[base + 6] = float(d.get("lateral_bias", 0.0))
+        floats[base + 7] = float(d.get("gravity_bias", gravity_bias_default))
+        floats[base + 8] = float(d.get("albedo_r", fallback_albedo.x))
+        floats[base + 9] = float(d.get("albedo_g", fallback_albedo.y))
+        floats[base + 10] = float(d.get("albedo_b", fallback_albedo.z))
+        floats[base + 11] = float(d.get("roughness", 0.8))
+        floats[base + 12] = float(d.get("emissive_r", 0.0))
+        floats[base + 13] = float(d.get("emissive_g", 0.0))
+        floats[base + 14] = float(d.get("emissive_b", 0.0))
+        floats[base + 15] = float(d.get("emissive_strength", 0.0))
+        floats[base + 16] = float(d.get("metallic", 0.0))
+        floats[base + 17] = float(d.get("specular", 0.5))
+        floats[base + 18] = 0.0
+        floats[base + 19] = 0.0
     return floats.to_byte_array()
+
+static func _fallback_albedo(material_id: int) -> Vector3:
+    if material_id <= 0:
+        return Vector3.ZERO
+    var palette: Array = [
+        Vector3(0.90, 0.70, 0.40),
+        Vector3(0.20, 0.60, 0.90),
+        Vector3(0.90, 0.30, 0.30),
+        Vector3(0.30, 0.90, 0.40),
+        Vector3(0.85, 0.85, 0.20),
+        Vector3(0.70, 0.40, 0.90),
+        Vector3(0.40, 0.90, 0.90),
+        Vector3(0.70, 0.70, 0.70),
+    ]
+    var idx := (material_id - 1) % palette.size()
+    var c: Vector3 = palette[idx]
+    return c
 
 static func _read_material_array(path: String) -> Array:
     if path.is_empty() or !FileAccess.file_exists(path):

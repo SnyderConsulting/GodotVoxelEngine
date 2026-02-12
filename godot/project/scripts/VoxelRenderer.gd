@@ -21,6 +21,9 @@ const MaterialRegistry = preload("res://scripts/MaterialRegistry.gd")
 @export var light_enabled: bool = true
 @export var light_every: int = 1
 @export var metrics_every: int = 30
+@export var render_sun_direction_world: Vector3 = Vector3(0.45, -0.85, 0.30)
+@export_range(0.0, 2.0, 0.01) var render_ao_strength: float = 0.65
+@export_range(0.5, 4.0, 0.01) var render_ao_radius_cells: float = 1.25
 @export var debug_logging: bool = false
 @export var debug_log_every: int = 60
 @export var debug_render_thread_ping: bool = false
@@ -1826,6 +1829,10 @@ func _init_render_resources() -> void:
     cell_pos_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
     cell_pos_uniform.binding = 10
     cell_pos_uniform.add_id(_mpm_cell_pos_rid)
+    var material_props_uniform := RDUniform.new()
+    material_props_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+    material_props_uniform.binding = 11
+    material_props_uniform.add_id(_material_props_rid)
 
     var light_uniform_a := RDUniform.new()
     light_uniform_a.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
@@ -1838,7 +1845,7 @@ func _init_render_resources() -> void:
     light_uniform_b.add_id(_light_b_rid)
 
     _uniform_set_a_light_a_rid = _rd.uniform_set_create(
-        [img_uniform, ubo_uniform, indirection_uniform, atlas_uniform_a, occupancy_uniform, metrics_uniform, light_uniform_a, preview_uniform, cursor_uniform, preview_occ_uniform, cell_pos_uniform],
+        [img_uniform, ubo_uniform, indirection_uniform, atlas_uniform_a, occupancy_uniform, metrics_uniform, light_uniform_a, preview_uniform, cursor_uniform, preview_occ_uniform, cell_pos_uniform, material_props_uniform],
         _shader_rid,
         0
     )
@@ -1846,7 +1853,7 @@ func _init_render_resources() -> void:
         push_error("Failed to create uniform set A (light A).")
         return
     _uniform_set_a_light_b_rid = _rd.uniform_set_create(
-        [img_uniform, ubo_uniform, indirection_uniform, atlas_uniform_a, occupancy_uniform, metrics_uniform, light_uniform_b, preview_uniform, cursor_uniform, preview_occ_uniform, cell_pos_uniform],
+        [img_uniform, ubo_uniform, indirection_uniform, atlas_uniform_a, occupancy_uniform, metrics_uniform, light_uniform_b, preview_uniform, cursor_uniform, preview_occ_uniform, cell_pos_uniform, material_props_uniform],
         _shader_rid,
         0
     )
@@ -1854,7 +1861,7 @@ func _init_render_resources() -> void:
         push_error("Failed to create uniform set A (light B).")
         return
     _uniform_set_b_light_a_rid = _rd.uniform_set_create(
-        [img_uniform, ubo_uniform, indirection_uniform, atlas_uniform_b, occupancy_uniform, metrics_uniform, light_uniform_a, preview_uniform, cursor_uniform, preview_occ_uniform, cell_pos_uniform],
+        [img_uniform, ubo_uniform, indirection_uniform, atlas_uniform_b, occupancy_uniform, metrics_uniform, light_uniform_a, preview_uniform, cursor_uniform, preview_occ_uniform, cell_pos_uniform, material_props_uniform],
         _shader_rid,
         0
     )
@@ -1862,7 +1869,7 @@ func _init_render_resources() -> void:
         push_error("Failed to create uniform set B (light A).")
         return
     _uniform_set_b_light_b_rid = _rd.uniform_set_create(
-        [img_uniform, ubo_uniform, indirection_uniform, atlas_uniform_b, occupancy_uniform, metrics_uniform, light_uniform_b, preview_uniform, cursor_uniform, preview_occ_uniform, cell_pos_uniform],
+        [img_uniform, ubo_uniform, indirection_uniform, atlas_uniform_b, occupancy_uniform, metrics_uniform, light_uniform_b, preview_uniform, cursor_uniform, preview_occ_uniform, cell_pos_uniform, material_props_uniform],
         _shader_rid,
         0
     )
@@ -2011,9 +2018,13 @@ func _init_render_resources() -> void:
         light_out_uniform_b.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
         light_out_uniform_b.binding = 4
         light_out_uniform_b.add_id(_light_b_rid)
+        var light_material_props_uniform := RDUniform.new()
+        light_material_props_uniform.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+        light_material_props_uniform.binding = 5
+        light_material_props_uniform.add_id(_material_props_rid)
 
         _light_uniform_set_a_ab = _rd.uniform_set_create(
-            [light_ubo_uniform, light_indirection_uniform, light_atlas_uniform_a, light_in_uniform_a, light_out_uniform_b],
+            [light_ubo_uniform, light_indirection_uniform, light_atlas_uniform_a, light_in_uniform_a, light_out_uniform_b, light_material_props_uniform],
             _light_shader_rid,
             0
         )
@@ -2021,7 +2032,7 @@ func _init_render_resources() -> void:
             push_error("Failed to create light uniform set A AB.")
             return
         _light_uniform_set_a_ba = _rd.uniform_set_create(
-            [light_ubo_uniform, light_indirection_uniform, light_atlas_uniform_a, light_in_uniform_b, light_out_uniform_a],
+            [light_ubo_uniform, light_indirection_uniform, light_atlas_uniform_a, light_in_uniform_b, light_out_uniform_a, light_material_props_uniform],
             _light_shader_rid,
             0
         )
@@ -2029,7 +2040,7 @@ func _init_render_resources() -> void:
             push_error("Failed to create light uniform set A BA.")
             return
         _light_uniform_set_b_ab = _rd.uniform_set_create(
-            [light_ubo_uniform, light_indirection_uniform, light_atlas_uniform_b, light_in_uniform_a, light_out_uniform_b],
+            [light_ubo_uniform, light_indirection_uniform, light_atlas_uniform_b, light_in_uniform_a, light_out_uniform_b, light_material_props_uniform],
             _light_shader_rid,
             0
         )
@@ -2037,7 +2048,7 @@ func _init_render_resources() -> void:
             push_error("Failed to create light uniform set B AB.")
             return
         _light_uniform_set_b_ba = _rd.uniform_set_create(
-            [light_ubo_uniform, light_indirection_uniform, light_atlas_uniform_b, light_in_uniform_b, light_out_uniform_a],
+            [light_ubo_uniform, light_indirection_uniform, light_atlas_uniform_b, light_in_uniform_b, light_out_uniform_a, light_material_props_uniform],
             _light_shader_rid,
             0
         )
@@ -3343,6 +3354,13 @@ func _process(_delta: float) -> void:
     var inv_world_basis := world_basis.inverse()
     var gravity_world := _normalized_gravity()
     var gravity := inv_world_basis * gravity_world
+    var sun_world := render_sun_direction_world
+    if sun_world.length() < 0.001:
+        sun_world = Vector3(0.45, -0.85, 0.30)
+    sun_world = sun_world.normalized()
+    var sun_local := (inv_world_basis * sun_world).normalized()
+    var ao_strength := clampf(render_ao_strength, 0.0, 2.0)
+    var ao_radius_cells := clampf(render_ao_radius_cells, 0.5, 4.0)
     var origin := Vector3(-0.5 * world_extent, -0.5 * world_extent, -0.5 * world_extent)
     var effective_max_distance := max_distance
     if auto_max_distance:
@@ -3373,11 +3391,11 @@ func _process(_delta: float) -> void:
         debug_w = float(mpm_gravity_strength)
     var params := PackedFloat32Array([
         grid_extent, grid_extent, grid_extent, dt,
-        origin.x, origin.y, origin.z, 0.0,
-        pos.x, pos.y, pos.z, 0.0,
-        basis.x.x, basis.x.y, basis.x.z, 0.0,
-        basis.y.x, basis.y.y, basis.y.z, 0.0,
-        -basis.z.x, -basis.z.y, -basis.z.z, 0.0,
+        origin.x, origin.y, origin.z, ao_radius_cells,
+        pos.x, pos.y, pos.z, ao_strength,
+        basis.x.x, basis.x.y, basis.x.z, sun_local.x,
+        basis.y.x, basis.y.y, basis.y.z, sun_local.y,
+        -basis.z.x, -basis.z.y, -basis.z.z, sun_local.z,
         float(width), float(height), tan_half_fov, aspect,
         voxel_size, effective_max_distance, 0.8, 0.25,
         brick_grid, brick_grid, brick_grid, float(chunk_size),

@@ -33,10 +33,14 @@ layout(set = 0, binding = 3, std430) readonly buffer LightIn {
 layout(set = 0, binding = 4, std430) buffer LightOut {
     uint data[];
 } light_out;
+layout(set = 0, binding = 5, std430) readonly buffer MaterialProps {
+    vec4 data[];
+} material_props;
 
 const uint LIGHT_MAX = 15u;
 const uint GLASS_MATERIAL = 8u;
 const uint INVISIBLE_MATERIAL = 9u;
+const uint MATERIAL_PROPS_STRIDE = 5u;
 
 uint idx_brick(ivec3 b) {
     return uint(b.x) + uint(b.y) * uint(u.brick_info.x)
@@ -71,6 +75,22 @@ uint atlas_index_for_cell(ivec3 cell, out bool valid) {
     return brick_index * uint(brick_size * brick_size * brick_size) + local_index;
 }
 
+float material_emissive_luma(uint mat_id) {
+    if (mat_id == 0u) {
+        return 0.0;
+    }
+    uint base = mat_id * MATERIAL_PROPS_STRIDE;
+    vec4 render1 = material_props.data[base + 3u];
+    float strength = max(render1.w, 0.0);
+    float luma = max(render1.x, max(render1.y, render1.z));
+    return strength * luma;
+}
+
+uint material_emit(uint mat_id) {
+    float e = material_emissive_luma(mat_id);
+    return uint(clamp(round(e * 8.0), 0.0, float(LIGHT_MAX)));
+}
+
 void main() {
     ivec3 cell = ivec3(gl_GlobalInvocationID.xyz);
     if (!in_bounds(cell)) {
@@ -86,13 +106,17 @@ void main() {
     }
 
     uint mat = atlas.data[idx];
-    bool solid = mat != 0u && mat != GLASS_MATERIAL && mat != INVISIBLE_MATERIAL;
-    uint emit = 0u;
+    uint emit = material_emit(mat);
+    bool emissive = emit > 0u;
+    bool solid = mat != 0u
+        && mat != GLASS_MATERIAL
+        && mat != INVISIBLE_MATERIAL
+        && !emissive;
     if (!solid && cell.y == int(u.grid_info.y) - 1) {
-        emit = LIGHT_MAX;
+        emit = max(emit, LIGHT_MAX);
     }
 
-    uint out_light = 0u;
+    uint out_light = emit;
     if (!solid) {
         uint max_neighbor = 0u;
         ivec3 offsets[14] = ivec3[14](
@@ -125,7 +149,12 @@ void main() {
                 continue;
             }
             uint n_mat = atlas.data[n_idx];
-            if (n_mat != 0u && n_mat != GLASS_MATERIAL && n_mat != INVISIBLE_MATERIAL) {
+            uint n_emit = material_emit(n_mat);
+            bool n_emissive = n_emit > 0u;
+            if (n_mat != 0u
+                && n_mat != GLASS_MATERIAL
+                && n_mat != INVISIBLE_MATERIAL
+                && !n_emissive) {
                 continue;
             }
             uint n_light = light_in.data[n_idx];
