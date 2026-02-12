@@ -1,5 +1,7 @@
 extends Node3D
 
+const MaterialRegistry = preload("res://scripts/MaterialRegistry.gd")
+
 @export var voxel_renderer_path: NodePath
 @export var player_path: NodePath
 @export var camera_path: NodePath
@@ -17,6 +19,11 @@ extends Node3D
 @export var ground_clearance_cells: float = 2.4
 @export var ground_snap_speed: float = 16.0
 @export var ground_probe_radius_cells: int = 1
+@export var controller_move_deadzone: float = 0.18
+@export var controller_look_deadzone: float = 0.14
+@export var controller_look_sensitivity: float = 2.4
+@export var enable_controller_triggers: bool = true
+@export var controller_trigger_threshold: float = 0.55
 
 @export var chunk_radius_cells: int = 22
 @export var base_y: int = 4
@@ -32,6 +39,8 @@ extends Node3D
 @export var demo_water_material_id: int = 2
 @export var hotbar_size: int = 9
 @export var starter_stack_count: int = 0
+@export var fire_inventory_slot_material_id: int = MaterialRegistry.FIRE_ID
+@export var fire_inventory_count: int = 99
 
 var _renderer: Node = null
 var _player: Node3D = null
@@ -49,6 +58,8 @@ var _init_attempts: int = 0
 var _last_scan: Dictionary = {}
 var _hotbar_materials: Array = []
 var _inventory_counts: Dictionary = {}
+var _controller_pickup_down: bool = false
+var _controller_place_down: bool = false
 
 func _ready() -> void:
     _renderer = get_node_or_null(voxel_renderer_path)
@@ -131,13 +142,29 @@ func _unhandled_input(event: InputEvent) -> void:
         var slot_idx: int = _slot_index_from_keycode(key_ev.keycode)
         if slot_idx >= 0:
             _set_active_slot(slot_idx)
+            vp.set_input_as_handled()
+            return
+
+    if event is InputEventJoypadButton and event.pressed:
+        var jb := event as InputEventJoypadButton
+        match jb.button_index:
+            JOY_BUTTON_DPAD_LEFT, JOY_BUTTON_LEFT_SHOULDER:
+                _cycle_active_slot(-1)
+                vp.set_input_as_handled()
+                return
+            JOY_BUTTON_DPAD_RIGHT, JOY_BUTTON_RIGHT_SHOULDER:
+                _cycle_active_slot(1)
+                vp.set_input_as_handled()
+                return
 
 func _physics_process(delta: float) -> void:
     if _renderer == null or _player == null:
         return
+    _update_controller_look(delta)
     _update_movement(delta)
     _last_scan = _raycast_from_camera()
     _apply_preview(_last_scan)
+    _handle_controller_triggers()
     _update_overlay(_last_scan)
 
 func _update_movement(delta: float) -> void:
@@ -154,6 +181,11 @@ func _update_movement(delta: float) -> void:
         move_z += 1.0
     if Input.is_physical_key_pressed(KEY_S):
         move_z -= 1.0
+
+    var joy_id: int = _active_joypad_id()
+    if joy_id >= 0:
+        move_x += _read_axis_with_deadzone(joy_id, JOY_AXIS_LEFT_X, controller_move_deadzone)
+        move_z += -_read_axis_with_deadzone(joy_id, JOY_AXIS_LEFT_Y, controller_move_deadzone)
     if enable_fly_controls:
         if Input.is_physical_key_pressed(KEY_SPACE):
             move_y += 1.0
@@ -317,21 +349,81 @@ func _apply_preview(hit: Dictionary) -> void:
 func _update_overlay(hit: Dictionary) -> void:
     if _overlay == null:
         return
-    var capture_hint := "Captured" if Input.get_mouse_mode() == Input.MOUSE_MODE_CAPTURED else "Released (left click to capture)"
+    var capture_hint := "Captured" if Input.get_mouse_mode() == Input.MOUSE_MODE_CAPTURED else "Released (left click or RT to capture)"
     var target := "none"
     if bool(hit.get("hit", false)):
         target = _material_name(int(hit.get("material", 0)))
-    var movement_hint := "WASD move | Shift sprint | Esc release/back"
+    var movement_hint := "WASD/LS move | Mouse/RS look | Shift sprint | Esc release/back"
     if enable_fly_controls:
-        movement_hint = "WASD move | Shift sprint | Space/Ctrl vertical | Esc release/back"
+        movement_hint = "WASD/LS move | Mouse/RS look | Shift sprint | Space/Ctrl vertical | Esc release/back"
     var held_mat: int = _active_slot_material()
     var held_count: int = _inventory_get(held_mat)
     _overlay.text = (
         "Voxel Game Prototype\n"
         + movement_hint + "\n"
-        + "Left click pickup | Right click place | Number keys select hotbar slot\n"
+        + "Left click pickup | Right click place | RT pickup | LT place | Number keys/D-pad/LB/RB select hotbar slot\n"
         + "Active Slot: %d  |  Held: %s x%d  |  Target: %s  |  Mouse: %s"
     ) % [_active_slot + 1, _material_name(held_mat), held_count, target, capture_hint]
+
+func _update_controller_look(delta: float) -> void:
+    var joy_id: int = _active_joypad_id()
+    if joy_id < 0:
+        return
+    var look_x: float = _read_axis_with_deadzone(joy_id, JOY_AXIS_RIGHT_X, controller_look_deadzone)
+    var look_y: float = _read_axis_with_deadzone(joy_id, JOY_AXIS_RIGHT_Y, controller_look_deadzone)
+    if abs(look_x) < 0.0001 and abs(look_y) < 0.0001:
+        return
+    if Input.get_mouse_mode() != Input.MOUSE_MODE_CAPTURED:
+        _capture_mouse()
+    _yaw -= look_x * controller_look_sensitivity * delta
+    _pitch = clamp(_pitch - look_y * controller_look_sensitivity * delta, deg_to_rad(-89.0), deg_to_rad(89.0))
+    _apply_view_rotation()
+
+func _handle_controller_triggers() -> void:
+    if !enable_controller_triggers:
+        _controller_pickup_down = false
+        _controller_place_down = false
+        return
+    var joy_id: int = _active_joypad_id()
+    if joy_id < 0:
+        _controller_pickup_down = false
+        _controller_place_down = false
+        return
+    var pickup_now: bool = _read_trigger_strength(joy_id, JOY_AXIS_TRIGGER_RIGHT) >= controller_trigger_threshold
+    var place_now: bool = _read_trigger_strength(joy_id, JOY_AXIS_TRIGGER_LEFT) >= controller_trigger_threshold
+    if Input.get_mouse_mode() != Input.MOUSE_MODE_CAPTURED:
+        if pickup_now and !_controller_pickup_down:
+            _capture_mouse()
+        _controller_pickup_down = pickup_now
+        _controller_place_down = place_now
+        return
+    if pickup_now and !_controller_pickup_down:
+        _pickup_block()
+    if place_now and !_controller_place_down:
+        _place_block()
+    _controller_pickup_down = pickup_now
+    _controller_place_down = place_now
+
+func _active_joypad_id() -> int:
+    var joypads: PackedInt32Array = Input.get_connected_joypads()
+    if joypads.is_empty():
+        return -1
+    return int(joypads[0])
+
+func _read_trigger_strength(joy_id: int, axis: int) -> float:
+    var raw: float = Input.get_joy_axis(joy_id, axis)
+    if raw < 0.0:
+        raw = (raw + 1.0) * 0.5
+    return clamp(raw, 0.0, 1.0)
+
+func _read_axis_with_deadzone(joy_id: int, axis: int, deadzone: float) -> float:
+    var dz: float = clamp(deadzone, 0.0, 0.95)
+    var raw: float = clamp(Input.get_joy_axis(joy_id, axis), -1.0, 1.0)
+    var mag: float = abs(raw)
+    if mag <= dz:
+        return 0.0
+    var scaled: float = (mag - dz) / (1.0 - dz)
+    return sign(raw) * scaled
 
 func _material_name(material_id: int) -> String:
     match material_id:
@@ -560,6 +652,14 @@ func _setup_inventory() -> void:
         if starter_stack_count > 0:
             _inventory_counts[mid] = starter_stack_count
 
+    var fire_mid: int = fire_inventory_slot_material_id
+    if fire_mid > 0 and _hotbar_materials.size() > 0:
+        var last_slot_idx: int = _hotbar_materials.size() - 1
+        _hotbar_materials[last_slot_idx] = fire_mid
+        var fire_count: int = maxi(0, fire_inventory_count)
+        if fire_count > 0:
+            _inventory_counts[fire_mid] = maxi(int(_inventory_counts.get(fire_mid, 0)), fire_count)
+
     _active_slot = 0
     _held_material = _active_slot_material()
 
@@ -596,14 +696,28 @@ func _refresh_hotbar_ui() -> void:
         var title: String = "-"
         if mat_id > 0:
             title = _material_short_name(mat_id)
-        var txt := "%d\n%s\n%d" % [i + 1, title, count]
+        var slot_label := "[%d]" % (i + 1) if i == _active_slot else "%d" % (i + 1)
+        var txt := "%s\n%s\n%d" % [slot_label, title, count]
         var label: Label = _hotbar_slot_labels[i] as Label
         var panel: PanelContainer = _hotbar_slot_panels[i] as PanelContainer
         if label != null:
             label.text = txt
-            label.self_modulate = Color(1.0, 1.0, 1.0, 1.0) if i == _active_slot else Color(0.92, 0.92, 0.92, 1.0)
+            label.self_modulate = Color(1.0, 1.0, 1.0, 1.0) if i == _active_slot else Color(0.85, 0.85, 0.85, 1.0)
+            label.add_theme_color_override("font_color", Color(1.0, 0.98, 0.90, 1.0) if i == _active_slot else Color(0.88, 0.88, 0.88, 1.0))
         if panel != null:
-            panel.self_modulate = Color(1.0, 0.94, 0.72, 1.0) if i == _active_slot else Color(1.0, 1.0, 1.0, 1.0)
+            panel.self_modulate = Color(1.0, 1.0, 1.0, 1.0)
+            var style := StyleBoxFlat.new()
+            style.corner_radius_top_left = 6
+            style.corner_radius_top_right = 6
+            style.corner_radius_bottom_right = 6
+            style.corner_radius_bottom_left = 6
+            style.border_width_left = 3 if i == _active_slot else 1
+            style.border_width_top = 3 if i == _active_slot else 1
+            style.border_width_right = 3 if i == _active_slot else 1
+            style.border_width_bottom = 3 if i == _active_slot else 1
+            style.border_color = Color(1.0, 0.84, 0.34, 1.0) if i == _active_slot else Color(0.42, 0.42, 0.42, 1.0)
+            style.bg_color = Color(0.25, 0.20, 0.12, 0.95) if i == _active_slot else Color(0.11, 0.11, 0.11, 0.88)
+            panel.add_theme_stylebox_override("panel", style)
 
 func _slot_index_from_keycode(keycode: Key) -> int:
     match keycode:
@@ -634,6 +748,14 @@ func _set_active_slot(slot_idx: int) -> void:
     _active_slot = slot_idx
     _held_material = _active_slot_material()
     _refresh_hotbar_ui()
+
+func _cycle_active_slot(step: int) -> void:
+    var slot_count: int = _hotbar_materials.size()
+    if slot_count <= 0:
+        return
+    var dir: int = 1 if step >= 0 else -1
+    var next_idx: int = posmod(_active_slot + dir, slot_count)
+    _set_active_slot(next_idx)
 
 func _active_slot_material() -> int:
     if _active_slot < 0 or _active_slot >= _hotbar_materials.size():

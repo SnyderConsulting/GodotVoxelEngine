@@ -52,6 +52,8 @@ terrain_height = 8
 top_material_id = 6
 default_place_material = 6
 alt_place_material = 1
+fire_inventory_slot_material_id = 5
+fire_inventory_count = 99
 
 [node name="HUD" type="CanvasLayer" parent="."]
 
