@@ -49,6 +49,10 @@ const uint WATER_MATERIAL = 2u;
 const uint OXYGEN_MATERIAL = 3u;
 const uint FIRE_MATERIAL = 5u;
 const uint MATERIAL_PROPS_STRIDE = 5u;
+// Seed packing: upper 16 bits are metadata, low 16 bits are "wealth" (kinetic energy proxy).
+// Bit 31 marks a voxel as "settled"/sleeping: it will not simulate until woken by a CPU-side edit.
+const uint SEED_SLEEP_BIT = 0x80000000u;
+const uint SEED_META_RANDOM_MASK = 0x7FFF0000u;
 
 uint idx_brick(ivec3 b) {
     return uint(b.x) + uint(b.y) * uint(u.brick_info.x)
@@ -133,9 +137,20 @@ void main() {
     bool is_water = material == WATER_MATERIAL;
     bool is_fire = material == FIRE_MATERIAL;
     uint seed = seed_in.data[self_idx];
-    if (material == GLASS_MATERIAL || material == INVISIBLE_MATERIAL) {
+    // Treat fire as a fixed, placeable light source in the prototype (no drift/dissipation).
+    if (material == GLASS_MATERIAL || material == INVISIBLE_MATERIAL || material == FIRE_MATERIAL) {
         if (atomicCompSwap(atlas_out.data[self_idx], 0u, material) == 0u) {
             seed_out.data[self_idx] = 0u;
+        }
+        return;
+    }
+    bool is_sleeping = (seed & SEED_SLEEP_BIT) != 0u;
+    // Settled voxels are "frozen" until a CPU edit wakes them by clearing SEED_SLEEP_BIT.
+    // This prevents freshly generated terrain from collapsing immediately.
+    if (is_sleeping) {
+        if (atomicCompSwap(atlas_out.data[self_idx], 0u, material) == 0u) {
+            // Keep metadata, force wealth to 0.
+            seed_out.data[self_idx] = (seed & SEED_META_RANDOM_MASK) | SEED_SLEEP_BIT;
         }
         return;
     }
@@ -327,23 +342,25 @@ void main() {
                 if (atomicCompSwap(atlas_out.data[d_idx], 0u, material) == 0u) {
                     float down_gain = max(0.0, gravity_align[down_index]) * mass * 0.35;
                     float new_wealth = max(0.0, wealth + down_gain - drag);
-                    uint new_seed = (seed & 0xFFFF0000u) | (uint(clamp(new_wealth * 256.0, 0.0, 65535.0)));
+                    uint new_seed = (seed & SEED_META_RANDOM_MASK) | (uint(clamp(new_wealth * 256.0, 0.0, 65535.0)));
                     seed_out.data[d_idx] = new_seed;
                     return;
                 }
             } else {
                 // Swap down if we can displace the target.
-                uint t_index = d_mat * MATERIAL_PROPS_STRIDE;
-                vec4 t_props0 = material_props.data[t_index + 0u];
-                float t_resistance = t_props0.w;
-                if (wealth > t_resistance) {
-                    if (atomicCompSwap(atlas_out.data[d_idx], 0u, material) == 0u
-                        && atomicCompSwap(atlas_out.data[self_idx], 0u, d_mat) == 0u) {
-                        float new_wealth = max(0.0, wealth - t_resistance - drag);
-                        uint new_seed = (seed & 0xFFFF0000u) | (uint(clamp(new_wealth * 256.0, 0.0, 65535.0)));
-                        seed_out.data[d_idx] = new_seed;
-                        seed_out.data[self_idx] = 0u;
-                        return;
+                if ((seed_in.data[d_idx] & SEED_SLEEP_BIT) == 0u) {
+                    uint t_index = d_mat * MATERIAL_PROPS_STRIDE;
+                    vec4 t_props0 = material_props.data[t_index + 0u];
+                    float t_resistance = t_props0.w;
+                    if (wealth > t_resistance) {
+                        if (atomicCompSwap(atlas_out.data[d_idx], 0u, material) == 0u
+                            && atomicCompSwap(atlas_out.data[self_idx], 0u, d_mat) == 0u) {
+                            float new_wealth = max(0.0, wealth - t_resistance - drag);
+                            uint new_seed = (seed & SEED_META_RANDOM_MASK) | (uint(clamp(new_wealth * 256.0, 0.0, 65535.0)));
+                            seed_out.data[d_idx] = new_seed;
+                            seed_out.data[self_idx] = 0u;
+                            return;
+                        }
                     }
                 }
             }
@@ -430,6 +447,10 @@ void main() {
                 if (atlas_in.data[mid_idx] != material) {
                     continue;
                 }
+                // Require the intermediate water cell to be awake; sleeping voxels are rigid obstacles.
+                if ((seed_in.data[mid_idx] & SEED_SLEEP_BIT) != 0u) {
+                    continue;
+                }
                 for (int j = 0; j < NEIGHBOR_COUNT; j++) {
                     if (gravity_align[j] > 0.0) {
                         continue;
@@ -497,7 +518,7 @@ void main() {
         if (best_eq_idx != 0u) {
             if (atomicCompSwap(atlas_out.data[best_eq_idx], 0u, material) == 0u) {
                 float new_wealth = max(0.0, wealth - drag);
-                uint new_seed = (seed & 0xFFFF0000u) | (uint(clamp(new_wealth * 256.0, 0.0, 65535.0)));
+                uint new_seed = (seed & SEED_META_RANDOM_MASK) | (uint(clamp(new_wealth * 256.0, 0.0, 65535.0)));
                 seed_out.data[best_eq_idx] = new_seed;
                 return;
             }
@@ -654,6 +675,10 @@ void main() {
                             blocked = true;
                             break;
                         }
+                        if ((seed_in.data[h_idx] & SEED_SLEEP_BIT) != 0u) {
+                            blocked = true;
+                            break;
+                        }
                     }
                     if (!blocked && teleport_idx != 0u) {
                         target = teleport;
@@ -733,6 +758,10 @@ void main() {
             if (t_mat == material) {
                 continue;
             }
+            if ((seed_in.data[t_idx] & SEED_SLEEP_BIT) != 0u) {
+                // Settled voxels are immovable until explicitly woken.
+                continue;
+            }
             uint t_index = t_mat * MATERIAL_PROPS_STRIDE;
             vec4 t_props0 = material_props.data[t_index + 0u];
             float t_resistance = t_props0.w;
@@ -766,7 +795,7 @@ void main() {
                 if (atomicCompSwap(atlas_out.data[t_idx], 0u, material) == 0u
                     && atomicCompSwap(atlas_out.data[self_idx], 0u, best_target_mat) == 0u) {
                     float new_wealth = max(0.0, wealth + best_incentive - resistance);
-                    uint new_seed = (seed & 0xFFFF0000u) | (uint(clamp(new_wealth * 256.0, 0.0, 65535.0)));
+                    uint new_seed = (seed & SEED_META_RANDOM_MASK) | (uint(clamp(new_wealth * 256.0, 0.0, 65535.0)));
                     seed_out.data[t_idx] = new_seed;
                     seed_out.data[self_idx] = 0u;
                     return;
@@ -775,7 +804,7 @@ void main() {
                 if (atomicCompSwap(atlas_out.data[t_idx], 0u, material) == 0u) {
                     float down_gain = max(0.0, gravity_align[down_index]) * mass * 0.2;
                     float new_wealth = max(0.0, wealth + down_gain - drag);
-                    uint new_seed = (seed & 0xFFFF0000u) | (uint(clamp(new_wealth * 256.0, 0.0, 65535.0)));
+                    uint new_seed = (seed & SEED_META_RANDOM_MASK) | (uint(clamp(new_wealth * 256.0, 0.0, 65535.0)));
                     seed_out.data[t_idx] = new_seed;
                     return;
                 }
@@ -785,7 +814,11 @@ void main() {
 
     if (atomicCompSwap(atlas_out.data[self_idx], 0u, material) == 0u) {
         float new_wealth = max(0.0, wealth - drag);
-        uint new_seed = (seed & 0xFFFF0000u) | (uint(clamp(new_wealth * 256.0, 0.0, 65535.0)));
+        uint new_seed = (seed & SEED_META_RANDOM_MASK) | (uint(clamp(new_wealth * 256.0, 0.0, 65535.0)));
+        // Auto-sleep once we're supported and out of kinetic energy.
+        if (supported && new_wealth <= 0.001) {
+            new_seed |= SEED_SLEEP_BIT;
+        }
         seed_out.data[self_idx] = new_seed;
     }
 }

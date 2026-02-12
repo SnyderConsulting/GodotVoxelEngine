@@ -39,6 +39,8 @@ sim_enabled = true
 sim_every = 1
 sim_force_full_dispatch = true
 sim_mode = 0
+ca_sleep_enabled = true
+ca_wake_radius_cells = 3
 
 [node name="VoxelGameController" type="Node3D" parent="."]
 script = ExtResource("3")
@@ -48,9 +50,14 @@ camera_path = NodePath("../Player/Camera3D")
 overlay_path = NodePath("../HUD/InfoLabel")
 hotbar_slots_path = NodePath("../HUD/Hotbar/Margin/Slots")
 chunk_radius_cells = 16
-terrain_height = 8
-top_material_id = 6
-default_place_material = 6
+terrain_height = 22
+height_amplitude = 7.0
+grass_material_id = 12
+dirt_material_id = 13
+stone_material_id = 4
+ore_material_id = 14
+spawn_demo_physics = false
+default_place_material = 4
 alt_place_material = 1
 fire_inventory_slot_material_id = 5
 fire_inventory_count = 99

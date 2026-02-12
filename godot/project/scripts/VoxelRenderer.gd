@@ -36,6 +36,10 @@ const MaterialRegistry = preload("res://scripts/MaterialRegistry.gd")
 @export var sim_clear_output: bool = true
 @export var sim_force_full_dispatch: bool = false
 @export var sim_mode: int = 1 # 1 = MPM (particles), 0 = legacy CA (grid)
+# Legacy CA: seed bit 31 can mark "settled" voxels. When enabled, we seed generated worlds as settled
+# so terrain doesn't immediately collapse, and we wake a local neighborhood on edits.
+@export var ca_sleep_enabled: bool = true
+@export var ca_wake_radius_cells: int = 3
 @export var mpm_dt: float = 1.0 / 60.0
 # If true, advance the simulation using the actual frame `delta` (clamped) so the sim
 # speed stays consistent even when FPS drops. If false, uses fixed `mpm_dt` per frame.
@@ -4268,10 +4272,7 @@ func set_voxel_entries(entries: Array, allocate_all_bricks: bool = false) -> voi
         var local_index := base_offset + lx + ly * chunk_size + lz * chunk_size * chunk_size
         atlas[local_index] = mat_id
         if mat_id > 0:
-            var seed_val := int(_rng.randi())
-            if seed_val == 0:
-                seed_val = 1
-            seeds[local_index] = seed_val
+            seeds[local_index] = _ca_make_seed(ca_sleep_enabled)
         occupancy[brick_index] = 1
         if !allocate_all_bricks:
             indirection[brick_index] = brick_index + 1
@@ -5240,6 +5241,83 @@ func automation_reset_empty() -> void:
     else:
         set_voxel_entries([], true)
 
+func _ca_seed_from_u32(u: int) -> int:
+    # Convert a 32-bit unsigned value into a signed int32 for PackedInt32Array storage.
+    var v: int = u & 0xFFFFFFFF
+    if v >= 0x80000000:
+        v -= 0x100000000
+    return v
+
+func _ca_make_seed(settled: bool) -> int:
+    # Upper 16 bits: random metadata (bit 31 reserved for "settled"), low 16 bits: wealth (0 at rest).
+    var meta15: int = int(_rng.randi() & 0x7FFF)
+    var u: int = (meta15 << 16) & 0x7FFF0000
+    if settled:
+        u |= 0x80000000
+    return _ca_seed_from_u32(u)
+
+func _ca_wake_region(center: Vector3i, radius_cells: int) -> int:
+    if _rd == null or sim_mode != 0 or !ca_sleep_enabled:
+        return 0
+    var r: int = maxi(0, radius_cells)
+    var grid_extent: int = chunk_grid * chunk_size
+    if grid_extent <= 0:
+        return 0
+    var count := 0
+    var seed_val: int = _ca_make_seed(false)
+    var seed_bytes := PackedInt32Array([seed_val]).to_byte_array()
+    for dz in range(-r, r + 1):
+        for dy in range(-r, r + 1):
+            for dx in range(-r, r + 1):
+                var c := center + Vector3i(dx, dy, dz)
+                if c.x < 0 or c.y < 0 or c.z < 0 or c.x >= grid_extent or c.y >= grid_extent or c.z >= grid_extent:
+                    continue
+                if !_bcc_parity(c):
+                    continue
+                var atlas_index := _atlas_index_for_cell(c)
+                if atlas_index < 0:
+                    continue
+                var offset := atlas_index * 4
+                if _seed_a_rid.is_valid():
+                    _rd.buffer_update(_seed_a_rid, offset, seed_bytes.size(), seed_bytes)
+                if _seed_b_rid.is_valid():
+                    _rd.buffer_update(_seed_b_rid, offset, seed_bytes.size(), seed_bytes)
+                count += 1
+    return count
+
+func _ca_wake_column(base: Vector3i, radius_cells: int, height_cells: int = 0) -> int:
+    if _rd == null or sim_mode != 0 or !ca_sleep_enabled:
+        return 0
+    var r: int = maxi(0, radius_cells)
+    var grid_extent: int = chunk_grid * chunk_size
+    if grid_extent <= 0:
+        return 0
+    var y0: int = clamp(base.y - 1, 0, grid_extent - 1)
+    var y1: int = grid_extent - 1
+    if height_cells > 0:
+        y1 = mini(grid_extent - 1, base.y + height_cells)
+    var count := 0
+    var seed_val: int = _ca_make_seed(false)
+    var seed_bytes := PackedInt32Array([seed_val]).to_byte_array()
+    for y in range(y0, y1 + 1):
+        for dz in range(-r, r + 1):
+            for dx in range(-r, r + 1):
+                var c := Vector3i(base.x + dx, y, base.z + dz)
+                if c.x < 0 or c.z < 0 or c.x >= grid_extent or c.z >= grid_extent:
+                    continue
+                if !_bcc_parity(c):
+                    continue
+                var atlas_index := _atlas_index_for_cell(c)
+                if atlas_index < 0:
+                    continue
+                var offset := atlas_index * 4
+                if _seed_a_rid.is_valid():
+                    _rd.buffer_update(_seed_a_rid, offset, seed_bytes.size(), seed_bytes)
+                if _seed_b_rid.is_valid():
+                    _rd.buffer_update(_seed_b_rid, offset, seed_bytes.size(), seed_bytes)
+                count += 1
+    return count
+
 func set_voxel_at(cell: Vector3i, material: int) -> void:
     if _rd == null:
         return
@@ -5268,14 +5346,14 @@ func set_voxel_at(cell: Vector3i, material: int) -> void:
         _rd.buffer_update(_atlas_b_rid, offset, bytes.size(), bytes)
     var seed_val := 0
     if material > 0:
-        seed_val = int(_rng.randi())
-        if seed_val == 0:
-            seed_val = 1
+        seed_val = _ca_make_seed(false)
     var seed_bytes := PackedInt32Array([seed_val]).to_byte_array()
     if _seed_a_rid.is_valid():
         _rd.buffer_update(_seed_a_rid, offset, seed_bytes.size(), seed_bytes)
     if _seed_b_rid.is_valid():
         _rd.buffer_update(_seed_b_rid, offset, seed_bytes.size(), seed_bytes)
+    if material == 0:
+        _ca_wake_column(cell, ca_wake_radius_cells)
     _invalidate_material_query_cache()
 
 func set_preview_cells(cells: Array) -> void:

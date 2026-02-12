@@ -1,6 +1,7 @@
 extends Node3D
 
 const MaterialRegistry = preload("res://scripts/MaterialRegistry.gd")
+const WorldGenCavesScript = preload("res://scripts/WorldGenCaves.gd")
 
 @export var voxel_renderer_path: NodePath
 @export var player_path: NodePath
@@ -28,8 +29,35 @@ const MaterialRegistry = preload("res://scripts/MaterialRegistry.gd")
 @export var chunk_radius_cells: int = 22
 @export var base_y: int = 4
 @export var terrain_height: int = 10
-@export var top_material_id: int = 1
-@export var fill_material_id: int = 4
+@export var world_seed: int = 1337
+@export var height_frequency: float = 0.03
+@export var height_amplitude: float = 6.0
+@export var dirt_depth: int = 5
+
+@export var grass_material_id: int = MaterialRegistry.GRASS_ID
+@export var dirt_material_id: int = MaterialRegistry.DIRT_ID
+@export var stone_material_id: int = MaterialRegistry.STONE_ID
+@export var ore_material_id: int = MaterialRegistry.ORE_ID
+
+@export var caves_enabled: bool = true
+@export var cave_frequency: float = 0.09
+@export_range(0.0, 1.0, 0.01) var cave_threshold_shallow: float = 0.68
+@export_range(0.0, 1.0, 0.01) var cave_threshold_deep: float = 0.53
+@export var cave_surface_buffer: int = 6
+@export var cave_min_y: int = 4
+
+@export var tunnel_worm_count: int = 7
+@export var tunnel_worm_length: int = 120
+@export var tunnel_worm_radius: float = 2.3
+@export var tunnel_worm_step: float = 1.4
+
+@export var water_source_count: int = 8
+@export var water_source_radius: float = 2.0
+@export var water_max_y: int = 0 # 0 => auto (based on terrain height)
+
+@export var ore_frequency: float = 0.12
+@export_range(0.0, 1.0, 0.01) var ore_threshold: float = 0.78
+@export var ore_min_y: int = 4
 
 @export var default_place_material: int = 4
 @export var alt_place_material: int = 1
@@ -60,6 +88,7 @@ var _hotbar_materials: Array = []
 var _inventory_counts: Dictionary = {}
 var _controller_pickup_down: bool = false
 var _controller_place_down: bool = false
+var _material_names: Dictionary = {}
 
 func _ready() -> void:
     _renderer = get_node_or_null(voxel_renderer_path)
@@ -70,6 +99,9 @@ func _ready() -> void:
     if _renderer == null or _player == null or _camera == null:
         push_error("VoxelGameController missing required scene references.")
         return
+    # Material names come from `materials.json` so new worldgen blocks show readable names.
+    if _renderer != null and _renderer.has_method("get") and _renderer.get("material_data_path") != null:
+        _material_names = MaterialRegistry.load_material_name_map(str(_renderer.get("material_data_path")))
     _held_material = default_place_material
     _setup_inventory()
     _build_hotbar_ui()
@@ -237,23 +269,46 @@ func _build_chunk_world() -> void:
         return
     var grid_extent: int = int(_renderer.chunk_grid) * int(_renderer.chunk_size)
     var center: int = int((grid_extent - 1) / 2)
-    var radius := clampi(chunk_radius_cells, 4, center - 2)
-    var min_x := maxi(1, center - radius)
-    var max_x := mini(grid_extent - 2, center + radius)
-    var min_z := maxi(1, center - radius)
-    var max_z := mini(grid_extent - 2, center + radius)
-    var entries: Array = []
+    var seed := world_seed
+    if seed == 0:
+        seed = int(Time.get_ticks_usec() & 0x7FFFFFFF)
 
-    for z in range(min_z, max_z + 1):
-        for x in range(min_x, max_x + 1):
-            var y_top := _terrain_height_for(x, z, center, grid_extent)
-            for y in range(0, y_top + 1):
-                if !_is_bcc_cell(x, y, z):
-                    continue
-                var mat := fill_material_id
-                if y >= y_top - 1:
-                    mat = top_material_id
-                entries.append({"pos": Vector3(x, y, z), "material": mat})
+    var auto_water_max_y := water_max_y
+    if auto_water_max_y <= 0:
+        auto_water_max_y = base_y + int(round(float(terrain_height) * 0.55))
+
+    var params := {
+        "base_y": base_y,
+        "terrain_height": terrain_height,
+        "height_frequency": height_frequency,
+        "height_amplitude": height_amplitude,
+        "dirt_depth": dirt_depth,
+        "grass_id": grass_material_id,
+        "dirt_id": dirt_material_id,
+        "stone_id": stone_material_id,
+        "ore_id": ore_material_id,
+        "water_id": MaterialRegistry.WATER_ID,
+        "caves_enabled": caves_enabled,
+        "cave_frequency": cave_frequency,
+        "cave_threshold_shallow": cave_threshold_shallow,
+        "cave_threshold_deep": cave_threshold_deep,
+        "cave_surface_buffer": cave_surface_buffer,
+        "cave_min_y": cave_min_y,
+        "worm_count": tunnel_worm_count,
+        "worm_length": tunnel_worm_length,
+        "worm_radius": tunnel_worm_radius,
+        "worm_step": tunnel_worm_step,
+        "water_source_count": water_source_count,
+        "water_source_radius": water_source_radius,
+        "water_max_y": auto_water_max_y,
+        "ore_frequency": ore_frequency,
+        "ore_threshold": ore_threshold,
+        "ore_min_y": ore_min_y,
+        "boundary_wall": 2,
+    }
+
+    var gen = WorldGenCavesScript.new()
+    var entries: Array = gen.generate_entries(grid_extent, seed, params)
 
     if spawn_demo_physics:
         _append_demo_blob(entries, Vector3i(center - 6, base_y + terrain_height + 14, center), 4, demo_sand_material_id, grid_extent)
@@ -261,14 +316,6 @@ func _build_chunk_world() -> void:
 
     if _renderer.has_method("set_voxel_entries"):
         _renderer.set_voxel_entries(entries, true)
-
-func _terrain_height_for(x: int, z: int, center: int, grid_extent: int) -> int:
-    var dx := float(x - center)
-    var dz := float(z - center)
-    var radial: float = clamp(1.0 - Vector2(dx, dz).length() / max(1.0, float(chunk_radius_cells)), 0.0, 1.0)
-    var waves: float = sin(dx * 0.22) * 2.5 + cos(dz * 0.18) * 2.0
-    var y_top: int = base_y + int(round(float(terrain_height) * radial + waves))
-    return clampi(y_top, 2, grid_extent - 6)
 
 func _spawn_player_above_chunk() -> void:
     if _renderer == null or _player == null:
@@ -426,23 +473,10 @@ func _read_axis_with_deadzone(joy_id: int, axis: int, deadzone: float) -> float:
     return sign(raw) * scaled
 
 func _material_name(material_id: int) -> String:
-    match material_id:
-        1:
-            return "Sand (1)"
-        2:
-            return "Water (2)"
-        6:
-            return "Metal (6)"
-        5:
-            return "Fire (5)"
-        4:
-            return "Stone (4)"
-        8:
-            return "Glass (8)"
-        9:
-            return "Invisible (9)"
-        _:
-            return "Mat %d" % material_id
+    if material_id <= 0:
+        return "Air (0)"
+    var name := str(_material_names.get(material_id, "mat_%d" % material_id))
+    return "%s (%d)" % [name.capitalize(), material_id]
 
 func _raycast_from_camera() -> Dictionary:
     var out := {
@@ -788,25 +822,12 @@ func _ensure_material_on_hotbar(mat_id: int) -> void:
             return
 
 func _material_short_name(material_id: int) -> String:
-    match material_id:
-        1:
-            return "Sand"
-        2:
-            return "Water"
-        3:
-            return "Oxy"
-        6:
-            return "Metal"
-        5:
-            return "Fire"
-        4:
-            return "Stone"
-        8:
-            return "Glass"
-        9:
-            return "Invis"
-        _:
-            return "M%d" % material_id
+    if material_id <= 0:
+        return "-"
+    var name := str(_material_names.get(material_id, "m%d" % material_id))
+    if name.length() <= 4:
+        return name.capitalize()
+    return name.substr(0, 4).capitalize()
 
 func _snap_player_to_ground(delta: float, instant: bool) -> void:
     if _renderer == null or _player == null:

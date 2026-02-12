@@ -9,6 +9,9 @@ const FIRE_ID := 5
 const METAL_ID := 6
 const GLASS_ID := 8
 const INVISIBLE_ID := 9
+const GRASS_ID := 12
+const DIRT_ID := 13
+const ORE_ID := 14
 
 const DEFAULT_MATERIALS := {
     SAND_ID: {
@@ -187,10 +190,78 @@ const DEFAULT_MATERIALS := {
         "emissive_b": 0.0,
         "emissive_strength": 0.0,
     },
+    GRASS_ID: {
+        "id": GRASS_ID,
+        "name": "grass",
+        "mass": 2.0,
+        "friction": 1.2,
+        "cohesion": 1.2,
+        "resistance": 10.0,
+        "drag": 0.25,
+        "support_bonus": 0.0,
+        "lateral_bias": 0.0,
+        "gravity_bias": 0.0,
+        "albedo_r": 0.24,
+        "albedo_g": 0.62,
+        "albedo_b": 0.24,
+        "roughness": 0.95,
+        "metallic": 0.0,
+        "specular": 0.04,
+        "emissive_r": 0.0,
+        "emissive_g": 0.0,
+        "emissive_b": 0.0,
+        "emissive_strength": 0.0,
+    },
+    DIRT_ID: {
+        "id": DIRT_ID,
+        "name": "dirt",
+        "mass": 2.2,
+        "friction": 1.1,
+        "cohesion": 1.3,
+        "resistance": 10.5,
+        "drag": 0.25,
+        "support_bonus": 0.0,
+        "lateral_bias": 0.0,
+        "gravity_bias": 0.0,
+        "albedo_r": 0.44,
+        "albedo_g": 0.30,
+        "albedo_b": 0.16,
+        "roughness": 0.97,
+        "metallic": 0.0,
+        "specular": 0.03,
+        "emissive_r": 0.0,
+        "emissive_g": 0.0,
+        "emissive_b": 0.0,
+        "emissive_strength": 0.0,
+    },
+    ORE_ID: {
+        "id": ORE_ID,
+        "name": "ore",
+        "mass": 6.0,
+        "friction": 1.0,
+        "cohesion": 1.6,
+        "resistance": 11.0,
+        "drag": 0.18,
+        "support_bonus": 0.0,
+        "lateral_bias": 0.0,
+        "gravity_bias": 0.0,
+        "albedo_r": 0.62,
+        "albedo_g": 0.58,
+        "albedo_b": 0.52,
+        "roughness": 0.40,
+        "metallic": 0.35,
+        "specular": 0.55,
+        "emissive_r": 0.0,
+        "emissive_g": 0.0,
+        "emissive_b": 0.0,
+        "emissive_strength": 0.0,
+    },
 }
 
 static func is_static_material(material_id: int) -> bool:
-    return material_id == GLASS_ID or material_id == INVISIBLE_ID
+    # Static materials are written into the MPM static atlas (they do not become particles).
+    # Fire is treated as a placeable light source, so it should stay fixed once placed.
+    return material_id == GLASS_ID or material_id == INVISIBLE_ID or material_id == FIRE_ID
 
 static func load_materials(path: String) -> Dictionary:
     var materials: Dictionary = {}
