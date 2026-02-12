@@ -2,21 +2,7 @@
 
 import argparse
 import json
-import socket
-import sys
-
-
-def send_json_line(sock: socket.socket, obj: dict) -> dict:
-    line = json.dumps(obj, separators=(",", ":")) + "\n"
-    sock.sendall(line.encode("utf-8"))
-    buf = b""
-    while b"\n" not in buf:
-        chunk = sock.recv(65536)
-        if not chunk:
-            raise RuntimeError("automation server closed connection")
-        buf += chunk
-    resp_line, _rest = buf.split(b"\n", 1)
-    return json.loads(resp_line.decode("utf-8"))
+from automation_rpc import AutomationClient
 
 
 def main() -> int:
@@ -34,18 +20,21 @@ def main() -> int:
     except Exception:
         params = {}
 
-    with socket.create_connection((args.host, args.port), timeout=2.0) as sock:
-        sock.settimeout(5.0)
-        if args.token:
-            auth = {"id": 0, "method": "auth", "params": {"token": args.token}}
-            auth_resp = send_json_line(sock, auth)
-            print(json.dumps(auth_resp))
-        payload = {"id": args.id, "method": args.method, "params": params}
-        resp = send_json_line(sock, payload)
+    cli = AutomationClient(
+        args.host,
+        args.port,
+        args.token,
+        connect_timeout_s=2.0,
+        call_timeout_s=5.0,
+        start_id=args.id - 1,
+    )
+    try:
+        resp = cli.call(args.method, params)
         print(json.dumps(resp))
+    finally:
+        cli.close()
     return 0
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

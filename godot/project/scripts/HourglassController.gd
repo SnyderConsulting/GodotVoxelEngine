@@ -32,13 +32,10 @@ func _initialize_scenario() -> void:
     wait_for_renderer_ready(Callable(self, "_start_scene"))
 
 func _start_scene() -> void:
-    if renderer != null:
-        # Prevent a few frames of sim from running on an empty/uninitialized scenario.
-        renderer.sim_enabled = false
-        renderer.sim_mode = 1
+    begin_scene_build(1)
     _build_hourglass()
     renderer.gravity_dir = Vector3(0, -1, 0)
-    renderer.sim_enabled = true
+    end_scene_build(true)
     _update_overlay()
 
 func _process(_delta: float) -> void:
@@ -94,7 +91,7 @@ func _build_hourglass() -> void:
     for z in range(grid_extent):
         for y in range(grid_extent):
             for x in range(grid_extent):
-                if !((x & 1) == (y & 1) and (y & 1) == (z & 1)):
+                if !is_bcc_cell(x, y, z):
                     continue
                 var dx: float = float(x) - center
                 var dz: float = float(z) - center
@@ -115,7 +112,4 @@ func _build_hourglass() -> void:
                     if rng.randf() <= sand_density:
                         entries.append({"pos": Vector3(x, y, z), "material": sand_material_id})
 
-    if renderer.has_method("set_voxel_entries_mpm"):
-        renderer.set_voxel_entries_mpm(entries)
-    else:
-        renderer.set_voxel_entries(entries, true)
+    apply_entries(entries, true)

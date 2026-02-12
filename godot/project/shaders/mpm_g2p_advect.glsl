@@ -885,14 +885,16 @@ void main() {
     bool owns_old = (old_ai != 0u && cell_claim.data[old_ai] == pid);
     bool old_static = (old_ai != 0u && static_atlas.data[old_ai] != 0u);
 
-    // Stone uses continuous advection directly. Running stone through the per-cell
-    // claim conflict solver makes large chunks fan out under contention instead of
-    // dropping naturally.
+    // Stone can use the claim solver too; we keep its fallback deterministic to avoid
+    // random lateral fan-out while still preserving one-particle-per-cell occupancy.
+    const bool STONE_USE_CLAIM_SOLVER = true;
     bool down_static = false;
     bool side_static = false;
     bool down_sand = false;
     bool side_sand = false;
-    if (is_stone) {
+    bool down_supported = false;
+    bool side_supported = false;
+    if (is_stone && !STONE_USE_CLAIM_SOLVER) {
         final_cell = desired_cell;
         moved_cell = !all(equal(final_cell, old_cell));
     } else {
@@ -905,6 +907,7 @@ void main() {
         // - Sand: use gravity-aligned speed so piles respond immediately to gravity direction changes.
         bool optional_transport_water = is_water && !need_relocate && all(equal(desired_cell, old_cell)) && (sp >= rest_speed);
         bool optional_transport_sand = is_sand && !need_relocate && all(equal(desired_cell, old_cell)) && (v_down >= transport_speed);
+        bool optional_transport_stone = is_stone && !need_relocate && all(equal(desired_cell, old_cell)) && (v_down >= transport_speed);
 
         if (!need_relocate) {
             ivec3 cdown = old_cell + down_off;
@@ -935,8 +938,16 @@ void main() {
                 }
             }
         }
-        bool down_support = down_static || (is_water && down_sand);
-        bool side_support = side_static || (is_water && side_sand);
+        down_supported = down_static || (is_water && down_sand);
+        side_supported = side_static || (is_water && side_sand);
+        if (is_sand && !need_relocate && all(equal(desired_cell, old_cell)) && !down_supported && !side_supported && (v_down >= 0.03)) {
+            // Unsupported sand must still be allowed to claim a downhill neighbor even at low speed.
+            optional_transport_sand = true;
+        }
+        if (is_stone && !need_relocate && all(equal(desired_cell, old_cell)) && !down_supported && !side_supported && (v_down >= 0.04)) {
+            // Same for stone so detached fragments don't remain suspended under claim contention.
+            optional_transport_stone = true;
+        }
 
         // "Creep" transport: if a particle is at rest and sitting on a static ledge (downward cell is static),
         // but there exists a downhill empty neighbor that requires some lateral component, allow a hop even
@@ -945,7 +956,7 @@ void main() {
         bool optional_transport_creep = false;
         // Only enable creep near the top of the grid. This targets the Paint scene's "glass lip" edge
         // artifacts without affecting the broader water equilibrium behavior in regression scenes.
-        if (down_support && is_water && !need_relocate && all(equal(desired_cell, old_cell)) && (sp < rest_speed)) {
+        if (down_supported && is_water && !need_relocate && all(equal(desired_cell, old_cell)) && (sp < rest_speed)) {
             for (int i = 0; i < 14; i++) {
                 if (all(equal(neigh[i], down_off))) {
                     continue;
@@ -975,9 +986,9 @@ void main() {
         bool optional_transport_water_relax_high = is_water && !need_relocate && all(equal(desired_cell, old_cell))
             && (sp < rest_speed) && (old_cell.y > 12);
         bool water_high = is_water && (old_cell.y > int(u.grid_info.y) - 24);
-        bool optional_transport_water_side = is_water && side_support && !down_support
+        bool optional_transport_water_side = is_water && side_supported && !down_supported
             && !need_relocate && all(equal(desired_cell, old_cell)) && (sp < rest_speed);
-        bool optional_transport = optional_transport_water || optional_transport_sand || optional_transport_creep || optional_transport_water_side || optional_transport_water_relax_high;
+        bool optional_transport = optional_transport_water || optional_transport_sand || optional_transport_stone || optional_transport_creep || optional_transport_water_side || optional_transport_water_relax_high;
         bool want_move = need_relocate || !all(equal(desired_cell, old_cell)) || optional_transport;
 
         if (want_move) {
@@ -1005,7 +1016,7 @@ void main() {
         if (need_search) {
             // For sand optional transport, don't gate on speed: the whole point is to allow a hop even
             // when continuous position didn't cross a cell boundary yet.
-            if (sp >= rest_speed || need_relocate || optional_transport_sand || optional_transport_creep || optional_transport_water_side || optional_transport_water_relax_high) {
+            if (sp >= rest_speed || need_relocate || optional_transport_sand || optional_transport_stone || optional_transport_creep || optional_transport_water_side || optional_transport_water_relax_high) {
                 if (is_water && (sp > 1e-6 || optional_transport_creep || optional_transport_water_side || optional_transport_water_relax_high)) {
                     if (optional_transport_creep || optional_transport_water_side || optional_transport_water_relax_high) {
                         // Deterministic downhill hop from rest (no random walk): choose the most
@@ -1128,7 +1139,7 @@ void main() {
                 if (!moved_cell) {
                     // Gravity bias: try the neighbor most aligned with gravity first if moving "down".
                     float grav_thresh = is_sand ? 0.005 : 0.05;
-                    if (dot(v, gdir) > grav_thresh || need_relocate || optional_transport_creep || optional_transport_water || optional_transport_water_side || optional_transport_water_relax_high || (is_sand && optional_transport_sand)) {
+                    if (dot(v, gdir) > grav_thresh || need_relocate || optional_transport_creep || optional_transport_water || optional_transport_water_side || optional_transport_water_relax_high || (is_sand && optional_transport_sand) || (is_stone && optional_transport_stone)) {
                         ivec3 base = optional_transport ? old_cell : desired_cell;
                         ivec3 c = base + down_off;
                         if (!all(equal(c, old_cell)) && in_bounds(c) && bcc_parity(c)) {
@@ -1147,10 +1158,10 @@ void main() {
                         }
                     }
 
-                    if (is_sand) {
-                        // Deterministic fallback for sand: choose the most
+                    if (is_sand || is_stone) {
+                        // Deterministic fallback for granular/solid materials: choose the most
                         // gravity-aligned available neighbor (avoid randomized lateral scattering).
-                        ivec3 base = optional_transport_sand ? old_cell : desired_cell;
+                        ivec3 base = (is_sand && optional_transport_sand) ? old_cell : desired_cell;
                         bool tried[14];
                         for (int i = 0; i < 14; i++) {
                             tried[i] = false;
@@ -1171,15 +1182,18 @@ void main() {
                                     continue;
                                 }
                                 float d = dot(normalize(vec3(neigh[i])), gdir);
-                                if (!need_relocate && d < 0.35) {
-                                    // Granular sand should strongly prefer downhill moves.
+                                float min_d = is_stone ? 0.10 : 0.35;
+                                if (!need_relocate && d < min_d) {
+                                    // Prefer downhill moves, especially for sand.
                                     continue;
                                 }
-                                // Keep gravity as the dominant direction, but break ties with a
-                                // tiny per-particle stochastic term so tall columns don't collapse
-                                // in perfectly uniform lateral lanes.
-                                float jitter = (hash01(pid * 73856093u + uint(i) * 19349663u + uint(attempt) * 83492791u) - 0.5) * 0.06;
-                                float score = d + jitter;
+                                // Keep gravity as the dominant direction. Sand gets a tiny tie-break
+                                // jitter so columns don't collapse in perfectly uniform lanes.
+                                float score = d;
+                                if (is_sand) {
+                                    float jitter = (hash01(pid * 73856093u + uint(i) * 19349663u + uint(attempt) * 83492791u) - 0.5) * 0.06;
+                                    score += jitter;
+                                }
                                 if (score > best_d) {
                                     best_d = score;
                                     best_i = i;
@@ -1204,7 +1218,7 @@ void main() {
                     } else {
                         uint h = p * 1664525u + 1013904223u;
                         int start = int(h % 14u);
-                        for (int k = 0; k < 14 && (need_relocate || optional_transport_water || optional_transport_creep || optional_transport_water_side || optional_transport_water_relax_high || (is_sand && optional_transport_sand) || (!moved_cell && !all(equal(desired_cell, old_cell)))); k++) {
+                        for (int k = 0; k < 14 && (need_relocate || optional_transport_water || optional_transport_creep || optional_transport_water_side || optional_transport_water_relax_high || (is_sand && optional_transport_sand) || (is_stone && optional_transport_stone) || (!moved_cell && !all(equal(desired_cell, old_cell)))); k++) {
                             int i = (start + k) % 14;
                             ivec3 base = (is_sand && optional_transport_sand) ? old_cell : desired_cell;
                             ivec3 c = base + neigh[i];
@@ -1331,7 +1345,7 @@ void main() {
         if (material_id == 1u) { // sand
             // Preserve a small gravity-aligned drive so tall columns keep collapsing instead of
             // freezing when many particles contend for nearby cells in one substep.
-            if (down_static) {
+            if (down_supported) {
                 // Once supported, granular sand should lock and form piles rather than keep creeping.
                 v = vec3(0.0);
             } else {
@@ -1348,7 +1362,7 @@ void main() {
         } else if (material_id == 4u) { // stone
             // Preserve a small downhill drive for unsupported fragments under heavy occupancy
             // contention so detached chunks still settle instead of freezing in place.
-            if (down_static) {
+            if (down_supported) {
                 v = vec3(0.0);
             } else {
                 float vg = max(0.0, dot(v, gdir));
@@ -1366,31 +1380,38 @@ void main() {
         if (material_id == 1u) {
             // Only use a larger sleep threshold when supported from below.
             // On side walls (no downward support), keep a tiny threshold so sand can slide.
-            if (down_static) {
-                sleep_speed = 0.14;
-            } else if (side_static) {
-                sleep_speed = 0.03;
+            if (down_supported) {
+                sleep_speed = 0.12;
             } else {
-                sleep_speed = 0.02;
+                // Unsupported grains should not sleep in mid-air.
+                sleep_speed = -1.0;
             }
         } else if (material_id == 2u) {
-            // Keep water settling on hard static support, but avoid over-sleeping on granular
-            // sand support so it can continue draining off sand slopes.
+            // Let water keep draining along sand/walls; only sleep it on hard static support.
             if (down_static) {
                 sleep_speed = 0.010;
-            } else if (down_sand) {
-                sleep_speed = 0.0015;
-            } else if (side_static) {
-                sleep_speed = 0.001;
-            } else if (side_sand) {
-                sleep_speed = 0.0006;
             } else {
-                sleep_speed = 0.006;
+                // Unsupported water should keep moving so pockets can drain.
+                sleep_speed = -1.0;
+            }
+        } else if (material_id == 4u) {
+            if (down_supported) {
+                sleep_speed = 0.05;
+            } else {
+                sleep_speed = -1.0;
             }
         }
-        if ((material_id == 1u || material_id == 2u || material_id == 4u) && length(v) < sleep_speed) {
+        if ((material_id == 1u || material_id == 2u || material_id == 4u) && sleep_speed > 0.0 && length(v) < sleep_speed) {
             v = vec3(0.0);
             C = mat3(0.0);
+        } else if (material_id == 1u && !down_supported && !side_supported && old_cell.y > 6 && length(v) < 0.03) {
+            // Avoid rare unsupported "frozen" sand pockets under claim contention.
+            v = gdir * 0.06;
+        } else if (material_id == 2u && !down_supported && !side_supported && old_cell.y > 6 && length(v) < 0.02) {
+            // Keep isolated unsupported water voxels draining instead of floating indefinitely.
+            v = gdir * 0.04;
+        } else if (material_id == 4u && !down_supported && !side_supported && old_cell.y > 6 && length(v) < 0.04) {
+            v = gdir * 0.10;
         }
     }
 
@@ -1400,6 +1421,13 @@ void main() {
         float svf = length(v);
         if (svf > sand_vmax_final) {
             v *= sand_vmax_final / svf;
+        }
+    } else if (material_id == 4u) {
+        // Keep stone responsive but prevent unrealistic one-step speed spikes.
+        float stone_vmax_final = 60.0;
+        float stv = length(v);
+        if (stv > stone_vmax_final) {
+            v *= stone_vmax_final / stv;
         }
     }
 

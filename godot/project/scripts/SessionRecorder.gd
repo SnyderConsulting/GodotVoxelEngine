@@ -21,7 +21,9 @@ const SESSION_DIR := "runlogs/sessions"
 @export var enabled: bool = true
 @export var record_input: bool = true
 @export var record_mpm_stats: bool = true
+@export var record_ca_stats: bool = true
 @export var stats_poll_hz: float = 30.0
+@export var flush_interval_s: float = 0.5
 
 var session_id: String = ""
 var _recording: bool = false
@@ -43,8 +45,14 @@ var _target_voxel: Node = null
 var _target_scene: String = ""
 var _stats_accum: float = 0.0
 var _last_stats_frame: int = -1
+var _last_stats_mode: String = ""
 var _saved_stats_enabled: Variant = null
 var _saved_stats_every: Variant = null
+var _saved_metrics_every: Variant = null
+var _events_dirty: bool = false
+var _stats_dirty: bool = false
+var _events_flush_accum: float = 0.0
+var _stats_flush_accum: float = 0.0
 
 func is_recording() -> bool:
 	return _recording
@@ -116,6 +124,11 @@ func start_recording(id: String) -> void:
 	_t0_usec = Time.get_ticks_usec()
 	_stats_accum = 0.0
 	_last_stats_frame = -1
+	_last_stats_mode = ""
+	_events_dirty = false
+	_stats_dirty = false
+	_events_flush_accum = 0.0
+	_stats_flush_accum = 0.0
 
 	_target_scene = str(get_tree().current_scene.scene_file_path) if get_tree().current_scene else ""
 	_target_voxel = _find_voxel_renderer()
@@ -126,11 +139,7 @@ func start_recording(id: String) -> void:
 	_write_event({"event": "recording_start", "scene": _target_scene})
 
 	# Ensure the renderer produces stats frequently enough to observe behavior.
-	if _target_voxel != null and record_mpm_stats:
-		_saved_stats_enabled = _safe_get(_target_voxel, "mpm_stats_enabled")
-		_saved_stats_every = _safe_get(_target_voxel, "mpm_stats_every")
-		_safe_set(_target_voxel, "mpm_stats_enabled", true)
-		_safe_set(_target_voxel, "mpm_stats_every", 1)
+	_capture_and_apply_renderer_stats_overrides(_target_voxel)
 
 func stop_recording() -> void:
 	if !_recording:
@@ -138,11 +147,8 @@ func stop_recording() -> void:
 	_write_event({"event": "recording_stop"})
 
 	# Restore prior renderer settings.
-	if _target_voxel != null and record_mpm_stats:
-		if _saved_stats_enabled != null:
-			_safe_set(_target_voxel, "mpm_stats_enabled", _saved_stats_enabled)
-		if _saved_stats_every != null:
-			_safe_set(_target_voxel, "mpm_stats_every", _saved_stats_every)
+	_restore_renderer_stats_overrides(_target_voxel)
+	_clear_saved_stats_overrides()
 
 	_recording = false
 	_set_overlay(false)
@@ -186,6 +192,17 @@ func record_controls(world_rotation: Vector3, gravity_dir: Vector3) -> void:
 func _process(delta: float) -> void:
 	if !_recording:
 		return
+	_events_flush_accum += maxf(0.0, delta)
+	_stats_flush_accum += maxf(0.0, delta)
+	var flush_every := maxf(0.05, flush_interval_s)
+	if _events_dirty and _events_f and _events_flush_accum >= flush_every:
+		_events_f.flush()
+		_events_dirty = false
+		_events_flush_accum = 0.0
+	if _stats_dirty and _stats_f and _stats_flush_accum >= flush_every:
+		_stats_f.flush()
+		_stats_dirty = false
+		_stats_flush_accum = 0.0
 
 	# Scene switches: re-bind target node and write an event.
 	var cur_scene_path := str(get_tree().current_scene.scene_file_path) if get_tree().current_scene else ""
@@ -213,7 +230,7 @@ func _process(delta: float) -> void:
 				_write_event({"event": "gravity_dir", "value": [g.x, g.y, g.z]})
 
 	# Stats polling (reads cached stats; avoids GPU readback storms).
-	if record_mpm_stats and _target_voxel != null:
+	if (record_mpm_stats or record_ca_stats) and _target_voxel != null:
 		_stats_accum += maxf(0.0, delta)
 		var period := 1.0 / maxf(1.0, stats_poll_hz)
 		if _stats_accum >= period:
@@ -224,47 +241,65 @@ func _bind_voxel_renderer(n: Node) -> void:
 	if n == _target_voxel:
 		return
 	# Restore prior renderer settings if we changed them.
-	if _target_voxel != null and record_mpm_stats:
-		if _saved_stats_enabled != null:
-			_safe_set(_target_voxel, "mpm_stats_enabled", _saved_stats_enabled)
-		if _saved_stats_every != null:
-			_safe_set(_target_voxel, "mpm_stats_every", _saved_stats_every)
-	_saved_stats_enabled = null
-	_saved_stats_every = null
+	_restore_renderer_stats_overrides(_target_voxel)
+	_clear_saved_stats_overrides()
 	_target_voxel = n
 	_last_world_rot = Vector3.INF
 	_last_gravity_dir = Vector3.INF
 	_last_stats_frame = -1
-	if _target_voxel != null and record_mpm_stats:
-		_saved_stats_enabled = _safe_get(_target_voxel, "mpm_stats_enabled")
-		_saved_stats_every = _safe_get(_target_voxel, "mpm_stats_every")
-		_safe_set(_target_voxel, "mpm_stats_enabled", true)
-		_safe_set(_target_voxel, "mpm_stats_every", 1)
+	_last_stats_mode = ""
+	_capture_and_apply_renderer_stats_overrides(_target_voxel)
 
 func _poll_stats() -> void:
 	if _target_voxel == null:
 		return
-	if !_target_voxel.has_method("mpm_get_last_stats_frame") or !_target_voxel.has_method("mpm_get_last_stats_raw"):
+	var sim_mode := int(_safe_get(_target_voxel, "sim_mode"))
+	if sim_mode == 1 and record_mpm_stats:
+		if !_target_voxel.has_method("mpm_get_last_stats_frame") or !_target_voxel.has_method("mpm_get_last_stats_raw"):
+			return
+		if _last_stats_mode != "mpm":
+			_last_stats_mode = "mpm"
+			_last_stats_frame = -1
+		var frame_v: Variant = _target_voxel.call("mpm_get_last_stats_frame")
+		var frame := int(frame_v) if typeof(frame_v) in [TYPE_INT, TYPE_FLOAT] else 0
+		if frame <= _last_stats_frame:
+			return
+		_last_stats_frame = frame
+		var raw: Variant = _target_voxel.call("mpm_get_last_stats_raw")
+		if typeof(raw) != TYPE_PACKED_INT32_ARRAY and typeof(raw) != TYPE_ARRAY:
+			return
+		var arr: Array = []
+		if typeof(raw) == TYPE_PACKED_INT32_ARRAY:
+			for x in raw:
+				arr.append(int(x))
+		else:
+			for x in raw as Array:
+				arr.append(int(x))
+		_write_stats({
+			"mode": "mpm",
+			"stats_frame": frame,
+			"raw": arr,
+		})
 		return
-	var frame_v: Variant = _target_voxel.call("mpm_get_last_stats_frame")
-	var frame := int(frame_v) if typeof(frame_v) in [TYPE_INT, TYPE_FLOAT] else 0
-	if frame <= _last_stats_frame:
-		return
-	_last_stats_frame = frame
-	var raw: Variant = _target_voxel.call("mpm_get_last_stats_raw")
-	if typeof(raw) != TYPE_PACKED_INT32_ARRAY and typeof(raw) != TYPE_ARRAY:
-		return
-	var arr: Array = []
-	if typeof(raw) == TYPE_PACKED_INT32_ARRAY:
-		for x in raw:
-			arr.append(int(x))
-	else:
-		for x in raw as Array:
-			arr.append(int(x))
-	_write_stats({
-		"stats_frame": frame,
-		"raw": arr,
-	})
+	if sim_mode == 0 and record_ca_stats:
+		if !_target_voxel.has_method("ca_get_last_metrics_frame") or !_target_voxel.has_method("ca_get_last_metrics"):
+			return
+		if _last_stats_mode != "ca":
+			_last_stats_mode = "ca"
+			_last_stats_frame = -1
+		var ca_frame_v: Variant = _target_voxel.call("ca_get_last_metrics_frame")
+		var ca_frame := int(ca_frame_v) if typeof(ca_frame_v) in [TYPE_INT, TYPE_FLOAT] else 0
+		if ca_frame <= _last_stats_frame:
+			return
+		_last_stats_frame = ca_frame
+		var metrics: Variant = _target_voxel.call("ca_get_last_metrics")
+		if typeof(metrics) != TYPE_DICTIONARY:
+			return
+		_write_stats({
+			"mode": "ca",
+			"metrics_frame": ca_frame,
+			"metrics": metrics,
+		})
 
 func _write_meta() -> void:
 	var meta := {
@@ -287,7 +322,7 @@ func _write_event(obj: Dictionary) -> void:
 	obj["t_ms"] = float(Time.get_ticks_usec() - _t0_usec) / 1000.0
 	obj["frame"] = int(Engine.get_process_frames())
 	_events_f.store_line(JSON.stringify(obj))
-	_events_f.flush()
+	_events_dirty = true
 
 func _write_stats(obj: Dictionary) -> void:
 	if !_stats_f:
@@ -295,7 +330,7 @@ func _write_stats(obj: Dictionary) -> void:
 	obj["t_ms"] = float(Time.get_ticks_usec() - _t0_usec) / 1000.0
 	obj["frame"] = int(Engine.get_process_frames())
 	_stats_f.store_line(JSON.stringify(obj))
-	_stats_f.flush()
+	_stats_dirty = true
 
 func _install_overlay() -> void:
 	_overlay_layer = CanvasLayer.new()
@@ -345,6 +380,35 @@ func _make_session_id() -> String:
 	var pid := int(OS.get_process_id())
 	var r := int(randi() & 0xffff)
 	return "%d-%d-%04x" % [unix, pid, r]
+
+func _clear_saved_stats_overrides() -> void:
+	_saved_stats_enabled = null
+	_saved_stats_every = null
+	_saved_metrics_every = null
+
+func _restore_renderer_stats_overrides(renderer_node: Node) -> void:
+	if renderer_node == null:
+		return
+	if record_mpm_stats:
+		if _saved_stats_enabled != null:
+			_safe_set(renderer_node, "mpm_stats_enabled", _saved_stats_enabled)
+		if _saved_stats_every != null:
+			_safe_set(renderer_node, "mpm_stats_every", _saved_stats_every)
+	if record_ca_stats and _saved_metrics_every != null:
+		_safe_set(renderer_node, "metrics_every", _saved_metrics_every)
+
+func _capture_and_apply_renderer_stats_overrides(renderer_node: Node) -> void:
+	_clear_saved_stats_overrides()
+	if renderer_node == null:
+		return
+	if record_mpm_stats:
+		_saved_stats_enabled = _safe_get(renderer_node, "mpm_stats_enabled")
+		_saved_stats_every = _safe_get(renderer_node, "mpm_stats_every")
+		_safe_set(renderer_node, "mpm_stats_enabled", true)
+		_safe_set(renderer_node, "mpm_stats_every", 1)
+	if record_ca_stats:
+		_saved_metrics_every = _safe_get(renderer_node, "metrics_every")
+		_safe_set(renderer_node, "metrics_every", 1)
 
 func _safe_get(node: Node, prop: String) -> Variant:
 	if node == null:

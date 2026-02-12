@@ -1,5 +1,7 @@
 extends Node
 
+const MaterialRegistry = preload("res://scripts/MaterialRegistry.gd")
+
 @export var quad_path: NodePath
 @export var camera_path: NodePath
 @export var width: int = 512
@@ -25,6 +27,7 @@ extends Node
 @export var debug_probe_enabled: bool = false
 @export var debug_probe_cell: Vector3i = Vector3i(0, 0, 0)
 @export var debug_probe_every: int = 60
+@export var material_query_cache_enabled: bool = true
 @export var sim_enabled: bool = false
 @export var sim_every: int = 1
 @export var sim_clear_output: bool = true
@@ -268,6 +271,10 @@ var _mpm_particles_use_a := true
 var _mpm_particle_count_cpu: int = 0
 var _mpm_islands_ready := false
 var _material_mass_by_id: Dictionary = {}
+var _ca_last_metrics_frame: int = 0
+var _ca_last_metrics: Dictionary = {}
+var _material_query_cached_frame: int = -1
+var _material_query_cached_atlas: PackedInt32Array = PackedInt32Array()
 var mpm_last_stats_frame: int = 0
 var mpm_last_stats_raw: PackedInt32Array = PackedInt32Array()
 var mpm_last_stats: Dictionary = {}
@@ -298,6 +305,12 @@ func mpm_get_last_stats_raw() -> Array:
 func mpm_get_last_stats() -> Dictionary:
     return mpm_last_stats
 
+func ca_get_last_metrics_frame() -> int:
+    return _ca_last_metrics_frame
+
+func ca_get_last_metrics() -> Dictionary:
+    return _ca_last_metrics
+
 func debug_ca_status() -> Dictionary:
     return {
         "sim_enabled": sim_enabled,
@@ -312,7 +325,12 @@ func debug_ca_status() -> Dictionary:
         "active_dispatch_pipeline_valid": _active_dispatch_pipeline_rid.is_valid(),
         "active_dispatch_set_valid": _active_dispatch_uniform_set_rid.is_valid(),
         "active_list_ready": _active_list_ready,
+        "ca_last_metrics_frame": _ca_last_metrics_frame,
     }
+
+func _apply_ca_metrics(frame_id: int, metrics: Dictionary) -> void:
+    _ca_last_metrics_frame = frame_id
+    _ca_last_metrics = metrics
 
 func mpm_request_discrete_audit() -> int:
     # Automation/test helper: compute discrete voxel invariants (no compression, no multi-material per cell,
@@ -3463,6 +3481,7 @@ func _dispatch_sim(_grid_extent: int) -> void:
         _rd.compute_list_dispatch_indirect(list, _sim_dispatch_rid, 0)
     _rd.compute_list_end()
     _atlas_use_a = !use_a
+    _invalidate_material_query_cache()
 
 func _dispatch_mpm() -> void:
     if !_mpm_p2g_pipeline_rid.is_valid() or !_mpm_grid_update_pipeline_rid.is_valid() or !_mpm_g2p_advect_pipeline_rid.is_valid():
@@ -3872,8 +3891,6 @@ func _readback_metrics() -> void:
 func _readback_metrics_on_render_thread() -> void:
     if _rd == null or !_metrics_rid.is_valid():
         return
-    if !debug_logging and !diag_enabled:
-        return
     var bytes := _rd.buffer_get_data(_metrics_rid)
     var ints := bytes.to_int32_array()
     if ints.size() < 4:
@@ -3901,17 +3918,30 @@ func _readback_metrics_on_render_thread() -> void:
     if active_bricks >= 0:
         indirect_groups = active_bricks * groups_per_brick * groups_per_brick * groups_per_brick
     var full_group_count := full_groups * full_groups * full_groups
-    print("GPU metrics | rays=%d hits=%d avg_steps=%.2f occupied_bricks=%d active_bricks=%d total_bricks=%d indirect_groups=%d full_groups=%d main_thread=%s" % [
-        ray_count,
-        hit_count,
-        avg_steps,
-        occupied_bricks,
-        active_bricks,
-        total_bricks,
-        indirect_groups,
-        full_group_count,
-        str(main_thread)
-    ])
+    var frame_id := _metrics_frame
+    call_deferred("_apply_ca_metrics", frame_id, {
+        "ray_count": ray_count,
+        "hit_count": hit_count,
+        "step_count": step_count,
+        "avg_steps": avg_steps,
+        "occupied_bricks": occupied_bricks,
+        "active_bricks": active_bricks,
+        "total_bricks": total_bricks,
+        "indirect_groups": indirect_groups,
+        "full_group_count": full_group_count,
+    })
+    if debug_logging or diag_enabled:
+        print("GPU metrics | rays=%d hits=%d avg_steps=%.2f occupied_bricks=%d active_bricks=%d total_bricks=%d indirect_groups=%d full_groups=%d main_thread=%s" % [
+            ray_count,
+            hit_count,
+            avg_steps,
+            occupied_bricks,
+            active_bricks,
+            total_bricks,
+            indirect_groups,
+            full_group_count,
+            str(main_thread)
+        ])
 
 func _readback_mpm_stats() -> void:
     if !mpm_stats_enabled:
@@ -4134,6 +4164,7 @@ func _upload_brickmap_data() -> void:
     if _seed_b_rid.is_valid():
         _rd.buffer_update(_seed_b_rid, 0, seed_bytes.size(), seed_bytes)
     _atlas_use_a = true
+    _invalidate_material_query_cache()
     var occ_bytes := occupancy.to_byte_array()
     _rd.buffer_update(_occupancy_rid, 0, occ_bytes.size(), occ_bytes)
 
@@ -4171,7 +4202,7 @@ func set_voxel_entries(entries: Array, allocate_all_bricks: bool = false) -> voi
         var gz := int(pos.z)
         if gx < 0 or gy < 0 or gz < 0 or gx >= grid_extent or gy >= grid_extent or gz >= grid_extent:
             continue
-        if !((gx & 1) == (gy & 1) and (gy & 1) == (gz & 1)):
+        if !_bcc_parity(Vector3i(gx, gy, gz)):
             continue
         var bx := gx / chunk_size
         var by := gy / chunk_size
@@ -4206,6 +4237,7 @@ func set_voxel_entries(entries: Array, allocate_all_bricks: bool = false) -> voi
     if _seed_b_rid.is_valid():
         _rd.buffer_update(_seed_b_rid, 0, seed_bytes.size(), seed_bytes)
     _atlas_use_a = true
+    _invalidate_material_query_cache()
     var occ_bytes := occupancy.to_byte_array()
     _rd.buffer_update(_occupancy_rid, 0, occ_bytes.size(), occ_bytes)
     if _light_a_rid.is_valid():
@@ -4250,29 +4282,9 @@ func set_voxel_entries_mpm(entries: Array) -> void:
     var count := 0
     var max_p: int = maxi(1, mpm_max_particles)
 
-    # Mass is also stored in materials.json. Use that if available.
-    var mass_by_id: Dictionary = {
-        1: 1.6,
-        2: 1.0,
-        3: 0.05,
-        8: 3.0,
-        9: 3.0
-    }
-    if !material_data_path.is_empty() and FileAccess.file_exists(material_data_path):
-        var mat_text := FileAccess.get_file_as_string(material_data_path)
-        if !mat_text.is_empty():
-            var parsed: Variant = JSON.parse_string(mat_text)
-            if typeof(parsed) == TYPE_DICTIONARY:
-                var parsed_dict: Dictionary = parsed
-                var mats: Array = parsed_dict.get("materials", [])
-                if typeof(mats) == TYPE_ARRAY:
-                    for item in mats:
-                        if typeof(item) != TYPE_DICTIONARY:
-                            continue
-                        var id := int(item.get("id", -1))
-                        if id <= 0:
-                            continue
-                        mass_by_id[id] = float(item.get("mass", 1.0))
+    var mass_by_id: Dictionary = _material_mass_by_id
+    if mass_by_id.is_empty():
+        mass_by_id = MaterialRegistry.load_mass_map(material_data_path)
 
     for entry in entries:
         var pos = entry.get("pos", Vector3.ZERO)
@@ -4297,7 +4309,7 @@ func set_voxel_entries_mpm(entries: Array) -> void:
         var base_offset := brick_index * chunk_size * chunk_size * chunk_size
         var local_index := base_offset + lx + ly * chunk_size + lz * chunk_size * chunk_size
 
-        if mat_id == 8 or mat_id == 9:
+        if MaterialRegistry.is_static_material(mat_id):
             static_atlas[local_index] = mat_id
             atlas_init[local_index] = mat_id
             continue
@@ -4344,6 +4356,7 @@ func set_voxel_entries_mpm(entries: Array) -> void:
     if _atlas_b_rid.is_valid():
         _rd.buffer_update(_atlas_b_rid, 0, atlas_bytes.size(), atlas_bytes)
     _atlas_use_a = true
+    _invalidate_material_query_cache()
 
     # Upload particle buffers (A and B start identical).
     var pos_bytes := pos_mass.to_byte_array()
@@ -4427,57 +4440,8 @@ func _load_voxel_entries(grid_extent: int) -> Array:
     return entries
 
 func _load_material_props() -> PackedByteArray:
-    # Each material uses 8 floats:
-    # [mass, friction, cohesion, resistance, drag, support_bonus, lateral_bias, gravity_bias]
-    var defaults := {
-        1: {"mass": 1.6, "friction": 0.7, "cohesion": 0.4, "resistance": 0.6, "drag": 0.35, "support_bonus": 0.25, "lateral_bias": -0.15, "gravity_bias": 1.2},
-        2: {"mass": 1.0, "friction": 0.05, "cohesion": 0.1, "resistance": 0.1, "drag": 0.15, "support_bonus": 0.15, "lateral_bias": 0.2, "gravity_bias": 1.0},
-        3: {"mass": 0.05, "friction": 0.0, "cohesion": 0.0, "resistance": 0.0, "drag": 0.01, "support_bonus": 0.0, "lateral_bias": 0.0, "gravity_bias": 0.0},
-        4: {"mass": 4.0, "friction": 1.0, "cohesion": 1.5, "resistance": 8.0, "drag": 0.2, "support_bonus": 0.0, "lateral_bias": -0.5, "gravity_bias": 0.0},
-        8: {"mass": 3.0, "friction": 10.0, "cohesion": 2.0, "resistance": 10.0, "drag": 2.0, "support_bonus": 0.0, "lateral_bias": -1.0, "gravity_bias": 0.0},
-        9: {"mass": 3.0, "friction": 10.0, "cohesion": 2.0, "resistance": 10.0, "drag": 2.0, "support_bonus": 0.0, "lateral_bias": -1.0, "gravity_bias": 0.0}
-    }
-    var materials: Dictionary = {}
-    var max_id := 9
-    if !material_data_path.is_empty() and FileAccess.file_exists(material_data_path):
-        var text := FileAccess.get_file_as_string(material_data_path)
-        if !text.is_empty():
-            var parsed: Variant = JSON.parse_string(text)
-            if typeof(parsed) == TYPE_DICTIONARY:
-                var parsed_dict: Dictionary = parsed
-                var arr: Array = parsed_dict.get("materials", [])
-                if typeof(arr) == TYPE_ARRAY:
-                    for item in arr:
-                        if typeof(item) != TYPE_DICTIONARY:
-                            continue
-                        var id := int(item.get("id", -1))
-                        if id < 0:
-                            continue
-                        materials[id] = item
-                        if id > max_id:
-                            max_id = id
-    for id in defaults.keys():
-        if id > max_id:
-            max_id = id
-    var count := max_id + 1
-    var floats := PackedFloat32Array()
-    floats.resize(count * 8)
-    _material_mass_by_id = {}
-    for i in range(count):
-        var src: Dictionary = materials.get(i, defaults.get(i, {}))
-        if typeof(src) != TYPE_DICTIONARY:
-            src = {}
-        var mass_val: float = float(src.get("mass", 0.0))
-        floats[i * 8 + 0] = mass_val
-        _material_mass_by_id[i] = mass_val
-        floats[i * 8 + 1] = float(src.get("friction", 0.0))
-        floats[i * 8 + 2] = float(src.get("cohesion", 0.0))
-        floats[i * 8 + 3] = float(src.get("resistance", 0.0))
-        floats[i * 8 + 4] = float(src.get("drag", 0.0))
-        floats[i * 8 + 5] = float(src.get("support_bonus", 0.0))
-        floats[i * 8 + 6] = float(src.get("lateral_bias", 0.0))
-        floats[i * 8 + 7] = float(src.get("gravity_bias", 1.0))
-    return floats.to_byte_array()
+    _material_mass_by_id = MaterialRegistry.load_mass_map(material_data_path)
+    return MaterialRegistry.build_props_buffer(material_data_path)
 
 func _debug_log_snapshot(pos: Vector3, basis: Basis, world_extent: float) -> void:
     if !debug_logging:
@@ -4948,6 +4912,30 @@ func _bcc_parity(cell: Vector3i) -> bool:
 func _current_atlas_rid() -> RID:
     return _atlas_a_rid if _atlas_use_a else _atlas_b_rid
 
+func _invalidate_material_query_cache() -> void:
+    _material_query_cached_frame = -1
+    _material_query_cached_atlas = PackedInt32Array()
+
+func _read_material_from_atlas(atlas_rid: RID, atlas_index: int) -> int:
+    if atlas_index < 0:
+        return 0
+    if material_query_cache_enabled:
+        if _material_query_cached_frame != _debug_frame or _material_query_cached_atlas.is_empty():
+            var atlas_bytes := _rd.buffer_get_data(atlas_rid)
+            _material_query_cached_atlas = atlas_bytes.to_int32_array()
+            _material_query_cached_frame = _debug_frame
+        if atlas_index >= 0 and atlas_index < _material_query_cached_atlas.size():
+            return _material_query_cached_atlas[atlas_index]
+        return 0
+    var atlas_offset := atlas_index * 4
+    var atlas_bytes := _rd.buffer_get_data(atlas_rid, atlas_offset, 4)
+    if atlas_bytes.size() < 4:
+        return 0
+    var atlas_vals := atlas_bytes.to_int32_array()
+    if atlas_vals.size() == 0:
+        return 0
+    return atlas_vals[0]
+
 func _atlas_index_for_cell(cell: Vector3i) -> int:
     if _indirection_cpu.is_empty():
         return -1
@@ -4986,14 +4974,7 @@ func get_cell_material(cell: Vector3i) -> int:
     var atlas_rid := _current_atlas_rid()
     if !atlas_rid.is_valid():
         return 0
-    var atlas_offset := atlas_index * 4
-    var atlas_bytes := _rd.buffer_get_data(atlas_rid, atlas_offset, 4)
-    if atlas_bytes.size() < 4:
-        return 0
-    var atlas_vals := atlas_bytes.to_int32_array()
-    if atlas_vals.size() == 0:
-        return 0
-    return atlas_vals[0]
+    return _read_material_from_atlas(atlas_rid, atlas_index)
 
 func _snap_cell_in_bounds_to_bcc(cell: Vector3i) -> Vector3i:
     var grid_extent: int = chunk_grid * chunk_size
@@ -5214,7 +5195,7 @@ func set_voxel_at(cell: Vector3i, material: int) -> void:
         if c.x < 0:
             print("VoxelRenderer set_voxel_at (MPM) | invalid cell=%s" % str(cell))
             return
-        if material == 8 or material == 9:
+        if MaterialRegistry.is_static_material(material):
             _mpm_set_static_cell(c, material)
             return
         if material > 0:
@@ -5242,6 +5223,7 @@ func set_voxel_at(cell: Vector3i, material: int) -> void:
         _rd.buffer_update(_seed_a_rid, offset, seed_bytes.size(), seed_bytes)
     if _seed_b_rid.is_valid():
         _rd.buffer_update(_seed_b_rid, offset, seed_bytes.size(), seed_bytes)
+    _invalidate_material_query_cache()
 
 func set_preview_cells(cells: Array) -> void:
     if _rd == null or !_preview_rid.is_valid():

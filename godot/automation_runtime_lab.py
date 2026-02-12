@@ -4,43 +4,25 @@ import argparse
 import json
 import math
 import pathlib
-import socket
 import time
 from typing import Any, Dict, List, Optional
 
+from automation_rpc import AutomationClient as RpcAutomationClient
 
-class AutomationClient:
+class AutomationClient(RpcAutomationClient):
     def __init__(self, host: str, port: int, token: str):
-        self._sock = socket.create_connection((host, port), timeout=4.0)
-        self._sock.settimeout(40.0)
-        self._id = 0
-        self.log: List[Dict[str, Any]] = []
-        if token:
-            self.call_raw("auth", {"token": token})
-
-    def close(self) -> None:
-        try:
-            self._sock.close()
-        except Exception:
-            pass
+        super().__init__(
+            host,
+            port,
+            token,
+            connect_timeout_s=4.0,
+            call_timeout_s=40.0,
+            start_id=0,
+            record_log=True,
+        )
 
     def call_raw(self, method: str, params: Optional[Dict[str, Any]] = None) -> Any:
-        if params is None:
-            params = {}
-        self._id += 1
-        req = {"id": self._id, "method": method, "params": params}
-        self._sock.sendall((json.dumps(req, separators=(",", ":")) + "\n").encode("utf-8"))
-        buf = b""
-        while b"\n" not in buf:
-            chunk = self._sock.recv(65536)
-            if not chunk:
-                raise RuntimeError("automation server closed connection")
-            buf += chunk
-        resp = json.loads(buf.split(b"\n", 1)[0].decode("utf-8"))
-        self.log.append({"t": time.time(), "req": req, "resp": resp})
-        if not resp.get("ok"):
-            raise RuntimeError(resp)
-        return resp.get("result")
+        return self.call_result(method, params)
 
     def dump_tree(self, max_depth: int = 6) -> Dict[str, Any]:
         return self.call_raw("dump_node_tree", {"path": "/root", "max_depth": max_depth, "max_children": 256}) or {}

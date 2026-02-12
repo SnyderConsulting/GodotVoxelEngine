@@ -12,55 +12,11 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+_GODOT_ROOT = Path(__file__).resolve().parents[1]
+if str(_GODOT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_GODOT_ROOT))
 
-def _send_json_line(sock: socket.socket, obj: dict) -> dict:
-    line = json.dumps(obj, separators=(",", ":")) + "\n"
-    sock.sendall(line.encode("utf-8"))
-    buf = b""
-    while b"\n" not in buf:
-        chunk = sock.recv(65536)
-        if not chunk:
-            raise RuntimeError("automation server closed connection")
-        buf += chunk
-    resp_line, _rest = buf.split(b"\n", 1)
-    return json.loads(resp_line.decode("utf-8"))
-
-
-class AutomationClient:
-    def __init__(self, host: str, port: int, token: str, timeout_s: float = 2.0):
-        self._sock = socket.create_connection((host, port), timeout=timeout_s)
-        # Calls can block for multiple frames if the GPU stalls or the engine is busy.
-        # Prefer a larger timeout + retries over flaking the whole suite.
-        self._sock.settimeout(30.0)
-        self._id = 1
-        if token:
-            resp = _send_json_line(self._sock, {"id": 0, "method": "auth", "params": {"token": token}})
-            if not resp.get("ok"):
-                raise RuntimeError(f"auth failed: {resp}")
-
-    def close(self) -> None:
-        try:
-            self._sock.close()
-        except Exception:
-            pass
-
-    def call(self, method: str, params: Optional[Dict[str, Any]] = None) -> dict:
-        if params is None:
-            params = {}
-        self._id += 1
-        last_exc: Optional[Exception] = None
-        for _attempt in range(2):
-            try:
-                resp = _send_json_line(self._sock, {"id": self._id, "method": method, "params": params})
-                if not resp.get("ok"):
-                    raise RuntimeError(f"automation error: {resp.get('error')}")
-                return resp
-            except socket.timeout as e:
-                # Transient stalls happen on macOS/MoltenVK; retry once.
-                last_exc = e
-                time.sleep(0.1)
-        raise last_exc  # type: ignore[misc]
-
+from automation_rpc import AutomationClient
 
 def _walk_dump(node: dict, fn) -> None:
     fn(node)
@@ -105,6 +61,29 @@ def _find_free_port(host: str = "127.0.0.1") -> int:
         s.bind((host, 0))
         s.listen(1)
         return int(s.getsockname()[1])
+
+
+def _resolve_engine_path(repo_root: Path, configured_path: str) -> Path:
+    first = (repo_root / configured_path).resolve()
+    candidates: List[Path] = [first]
+    if sys.platform == "darwin":
+        arm64 = (repo_root / "godot/engine-src/bin/godot.macos.editor.arm64").resolve()
+        x64 = (repo_root / "godot/engine-src/bin/godot.macos.editor.x86_64").resolve()
+        if first.name.endswith(".arm64"):
+            candidates.append(x64)
+        elif first.name.endswith(".x86_64"):
+            candidates.append(arm64)
+        else:
+            candidates.extend([arm64, x64])
+    seen: set = set()
+    for c in candidates:
+        key = str(c)
+        if key in seen:
+            continue
+        seen.add(key)
+        if c.exists():
+            return c
+    return first
 
 
 def _parse_stats_ints(ints: List[int]) -> Dict[str, Any]:
@@ -684,14 +663,8 @@ def main() -> int:
     if args.engine:
         engine = Path(args.engine)
     else:
-        # suite.json historically points at an x86_64 editor binary for older Intel Macs.
-        # On Apple Silicon, we expect an arm64 editor build.
         cfg_engine = str(cfg.get("engine", "godot/engine-src/bin/godot.macos.editor.x86_64"))
-        engine = repo_root / cfg_engine
-        if not engine.exists() and sys.platform == "darwin":
-            arm64 = repo_root / "godot/engine-src/bin/godot.macos.editor.arm64"
-            if arm64.exists():
-                engine = arm64
+        engine = _resolve_engine_path(repo_root, cfg_engine)
     project_dir = Path(args.project) if args.project else (repo_root / cfg.get("project", "godot/project"))
     engine = engine.resolve()
     project_dir = project_dir.resolve()
@@ -756,7 +729,15 @@ def main() -> int:
                 if proc.poll() is not None:
                     raise RuntimeError(f"process exited early (code={proc.returncode})")
                 try:
-                    cli = AutomationClient(host, port, token)
+                    cli = AutomationClient(
+                        host,
+                        port,
+                        token,
+                        connect_timeout_s=2.0,
+                        call_timeout_s=30.0,
+                        call_retries=1,
+                        retry_delay_s=0.1,
+                    )
                     break
                 except Exception:
                     time.sleep(0.1)

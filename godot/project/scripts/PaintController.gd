@@ -1,5 +1,7 @@
 extends Node
 
+const MaterialRegistry = preload("res://scripts/MaterialRegistry.gd")
+
 @export var voxel_renderer_path: NodePath
 @export var camera_path: NodePath
 @export var quad_path: NodePath
@@ -65,30 +67,11 @@ func _ready() -> void:
     _update_brush_ui()
 
 func _load_material_list() -> void:
-    _material_name_by_id.clear()
-    if materials_json_path.is_empty() or !FileAccess.file_exists(materials_json_path):
+    _material_name_by_id = MaterialRegistry.load_material_name_map(materials_json_path)
+    if !_material_name_by_id.has(sand_material_id):
         _material_name_by_id[sand_material_id] = "sand"
+    if !_material_name_by_id.has(water_material_id):
         _material_name_by_id[water_material_id] = "water"
-        return
-    var text := FileAccess.get_file_as_string(materials_json_path)
-    var parsed: Variant = JSON.parse_string(text)
-    if typeof(parsed) != TYPE_DICTIONARY:
-        _material_name_by_id[sand_material_id] = "sand"
-        _material_name_by_id[water_material_id] = "water"
-        return
-    var mats: Array = (parsed as Dictionary).get("materials", [])
-    if typeof(mats) != TYPE_ARRAY:
-        _material_name_by_id[sand_material_id] = "sand"
-        _material_name_by_id[water_material_id] = "water"
-        return
-    for m in mats:
-        if typeof(m) != TYPE_DICTIONARY:
-            continue
-        var id := int((m as Dictionary).get("id", -1))
-        if id <= 0:
-            continue
-        var name := str((m as Dictionary).get("name", "mat_%d" % id))
-        _material_name_by_id[id] = name
 
 func _setup_material_dropdown() -> void:
     if _material_dropdown == null:
@@ -100,9 +83,9 @@ func _setup_material_dropdown() -> void:
         var mid := int(idv)
         var name := str(_material_name_by_id.get(mid, "mat_%d" % mid))
         # Glass/invisible are static obstacles in the MPM path.
-        if mid == 8:
+        if mid == MaterialRegistry.GLASS_ID:
             name = "%s (static)" % name
-        elif mid == 9:
+        elif mid == MaterialRegistry.INVISIBLE_ID:
             name = "%s (static)" % name
         _material_dropdown.add_item("%s [%d]" % [name, mid], mid)
     _material_dropdown.item_selected.connect(_on_material_dropdown_selected)
@@ -200,7 +183,7 @@ func _spawn_cells(cells: Array) -> void:
     if batch.size() == 0:
         return
     # Some materials are meant to be static obstacles (not MPM particles).
-    if _current_material == 8 or _current_material == 9:
+    if MaterialRegistry.is_static_material(_current_material):
         _cap_hit = false
         if _renderer.has_method("set_voxel_at"):
             for cell in batch:

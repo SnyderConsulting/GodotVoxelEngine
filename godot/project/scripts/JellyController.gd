@@ -22,13 +22,12 @@ func _initialize_scenario() -> void:
 func _start_scene() -> void:
     # This scene is used as the automated stability regression.
     # Run with gravity disabled and fracture disabled to isolate "MPM jelly" drift.
-    renderer.sim_enabled = false
-    renderer.sim_mode = 1
+    begin_scene_build(1)
     renderer.mpm_gravity_strength = 0.0
     renderer.mpm_fracture_enabled = false
     _build_scene()
     renderer.gravity_dir = Vector3(0, -1, 0)
-    renderer.sim_enabled = true
+    end_scene_build(true)
     _update_overlay()
 
 func _process(_delta: float) -> void:
@@ -59,7 +58,7 @@ func _build_scene() -> void:
     for y in range(floor_thickness):
         for z in range(grid_extent):
             for x in range(grid_extent):
-                if !((x & 1) == (y & 1) and (y & 1) == (z & 1)):
+                if !is_bcc_cell(x, y, z):
                     continue
                 entries.append({"pos": Vector3(x, y, z), "material": invisible_material_id})
 
@@ -78,7 +77,4 @@ func _build_scene() -> void:
                 )
                 entries.append({"pos": Vector3(cell.x, cell.y, cell.z), "material": stone_material_id})
 
-    if renderer.has_method("set_voxel_entries_mpm"):
-        renderer.set_voxel_entries_mpm(entries)
-    else:
-        renderer.set_voxel_entries(entries, true)
+    apply_entries(entries, true)

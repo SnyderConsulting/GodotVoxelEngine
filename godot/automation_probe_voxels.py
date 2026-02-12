@@ -1,50 +1,10 @@
 #!/usr/bin/env python3
 
 import argparse
-import json
-import socket
-import sys
 import time
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple
 
-
-def send_json_line(sock: socket.socket, obj: dict) -> dict:
-    line = json.dumps(obj, separators=(",", ":")) + "\n"
-    sock.sendall(line.encode("utf-8"))
-    buf = b""
-    while b"\n" not in buf:
-        chunk = sock.recv(65536)
-        if not chunk:
-            raise RuntimeError("automation server closed connection")
-        buf += chunk
-    resp_line, _rest = buf.split(b"\n", 1)
-    return json.loads(resp_line.decode("utf-8"))
-
-
-class AutomationClient:
-    def __init__(self, host: str, port: int, token: str):
-        self._sock = socket.create_connection((host, port), timeout=2.0)
-        self._sock.settimeout(5.0)
-        self._id = 1
-        if token:
-            resp = send_json_line(self._sock, {"id": 0, "method": "auth", "params": {"token": token}})
-            if not resp.get("ok"):
-                raise RuntimeError(f"auth failed: {resp}")
-
-    def close(self):
-        try:
-            self._sock.close()
-        except Exception:
-            pass
-
-    def call(self, method: str, params: Optional[Dict[str, Any]] = None) -> dict:
-        if params is None:
-            params = {}
-        self._id += 1
-        resp = send_json_line(self._sock, {"id": self._id, "method": method, "params": params})
-        if not resp.get("ok"):
-            raise RuntimeError(f"automation error: {resp.get('error')}")
-        return resp
+from automation_rpc import AutomationClient
 
 
 def walk_dump(node: dict, fn):
@@ -96,7 +56,7 @@ def main() -> int:
     ap.add_argument("--dump-depth", type=int, default=6)
     args = ap.parse_args()
 
-    cli = AutomationClient(args.host, args.port, args.token)
+    cli = AutomationClient(args.host, args.port, args.token, connect_timeout_s=2.0, call_timeout_s=5.0)
     try:
         print(f"ping={cli.call('ping').get('result')}")
 
