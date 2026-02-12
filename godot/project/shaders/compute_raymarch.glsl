@@ -177,6 +177,32 @@ float compute_ao(ivec3 cell, vec3 normal, float radius_cells, float strength) {
     return clamp(ao * ao, 0.0, 1.0);
 }
 
+vec3 aces_film(vec3 x) {
+    // ACES-inspired fit by Krzysztof Narkowicz.
+    const float a = 2.51;
+    const float b = 0.03;
+    const float c = 2.43;
+    const float d = 0.59;
+    const float e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+}
+
+float distance_fog(float distance_to_hit, float density) {
+    return 1.0 - exp(-max(distance_to_hit, 0.0) * max(density, 0.0));
+}
+
+float height_fog(float distance_to_hit, float ray_origin_height, float ray_dir_y, float density, float falloff) {
+    // Exponential height fog integral form adapted from IQ's fog notes.
+    float b = max(1e-4, falloff);
+    float a = max(density, 0.0);
+    float h0 = max(ray_origin_height, 0.0);
+    if (abs(ray_dir_y) < 1e-4) {
+        return clamp(a * distance_to_hit * exp(-h0 * b), 0.0, 1.0);
+    }
+    float fog_amount = (a / b) * exp(-h0 * b) * (1.0 - exp(-distance_to_hit * ray_dir_y * b)) / ray_dir_y;
+    return clamp(max(fog_amount, 0.0), 0.0, 1.0);
+}
+
 void clip_plane(vec3 n, float d, vec3 rc, vec3 rd, inout float tmin, inout float tmax, inout bool valid) {
     float denom = dot(n, rd);
     float numer = d - dot(n, rc);
@@ -261,8 +287,9 @@ uint light_at_cell(ivec3 cell) {
     return light_buf.data[atlas_index_for_cell(cell)];
 }
 
-uint light_for_voxel(ivec3 cell) {
-    uint max_light = light_at_cell(cell);
+float light_factor_for_voxel(ivec3 cell) {
+    float sum_light = float(light_at_cell(cell)) * 4.0;
+    float sum_weight = 4.0;
     ivec3 offsets[14] = ivec3[14](
         ivec3(2, 0, 0),
         ivec3(-2, 0, 0),
@@ -284,12 +311,11 @@ uint light_for_voxel(ivec3 cell) {
         if (!in_bounds(neighbor)) {
             continue;
         }
-        uint n_light = light_at_cell(neighbor);
-        if (n_light > max_light) {
-            max_light = n_light;
-        }
+        sum_light += float(light_at_cell(neighbor));
+        sum_weight += 1.0;
     }
-    return max_light;
+    float lf = sum_light / max(sum_weight, 1.0);
+    return clamp(lf / 15.0, 0.0, 1.0);
 }
 
 void main() {
@@ -318,11 +344,30 @@ void main() {
     ro = world_center + inv_world * (ro - world_center);
     rd = normalize(inv_world * rd);
 
+    vec3 sun_dir_local = vec3(u.cam_right.w, u.cam_up.w, u.cam_forward.w);
+    if (length(sun_dir_local) < 1e-4) {
+        sun_dir_local = normalize(vec3(0.45, -0.85, 0.30));
+    } else {
+        sun_dir_local = normalize(sun_dir_local);
+    }
+    vec3 light_dir = normalize(-sun_dir_local);
     float sky = clamp(rd.y * 0.5 + 0.5, 0.0, 1.0);
-    vec3 color = mix(vec3(0.08, 0.09, 0.10), vec3(0.19, 0.22, 0.26), sky);
+    vec3 sky_low = vec3(0.10, 0.11, 0.12);
+    vec3 sky_horizon = vec3(0.33, 0.38, 0.44);
+    vec3 sky_high = vec3(0.14, 0.27, 0.45);
+    vec3 sky_color = mix(sky_low, sky_horizon, smoothstep(-0.25, 0.25, rd.y));
+    sky_color = mix(sky_color, sky_high, smoothstep(0.1, 1.0, sky));
+    float sun_amount = max(dot(rd, light_dir), 0.0);
+    float sun_halo = pow(sun_amount, 24.0);
+    float sun_disk = pow(sun_amount, 320.0);
+    sky_color += vec3(0.95, 0.68, 0.35) * sun_halo * 0.16;
+    sky_color += vec3(1.00, 0.92, 0.80) * sun_disk * 0.40;
+    vec3 color = sky_color;
     vec3 overlay_color = vec3(0.0);
     float overlay_alpha = 0.0;
     bool hit = false;
+    float hit_distance = 0.0;
+    vec3 hit_position = ro;
     uint step_count = 0u;
     atomicAdd(metrics.data[0], 1u);
     int brick_size = int(u.brick_info.w);
@@ -350,7 +395,6 @@ void main() {
     int max_brick_steps_runtime = cam_inside_grid ? 512 : MAX_BRICK_STEPS;
     int sdf_steps_runtime = cam_inside_grid ? 56 : 96;
     int shadow_steps_runtime = cam_inside_grid ? 8 : 24;
-    int reflection_steps_runtime = cam_inside_grid ? 4 : 16;
     float base_step = (cam_inside_grid ? 0.03 : 0.015) * u.misc.x;
     float empty_step = max(base_step, (t_exit - max(t_enter, 0.0)) / float(MAX_STEPS));
     vec3 ro_cell = (ro - grid_min) / u.misc.x;
@@ -485,6 +529,16 @@ void main() {
                             float max_step = a * 0.1;
                             float min_step = a * 0.01;
                             bool glass_hit = false;
+                            float t_prev = t_voxel;
+                            vec3 p_prev = ro + rd * t_prev;
+                            vec3 lp_prev = (p_prev - center) / a;
+                            float d_prev = sdf_truncated_octahedron(lp_prev) * a;
+                            if (d_prev < 0.0) {
+                                t_prev = max(t_cell_min, t_prev - min_step);
+                                p_prev = ro + rd * t_prev;
+                                lp_prev = (p_prev - center) / a;
+                                d_prev = sdf_truncated_octahedron(lp_prev) * a;
+                            }
                             for (int j = 0; j < 128; j++) {
                                 if (j >= sdf_steps_runtime) {
                                     break;
@@ -497,6 +551,25 @@ void main() {
                                 vec3 lp = (p - center) / a;
                                 float d = sdf_truncated_octahedron(lp) * a;     
                                 if (d < 0.0) {
+                                    if (d_prev > 0.0 && (t_voxel - t_prev) > 1e-5) {
+                                        float ta = t_prev;
+                                        float tb = t_voxel;
+                                        for (int r = 0; r < 4; r++) {
+                                            float tm = 0.5 * (ta + tb);
+                                            vec3 pm = ro + rd * tm;
+                                            vec3 lpm = (pm - center) / a;
+                                            float dm = sdf_truncated_octahedron(lpm) * a;
+                                            if (dm < 0.0) {
+                                                tb = tm;
+                                            } else {
+                                                ta = tm;
+                                            }
+                                        }
+                                        t_voxel = tb;
+                                        p = ro + rd * t_voxel;
+                                        lp = (p - center) / a;
+                                        d = sdf_truncated_octahedron(lp) * a;
+                                    }
                                     if (glass_cell || preview_cell || cursor_cell) {
                                         float edge = 1.0 - smoothstep(0.0, 0.02 * a, abs(d));
                                         if (edge > 0.0) {
@@ -509,26 +582,19 @@ void main() {
                                     }
                                     vec3 n = estimate_normal(lp);
                                     vec3 hit_pos = ro + rd * t_voxel;
-                                    vec3 sun_dir_local = vec3(u.cam_right.w, u.cam_up.w, u.cam_forward.w);
-                                    if (length(sun_dir_local) < 1e-4) {
-                                        sun_dir_local = normalize(vec3(0.45, -0.85, 0.30));
-                                    } else {
-                                        sun_dir_local = normalize(sun_dir_local);
-                                    }
-                                    vec3 light_dir = normalize(-sun_dir_local);
                                     float diff = max(dot(n, light_dir), 0.0);
-                                    float ao_radius = max(u.origin.w, 0.5);
                                     float ao_strength = max(u.cam_pos.w, 0.0);
-                                    float ao = compute_ao(cell, n, ao_radius, ao_strength);
+                                    float ao = 1.0;
 
                                     // Soft shadow ray
                                     float shadow = 1.0;
-                                    float t_shadow = 0.02;
+                                    vec3 shadow_origin = hit_pos + n * (a * 0.05);
+                                    float t_shadow = a * 0.08;
                                     for (int s = 0; s < 24; s++) {
                                         if (s >= shadow_steps_runtime) {
                                             break;
                                         }
-                                        vec3 sp = hit_pos + light_dir * t_shadow;
+                                        vec3 sp = shadow_origin + light_dir * t_shadow;
                                         vec3 s_local = (sp - grid_min) / u.misc.x;
                                         ivec3 s_cell = nearest_bcc(s_local);
                                         if (!in_bounds(s_cell)) {
@@ -549,48 +615,12 @@ void main() {
                                                         shadow = 0.0;
                                                         break;
                                                     }
-                                                    shadow = min(shadow, 10.0 * sd / t_shadow);
                                                 }
                                             }
                                         }
-                                        t_shadow += 0.06;
+                                        t_shadow += a * 0.22;
                                     }
                                     shadow = mix(1.0, shadow, clamp(u.misc.z, 0.0, 1.0));
-
-                                    // Reflection ray (single bounce)
-                                    float reflection = 0.0;
-                                    vec3 refl_dir = reflect(rd, n);
-                                    float t_refl = 0.05;
-                                    for (int r = 0; r < 16; r++) {
-                                        if (r >= reflection_steps_runtime) {
-                                            break;
-                                        }
-                                        vec3 rp = hit_pos + refl_dir * t_refl;
-                                        vec3 r_local = (rp - grid_min) / u.misc.x;
-                                        ivec3 r_cell = nearest_bcc(r_local);
-                                        if (!in_bounds(r_cell)) {
-                                            break;
-                                        }
-                                        if (bcc_parity(r_cell)) {
-                                            ivec3 r_brick = r_cell / brick_size;
-                                            if (occ.data[idx_brick(r_brick)] != 0u) {
-                                                uint r_val = atlas.data[atlas_index_for_cell(r_cell)];
-                                                if (r_val != 0u
-                                                    && r_val != GLASS_MATERIAL
-                                                    && r_val != INVISIBLE_MATERIAL
-                                                    && r_val != FIRE_MATERIAL) {
-                                                    vec3 r_center = u.origin.xyz + vec3(r_cell) * u.misc.x;
-                                                    vec3 r_lp = (rp - r_center) / u.misc.x;
-                                                    float rdv = sdf_truncated_octahedron(r_lp) * u.misc.x;
-                                                    if (rdv < 0.0) {
-                                                        reflection = u.misc.w;
-                                                        break;
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        t_refl += 0.08;
-                                    }
 
                                     vec3 view_dir = normalize(-rd);
                                     vec3 base = material_color(cell_val);
@@ -601,13 +631,17 @@ void main() {
                                     float spec_power = mix(96.0, 10.0, roughness * roughness);
                                     float spec = pow(max(dot(n, half_dir), 0.0), spec_power);
 
-                                    uint light_val = light_for_voxel(cell);
-                                    float light_factor = float(light_val) / 15.0;
-                                    float ambient = mix(0.03, 0.16, light_factor);
-                                    ambient *= mix(1.0, ao, clamp(ao_strength, 0.0, 1.0));
-                                    float diffuse = diff * shadow * mix(0.35, 1.0, light_factor);
-                                    float fill = 0.06 * light_factor;
-                                    float specular = spec * shadow * mix(0.22, 0.03, roughness) * mix(0.45, 1.0, light_factor);
+                                    float light_factor = 1.0;
+                                    float ambient = 0.11;
+                                    float ndot_up = clamp(n.y * 0.5 + 0.5, 0.0, 1.0);
+                                    vec3 hemi_sky = vec3(0.30, 0.36, 0.44);
+                                    vec3 hemi_ground = vec3(0.12, 0.10, 0.08);
+                                    vec3 ambient_tint = mix(hemi_ground, hemi_sky, ndot_up);
+                                    float ao_mix = 0.0;
+                                    vec3 ambient_color = ambient_tint * (ambient * mix(1.0, ao, ao_mix));
+                                    float diffuse = diff * shadow;
+                                    float fill = 0.035;
+                                    float specular = spec * shadow * mix(0.22, 0.03, roughness) * 0.9;
 
                                     float dielectric_f0 = mix(0.02, 0.10, specular_level);
                                     vec3 f0 = mix(vec3(dielectric_f0), base, metallic);
@@ -618,11 +652,17 @@ void main() {
                                     float reflection_scale = (1.0 - roughness * 0.7)
                                         * (0.35 + 0.65 * specular_level)
                                         * mix(1.0, 1.3, metallic);
-                                    vec3 reflection_tint = mix(vec3(1.0, 0.98, 0.94), base, metallic);
+                                    vec3 refl_dir = reflect(rd, n);
+                                    float refl_sky = clamp(refl_dir.y * 0.5 + 0.5, 0.0, 1.0);
+                                    vec3 env_color = mix(sky_low, sky_horizon, smoothstep(-0.25, 0.25, refl_dir.y));
+                                    env_color = mix(env_color, sky_high, smoothstep(0.1, 1.0, refl_sky));
+                                    float env_sun = pow(max(dot(refl_dir, light_dir), 0.0), mix(96.0, 12.0, roughness));
+                                    env_color += vec3(1.0, 0.92, 0.80) * env_sun * (0.08 + 0.22 * (1.0 - roughness));
+                                    vec3 ibl = env_color * fresnel_term * reflection_scale * clamp(u.misc.w, 0.0, 1.0);
 
-                                    color = base * (ambient + (diffuse + fill) * diffuse_energy)
-                                        + reflection_tint * reflection * light_factor * reflection_scale
-                                        + fresnel_term * specular;
+                                    color = base * (ambient_color + (diffuse + fill) * diffuse_energy)
+                                        + fresnel_term * specular
+                                        + ibl;
                                     vec3 emissive = material_emissive(cell_val);
                                     if (cell_val == FIRE_MATERIAL && max(emissive.r, max(emissive.g, emissive.b)) > 0.0) {
                                         float flicker = 0.85 + 0.15 * fract(
@@ -632,10 +672,14 @@ void main() {
                                     }
                                     color += emissive;
                                     hit = true;
+                                    hit_distance = t_voxel;
+                                    hit_position = hit_pos;
                                     atomicAdd(metrics.data[1], 1u);
                                     break;
                                 }
                                 float sdf_step = clamp(d, min_step, max_step);  
+                                t_prev = t_voxel;
+                                d_prev = d;
                                 t_voxel += sdf_step;
                             }
                             if (glass_cell && glass_hit) {
@@ -682,6 +726,20 @@ void main() {
     }
 
     atomicAdd(metrics.data[2], step_count);
+    if (hit) {
+        float fog_dist = hit_distance;
+        float ray_origin_height = ro.y - grid_min.y;
+        float fog_a = distance_fog(fog_dist, 0.02);
+        float fog_b = height_fog(fog_dist, ray_origin_height, rd.y, 0.06, 0.05);
+        float height_factor = smoothstep(0.0, u.grid_info.y * u.misc.x, hit_position.y - grid_min.y);
+        float fog_amount = clamp(max(fog_a * (1.0 - 0.35 * height_factor), fog_b), 0.0, 0.92);
+        color = mix(color, sky_color, fog_amount);
+    }
+    color = aces_film(max(color, vec3(0.0)));
+    float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
+    color = mix(vec3(luma), color, 1.06);
+    float dither = fract(sin(dot(vec2(gid), vec2(12.9898, 78.233))) * 43758.5453);
+    color += vec3((dither - 0.5) / 255.0);
     color = mix(color, overlay_color, clamp(overlay_alpha, 0.0, 1.0));
-    imageStore(dest, gid, vec4(color, 1.0));
+    imageStore(dest, gid, vec4(clamp(color, 0.0, 1.0), 1.0));
 }

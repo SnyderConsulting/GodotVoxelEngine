@@ -184,6 +184,12 @@ var _mpm_stats_rid: RID
 var _preview_cells: Array = []
 var _cursor_cell := Vector3i(-1, -1, -1)
 var _preview_occ_bricks: PackedInt32Array = PackedInt32Array()
+var _u32_zero_bytes: PackedByteArray = PackedByteArray()
+var _u32_one_bytes: PackedByteArray = PackedByteArray()
+var _sim_full_dispatch_uploaded: bool = false
+var _sim_full_dispatch_cached_brick_count: int = -1
+var _sim_full_dispatch_list_bytes: PackedByteArray = PackedByteArray()
+var _sim_full_dispatch_count_bytes: PackedByteArray = PackedByteArray()
 var _uniform_set_a_light_a_rid: RID
 var _uniform_set_a_light_b_rid: RID
 var _uniform_set_b_light_a_rid: RID
@@ -813,6 +819,8 @@ func _ready() -> void:
         width, height, chunk_size, chunk_grid, lattice_spacing
     ])
     _rng.seed = Time.get_ticks_usec()
+    _u32_zero_bytes = PackedInt32Array([0]).to_byte_array()
+    _u32_one_bytes = PackedInt32Array([1]).to_byte_array()
     _rd = RenderingServer.get_rendering_device()
     _use_global_rd = _rd != null
     if _rd == null:
@@ -1584,6 +1592,10 @@ func _init_render_resources() -> void:
     if !_active_count_rid.is_valid():
         push_error("Failed to create active count buffer.")
         return
+    _sim_full_dispatch_uploaded = false
+    _sim_full_dispatch_cached_brick_count = -1
+    _sim_full_dispatch_list_bytes = PackedByteArray()
+    _sim_full_dispatch_count_bytes = PackedByteArray()
     var dispatch_init := PackedInt32Array([0, 1, 1, 0]).to_byte_array()
     _sim_dispatch_rid = _rd.storage_buffer_create(
         _sim_dispatch_bytes,
@@ -3414,8 +3426,9 @@ func _process(_delta: float) -> void:
     else:
         _dispatch_occupancy()
         if sim_enabled and sim_mode == 0:
-            _dispatch_active_list()
-            _dispatch_active_dispatch()
+            if !sim_force_full_dispatch:
+                _dispatch_active_list()
+                _dispatch_active_dispatch()
             _dispatch_sim(grid_extent_i)
     _dispatch_light(grid_extent_i)
     _dispatch_compute()
@@ -3434,10 +3447,36 @@ func _normalized_gravity() -> Vector3:
     return gravity_dir.normalized()
 
 func _prime_active_list() -> void:
+    if sim_force_full_dispatch:
+        var brick_count := chunk_grid * chunk_grid * chunk_grid
+        _ensure_full_dispatch_list_uploaded(brick_count)
+        _active_list_ready = _sim_full_dispatch_uploaded
+        return
     if _active_list_ready:
         return
     _dispatch_active_list()
     _dispatch_active_dispatch()
+
+func _ensure_full_dispatch_list_uploaded(brick_count: int) -> void:
+    if _rd == null:
+        return
+    if !_active_list_rid.is_valid() or !_active_count_rid.is_valid():
+        return
+    if brick_count <= 0:
+        return
+    if _sim_full_dispatch_uploaded and _sim_full_dispatch_cached_brick_count == brick_count:
+        return
+    if _sim_full_dispatch_cached_brick_count != brick_count or _sim_full_dispatch_list_bytes.is_empty():
+        var full_list := PackedInt32Array()
+        full_list.resize(brick_count)
+        for i in range(brick_count):
+            full_list[i] = i
+        _sim_full_dispatch_list_bytes = full_list.to_byte_array()
+        _sim_full_dispatch_count_bytes = PackedInt32Array([brick_count]).to_byte_array()
+        _sim_full_dispatch_cached_brick_count = brick_count
+    _rd.buffer_update(_active_list_rid, 0, _sim_full_dispatch_list_bytes.size(), _sim_full_dispatch_list_bytes)
+    _rd.buffer_update(_active_count_rid, 0, _sim_full_dispatch_count_bytes.size(), _sim_full_dispatch_count_bytes)
+    _sim_full_dispatch_uploaded = true
 
 func _dispatch_sim(_grid_extent: int) -> void:
     if !sim_enabled:
@@ -3464,18 +3503,10 @@ func _dispatch_sim(_grid_extent: int) -> void:
         return
 
     if sim_force_full_dispatch:
-        if !_active_list_rid.is_valid() or !_active_count_rid.is_valid():
+        _ensure_full_dispatch_list_uploaded(brick_count)
+        if !_sim_full_dispatch_uploaded:
             return
-        # Fallback path for environments where active-list compute dispatch can fail.
-        # Write a deterministic full brick list and run the CA sim over the full domain.
-        var full_list := PackedInt32Array()
-        full_list.resize(brick_count)
-        for i in range(brick_count):
-            full_list[i] = i
-        var list_bytes := full_list.to_byte_array()
-        _rd.buffer_update(_active_list_rid, 0, list_bytes.size(), list_bytes)
-        var count_bytes := PackedInt32Array([brick_count]).to_byte_array()
-        _rd.buffer_update(_active_count_rid, 0, count_bytes.size(), count_bytes)
+        _active_list_ready = true
     else:
         if !_sim_dispatch_rid.is_valid():
             return
@@ -3835,6 +3866,8 @@ func _dispatch_occupancy() -> void:
     _rd.compute_list_end()
 
 func _dispatch_active_list() -> void:
+    if sim_force_full_dispatch:
+        return
     if !_active_list_pipeline_rid.is_valid():
         return
     if !_active_list_uniform_set_rid.is_valid():
@@ -3852,6 +3885,8 @@ func _dispatch_active_list() -> void:
     _rd.compute_list_end()
 
 func _dispatch_active_dispatch() -> void:
+    if sim_force_full_dispatch:
+        return
     if !_active_dispatch_pipeline_rid.is_valid():
         return
     if !_active_dispatch_uniform_set_rid.is_valid():
@@ -3919,7 +3954,7 @@ func _readback_metrics_on_render_thread() -> void:
     var occupied_bricks := ints[3]
     var active_bricks := -1
     # active_bricks only has meaning for the legacy CA path (sim_mode==0).
-    if sim_mode == 0 and _active_count_rid.is_valid():
+    if sim_mode == 0 and !sim_force_full_dispatch and _active_count_rid.is_valid():
         var active_bytes := _rd.buffer_get_data(_active_count_rid, 0, 4)
         if active_bytes.size() >= 4:
             var active_vals := active_bytes.to_int32_array()
@@ -5246,66 +5281,102 @@ func set_voxel_at(cell: Vector3i, material: int) -> void:
 func set_preview_cells(cells: Array) -> void:
     if _rd == null or !_preview_rid.is_valid():
         return
-    # Clear previous preview cells
-    if _preview_cells.size() > 0:
-        var zero_bytes := PackedInt32Array([0]).to_byte_array()
-        for cell in _preview_cells:
-            if typeof(cell) != TYPE_VECTOR3I:
-                continue
-            var atlas_index := _atlas_index_for_cell(cell)
-            if atlas_index < 0:
-                continue
-            var offset := atlas_index * 4
-            _rd.buffer_update(_preview_rid, offset, zero_bytes.size(), zero_bytes)
-    # Clear previous preview brick occupancy
-    if _preview_occ_bricks.size() > 0 and _preview_occ_rid.is_valid():
-        var zero_occ := PackedInt32Array([0]).to_byte_array()
-        for brick_index in _preview_occ_bricks:
-            var off := int(brick_index) * 4
-            _rd.buffer_update(_preview_occ_rid, off, zero_occ.size(), zero_occ)
-    _preview_cells = []
-    _preview_occ_bricks = PackedInt32Array()
-    if cells.size() == 0:
-        return
-    var one_bytes := PackedInt32Array([1]).to_byte_array()
-    var one_occ := PackedInt32Array([1]).to_byte_array()
-    var brick_set := {}
+    var prev_cell_set := {}
+    for old_cell in _preview_cells:
+        if typeof(old_cell) == TYPE_VECTOR3I:
+            prev_cell_set[old_cell] = true
+
+    var next_cells: Array = []
+    var next_cell_set := {}
+    var next_brick_set := {}
     for cell in cells:
         if typeof(cell) != TYPE_VECTOR3I:
             continue
-        var atlas_index := _atlas_index_for_cell(cell)
+        var c: Vector3i = cell
+        if next_cell_set.has(c):
+            continue
+        var atlas_index := _atlas_index_for_cell(c)
         if atlas_index < 0:
             continue
-        var offset := atlas_index * 4
-        _rd.buffer_update(_preview_rid, offset, one_bytes.size(), one_bytes)
-        _preview_cells.append(cell)
+        next_cell_set[c] = atlas_index
+        next_cells.append(c)
         if _preview_occ_rid.is_valid():
-            var bx := int(cell.x / chunk_size)
-            var by := int(cell.y / chunk_size)
-            var bz := int(cell.z / chunk_size)
+            var bx := int(c.x / chunk_size)
+            var by := int(c.y / chunk_size)
+            var bz := int(c.z / chunk_size)
             var brick_index := bx + by * chunk_grid + bz * chunk_grid * chunk_grid
-            var key := str(brick_index)
-            if !brick_set.has(key):
-                brick_set[key] = true
-                _rd.buffer_update(_preview_occ_rid, brick_index * 4, one_occ.size(), one_occ)
-                _preview_occ_bricks.append(brick_index)
+            next_brick_set[brick_index] = true
+
+    if next_cells.size() == _preview_cells.size():
+        var unchanged := true
+        for old_cell in _preview_cells:
+            if typeof(old_cell) != TYPE_VECTOR3I or !next_cell_set.has(old_cell):
+                unchanged = false
+                break
+        if unchanged:
+            return
+
+    for old_cell in _preview_cells:
+        if typeof(old_cell) != TYPE_VECTOR3I:
+            continue
+        if next_cell_set.has(old_cell):
+            continue
+        var old_index := _atlas_index_for_cell(old_cell)
+        if old_index >= 0:
+            _rd.buffer_update(_preview_rid, old_index * 4, _u32_zero_bytes.size(), _u32_zero_bytes)
+
+    for c in next_cells:
+        if prev_cell_set.has(c):
+            continue
+        var idx := int(next_cell_set[c])
+        _rd.buffer_update(_preview_rid, idx * 4, _u32_one_bytes.size(), _u32_one_bytes)
+
+    if _preview_occ_rid.is_valid():
+        var prev_brick_set := {}
+        for brick_index in _preview_occ_bricks:
+            prev_brick_set[int(brick_index)] = true
+        for brick_index in _preview_occ_bricks:
+            var bi := int(brick_index)
+            if next_brick_set.has(bi):
+                continue
+            _rd.buffer_update(_preview_occ_rid, bi * 4, _u32_zero_bytes.size(), _u32_zero_bytes)
+        for bi_variant in next_brick_set.keys():
+            var bi := int(bi_variant)
+            if prev_brick_set.has(bi):
+                continue
+            _rd.buffer_update(_preview_occ_rid, bi * 4, _u32_one_bytes.size(), _u32_one_bytes)
+
+    _preview_cells = next_cells
+    var next_bricks := PackedInt32Array()
+    next_bricks.resize(next_brick_set.size())
+    var write_i := 0
+    for bi_variant in next_brick_set.keys():
+        next_bricks[write_i] = int(bi_variant)
+        write_i += 1
+    _preview_occ_bricks = next_bricks
 
 func set_cursor_cell(cell: Vector3i) -> void:
     if _rd == null or !_cursor_rid.is_valid():
         return
+    if cell == _cursor_cell:
+        return
+    var old_index := -1
     if _cursor_cell.x >= 0:
-        var old_index := _atlas_index_for_cell(_cursor_cell)
-        if old_index >= 0:
-            var zero_bytes := PackedInt32Array([0]).to_byte_array()
-            _rd.buffer_update(_cursor_rid, old_index * 4, zero_bytes.size(), zero_bytes)
+        old_index = _atlas_index_for_cell(_cursor_cell)
+    var new_index := -1
+    if cell.x >= 0:
+        new_index = _atlas_index_for_cell(cell)
+    if old_index == new_index:
+        _cursor_cell = cell
+        return
+    if old_index >= 0:
+        _rd.buffer_update(_cursor_rid, old_index * 4, _u32_zero_bytes.size(), _u32_zero_bytes)
     _cursor_cell = cell
     if _cursor_cell.x < 0:
         return
-    var atlas_index := _atlas_index_for_cell(_cursor_cell)
-    if atlas_index < 0:
+    if new_index < 0:
         return
-    var one_bytes := PackedInt32Array([1]).to_byte_array()
-    _rd.buffer_update(_cursor_rid, atlas_index * 4, one_bytes.size(), one_bytes)
+    _rd.buffer_update(_cursor_rid, new_index * 4, _u32_one_bytes.size(), _u32_one_bytes)
 
 func set_debug_probe_cell_xyz(x: int, y: int, z: int) -> void:
     debug_probe_cell = Vector3i(x, y, z)
