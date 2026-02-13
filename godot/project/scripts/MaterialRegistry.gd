@@ -12,6 +12,8 @@ const INVISIBLE_ID := 9
 const GRASS_ID := 12
 const DIRT_ID := 13
 const ORE_ID := 14
+const WOOD_ID := 15
+const TORCH_ID := 16
 
 const DEFAULT_MATERIALS := {
     SAND_ID: {
@@ -256,12 +258,61 @@ const DEFAULT_MATERIALS := {
         "emissive_b": 0.0,
         "emissive_strength": 0.0,
     },
+
+    WOOD_ID: {
+        "id": WOOD_ID,
+        "name": "wood",
+        "mass": 2.4,
+        "friction": 1.05,
+        "cohesion": 1.1,
+        "resistance": 9.0,
+        "drag": 0.22,
+        "support_bonus": 0.0,
+        "lateral_bias": 0.0,
+        "gravity_bias": 0.0,
+        "albedo_r": 0.48,
+        "albedo_g": 0.32,
+        "albedo_b": 0.18,
+        "roughness": 0.82,
+        "metallic": 0.0,
+        "specular": 0.06,
+        "emissive_r": 0.0,
+        "emissive_g": 0.0,
+        "emissive_b": 0.0,
+        "emissive_strength": 0.0,
+    },
+    TORCH_ID: {
+        "id": TORCH_ID,
+        "name": "torch",
+        "mass": 0.08,
+        "friction": 0.0,
+        "cohesion": 0.02,
+        "resistance": 0.01,
+        "drag": 0.05,
+        "support_bonus": 0.0,
+        "lateral_bias": 0.8,
+        "gravity_bias": -0.9,
+        "albedo_r": 1.00,
+        "albedo_g": 0.44,
+        "albedo_b": 0.10,
+        "roughness": 0.18,
+        "metallic": 0.0,
+        "specular": 0.03,
+        "emissive_r": 1.00,
+        "emissive_g": 0.58,
+        "emissive_b": 0.20,
+        "emissive_strength": 2.0,
+    },
 }
 
 static func is_static_material(material_id: int) -> bool:
     # Static materials are written into the MPM static atlas (they do not become particles).
-    # Fire is treated as a placeable light source, so it should stay fixed once placed.
-    return material_id == GLASS_ID or material_id == INVISIBLE_ID or material_id == FIRE_ID
+    return (
+        material_id == GLASS_ID
+        or material_id == INVISIBLE_ID
+        or material_id == WOOD_ID
+        or material_id == TORCH_ID
+    )
 
 static func load_materials(path: String) -> Dictionary:
     var materials: Dictionary = {}

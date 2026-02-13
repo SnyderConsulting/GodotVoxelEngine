@@ -5318,19 +5318,8 @@ func _ca_wake_column(base: Vector3i, radius_cells: int, height_cells: int = 0) -
                 count += 1
     return count
 
-func set_voxel_at(cell: Vector3i, material: int) -> void:
+func _set_voxel_at_ca(cell: Vector3i, material: int, wake_on_remove: bool) -> void:
     if _rd == null:
-        return
-    if sim_mode == 1:
-        var c := _snap_cell_in_bounds_to_bcc(cell)
-        if c.x < 0:
-            print("VoxelRenderer set_voxel_at (MPM) | invalid cell=%s" % str(cell))
-            return
-        if MaterialRegistry.is_static_material(material):
-            _mpm_set_static_cell(c, material)
-            return
-        if material > 0:
-            mpm_spawn_particle(c, material)
         return
     if !_bcc_parity(cell):
         print("VoxelRenderer set_voxel_at | non-bcc cell=%s" % str(cell))
@@ -5352,9 +5341,33 @@ func set_voxel_at(cell: Vector3i, material: int) -> void:
         _rd.buffer_update(_seed_a_rid, offset, seed_bytes.size(), seed_bytes)
     if _seed_b_rid.is_valid():
         _rd.buffer_update(_seed_b_rid, offset, seed_bytes.size(), seed_bytes)
-    if material == 0:
+    if wake_on_remove and material == 0:
         _ca_wake_column(cell, ca_wake_radius_cells)
     _invalidate_material_query_cache()
+
+func set_voxel_at(cell: Vector3i, material: int) -> void:
+    if _rd == null:
+        return
+    if sim_mode == 1:
+        var c := _snap_cell_in_bounds_to_bcc(cell)
+        if c.x < 0:
+            print("VoxelRenderer set_voxel_at (MPM) | invalid cell=%s" % str(cell))
+            return
+        if MaterialRegistry.is_static_material(material):
+            _mpm_set_static_cell(c, material)
+            return
+        if material > 0:
+            mpm_spawn_particle(c, material)
+        return
+    _set_voxel_at_ca(cell, material, true)
+
+func set_voxel_at_no_wake(cell: Vector3i, material: int) -> void:
+    if _rd == null:
+        return
+    if sim_mode == 1:
+        set_voxel_at(cell, material)
+        return
+    _set_voxel_at_ca(cell, material, false)
 
 func set_preview_cells(cells: Array) -> void:
     if _rd == null or !_preview_rid.is_valid():

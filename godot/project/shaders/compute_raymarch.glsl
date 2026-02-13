@@ -57,6 +57,7 @@ const uint INVISIBLE_MATERIAL = 9u;
 const uint PREVIEW_MATERIAL = 10u;
 const uint CURSOR_MATERIAL = 11u;
 const uint FIRE_MATERIAL = 5u;
+const uint TORCH_MATERIAL = 16u;
 const uint MATERIAL_PROPS_STRIDE = 5u;
 
 ivec3 nearest_bcc(vec3 p);
@@ -141,7 +142,9 @@ bool material_blocks_ao(uint mat_id) {
     return mat_id != 0u
         && mat_id != INVISIBLE_MATERIAL
         && mat_id != PREVIEW_MATERIAL
-        && mat_id != CURSOR_MATERIAL;
+        && mat_id != CURSOR_MATERIAL
+        && mat_id != FIRE_MATERIAL
+        && mat_id != TORCH_MATERIAL;
 }
 
 float ao_sample(vec3 sample_cell_pos) {
@@ -607,7 +610,8 @@ void main() {
                                                 if (s_val != 0u
                                                     && s_val != GLASS_MATERIAL
                                                     && s_val != INVISIBLE_MATERIAL
-                                                    && s_val != FIRE_MATERIAL) {
+                                                    && s_val != FIRE_MATERIAL
+                                                    && s_val != TORCH_MATERIAL) {
                                                     vec3 s_center = u.origin.xyz + vec3(s_cell) * u.misc.x;
                                                     vec3 s_lp = (sp - s_center) / u.misc.x;
                                                     float sd = sdf_truncated_octahedron(s_lp) * u.misc.x;
@@ -631,8 +635,9 @@ void main() {
                                     float spec_power = mix(96.0, 10.0, roughness * roughness);
                                     float spec = pow(max(dot(n, half_dir), 0.0), spec_power);
 
-                                    float light_factor = 1.0;
-                                    float ambient = 0.11;
+                                    float voxel_light = light_factor_for_voxel(cell);
+                                    float ambient_base = 0.02;
+                                    float ambient = ambient_base + voxel_light * 0.28;
                                     float ndot_up = clamp(n.y * 0.5 + 0.5, 0.0, 1.0);
                                     vec3 hemi_sky = vec3(0.30, 0.36, 0.44);
                                     vec3 hemi_ground = vec3(0.12, 0.10, 0.08);
@@ -640,7 +645,7 @@ void main() {
                                     float ao_mix = 0.0;
                                     vec3 ambient_color = ambient_tint * (ambient * mix(1.0, ao, ao_mix));
                                     float diffuse = diff * shadow;
-                                    float fill = 0.035;
+                                    float fill = 0.02 + 0.06 * voxel_light;
                                     float specular = spec * shadow * mix(0.22, 0.03, roughness) * 0.9;
 
                                     float dielectric_f0 = mix(0.02, 0.10, specular_level);
@@ -664,7 +669,7 @@ void main() {
                                         + fresnel_term * specular
                                         + ibl;
                                     vec3 emissive = material_emissive(cell_val);
-                                    if (cell_val == FIRE_MATERIAL && max(emissive.r, max(emissive.g, emissive.b)) > 0.0) {
+                                    if ((cell_val == FIRE_MATERIAL || cell_val == TORCH_MATERIAL) && max(emissive.r, max(emissive.g, emissive.b)) > 0.0) {
                                         float flicker = 0.85 + 0.15 * fract(
                                             sin(dot(vec3(cell), vec3(12.9898, 78.233, 37.719))) * 43758.5453
                                         );

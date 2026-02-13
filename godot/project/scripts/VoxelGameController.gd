@@ -3,6 +3,8 @@ extends Node3D
 const MaterialRegistry = preload("res://scripts/MaterialRegistry.gd")
 const WorldGenCavesScript = preload("res://scripts/WorldGenCaves.gd")
 
+const TORCH_FLAME_OFFSET := Vector3i(0, 2, 0)
+
 @export var voxel_renderer_path: NodePath
 @export var player_path: NodePath
 @export var camera_path: NodePath
@@ -69,6 +71,12 @@ const WorldGenCavesScript = preload("res://scripts/WorldGenCaves.gd")
 @export var starter_stack_count: int = 0
 @export var fire_inventory_slot_material_id: int = MaterialRegistry.FIRE_ID
 @export var fire_inventory_count: int = 99
+@export var torch_inventory_slot_material_id: int = MaterialRegistry.TORCH_ID
+@export var torch_inventory_count: int = 24
+@export var torch_wood_material_id: int = MaterialRegistry.WOOD_ID
+@export var torch_flame_material_id: int = MaterialRegistry.TORCH_ID
+@export var torch_fall_steps_per_sec: float = 16.0
+@export var torch_max_steps_per_frame: int = 4
 
 var _renderer: Node = null
 var _player: Node3D = null
@@ -89,6 +97,9 @@ var _inventory_counts: Dictionary = {}
 var _controller_pickup_down: bool = false
 var _controller_place_down: bool = false
 var _material_names: Dictionary = {}
+
+var _torches: Array = []
+var _torch_fall_accum: float = 0.0
 
 func _ready() -> void:
     _renderer = get_node_or_null(voxel_renderer_path)
@@ -121,6 +132,9 @@ func _initialize_scene() -> void:
     _init_attempts = 0
     _renderer.world_rotation = Vector3.ZERO
     _renderer.gravity_dir = Vector3(0.0, -1.0, 0.0)
+
+    _torches.clear()
+    _torch_fall_accum = 0.0
 
     _build_chunk_world()
     _spawn_player_above_chunk()
@@ -194,6 +208,7 @@ func _physics_process(delta: float) -> void:
         return
     _update_controller_look(delta)
     _update_movement(delta)
+    _update_torches(delta)
     _last_scan = _raycast_from_camera()
     _apply_preview(_last_scan)
     _handle_controller_triggers()
@@ -346,6 +361,13 @@ func _pickup_block() -> void:
     var mat := int(hit.get("material", 0))
     if mat == 0:
         return
+    if _is_torch_material(mat):
+        if _pickup_torch(hit_cell, mat):
+            _last_scan = hit
+            _refresh_hotbar_ui()
+            _apply_preview(hit)
+            _update_overlay(hit)
+        return
     _renderer.set_voxel_at(hit_cell, 0)
     _inventory_add(mat, 1)
     _ensure_material_on_hotbar(mat)
@@ -366,9 +388,13 @@ func _place_block() -> void:
     var place_cell := hit.get("empty_cell", Vector3i(-1, -1, -1)) as Vector3i
     if place_cell.x < 0:
         return
-    if int(_renderer.get_cell_material(place_cell)) != 0:
-        return
-    _renderer.set_voxel_at(place_cell, mat_id)
+    if mat_id == torch_inventory_slot_material_id:
+        if !_place_torch(place_cell):
+            return
+    else:
+        if int(_renderer.get_cell_material(place_cell)) != 0:
+            return
+        _renderer.set_voxel_at(place_cell, mat_id)
     _inventory_add(mat_id, -1)
     if _inventory_get(mat_id) <= 0:
         _hotbar_materials[_active_slot] = 0
@@ -377,6 +403,117 @@ func _place_block() -> void:
     _refresh_hotbar_ui()
     _apply_preview(hit)
     _update_overlay(hit)
+
+func _is_torch_material(material_id: int) -> bool:
+    return material_id == torch_wood_material_id or material_id == torch_flame_material_id
+
+func _torch_base_from_hit(hit_cell: Vector3i, hit_mat: int) -> Vector3i:
+    if hit_mat == torch_flame_material_id:
+        return hit_cell - TORCH_FLAME_OFFSET
+    return hit_cell
+
+func _remove_torch_base(base_cell: Vector3i) -> void:
+    for i in range(_torches.size()):
+        if typeof(_torches[i]) == TYPE_VECTOR3I and (_torches[i] as Vector3i) == base_cell:
+            _torches.remove_at(i)
+            return
+
+func _pickup_torch(hit_cell: Vector3i, hit_mat: int) -> bool:
+    if _renderer == null:
+        return false
+    var base := _torch_base_from_hit(hit_cell, hit_mat)
+    var flame := base + TORCH_FLAME_OFFSET
+    if base.x < 0:
+        return false
+    if int(_renderer.get_cell_material(base)) != torch_wood_material_id:
+        return false
+    if int(_renderer.get_cell_material(flame)) != torch_flame_material_id:
+        return false
+    _renderer.set_voxel_at(flame, 0)
+    _renderer.set_voxel_at(base, 0)
+    _remove_torch_base(base)
+    _inventory_add(torch_inventory_slot_material_id, 1)
+    _ensure_material_on_hotbar(torch_inventory_slot_material_id)
+    return true
+
+func _place_torch(base_cell: Vector3i) -> bool:
+    if _renderer == null:
+        return false
+    var grid_extent: int = int(_renderer.chunk_grid) * int(_renderer.chunk_size)
+    var flame := base_cell + TORCH_FLAME_OFFSET
+    if base_cell.x < 0 or base_cell.y < 0 or base_cell.z < 0 or base_cell.x >= grid_extent or base_cell.y >= grid_extent or base_cell.z >= grid_extent:
+        return false
+    if flame.x < 0 or flame.y < 0 or flame.z < 0 or flame.x >= grid_extent or flame.y >= grid_extent or flame.z >= grid_extent:
+        return false
+    if int(_renderer.get_cell_material(base_cell)) != 0:
+        return false
+    if int(_renderer.get_cell_material(flame)) != 0:
+        return false
+    _renderer.set_voxel_at(base_cell, torch_wood_material_id)
+    _renderer.set_voxel_at(flame, torch_flame_material_id)
+    _torches.append(base_cell)
+    return true
+
+func _update_torches(delta: float) -> void:
+    if _renderer == null:
+        return
+    if _torches.is_empty():
+        return
+    var steps_per_sec: float = maxf(0.0, torch_fall_steps_per_sec)
+    if steps_per_sec <= 0.0:
+        return
+    _torch_fall_accum += delta * steps_per_sec
+    var steps: int = int(floor(_torch_fall_accum))
+    if steps <= 0:
+        return
+    _torch_fall_accum -= float(steps)
+    var max_steps: int = maxi(1, torch_max_steps_per_frame)
+    steps = mini(steps, max_steps)
+    for _s in range(steps):
+        _torch_step_fall()
+
+func _torch_step_fall() -> void:
+    if _renderer == null:
+        return
+    var grid_extent: int = int(_renderer.chunk_grid) * int(_renderer.chunk_size)
+    var down := Vector3i(0, -2, 0)
+    var i := 0
+    while i < _torches.size():
+        if typeof(_torches[i]) != TYPE_VECTOR3I:
+            _torches.remove_at(i)
+            continue
+        var base: Vector3i = _torches[i] as Vector3i
+        var flame := base + TORCH_FLAME_OFFSET
+        if base.x < 0 or base.y < 0 or base.z < 0 or base.x >= grid_extent or base.y >= grid_extent or base.z >= grid_extent:
+            _torches.remove_at(i)
+            continue
+        if flame.y < 0 or flame.y >= grid_extent:
+            _torches.remove_at(i)
+            continue
+        if int(_renderer.get_cell_material(base)) != torch_wood_material_id or int(_renderer.get_cell_material(flame)) != torch_flame_material_id:
+            _torches.remove_at(i)
+            continue
+        var next_base := base + down
+        if next_base.y < 0:
+            i += 1
+            continue
+        if next_base.x < 0 or next_base.z < 0 or next_base.x >= grid_extent or next_base.y >= grid_extent or next_base.z >= grid_extent:
+            i += 1
+            continue
+        if int(_renderer.get_cell_material(next_base)) != 0:
+            i += 1
+            continue
+
+        if _renderer.has_method("set_voxel_at_no_wake"):
+            _renderer.set_voxel_at_no_wake(flame, 0)
+            _renderer.set_voxel_at_no_wake(base, torch_flame_material_id)
+            _renderer.set_voxel_at_no_wake(next_base, torch_wood_material_id)
+        else:
+            _renderer.set_voxel_at(flame, 0)
+            _renderer.set_voxel_at(base, torch_flame_material_id)
+            _renderer.set_voxel_at(next_base, torch_wood_material_id)
+        _torches[i] = next_base
+        i += 1
 
 func _apply_preview(hit: Dictionary) -> void:
     if _renderer == null:
@@ -388,6 +525,8 @@ func _apply_preview(hit: Dictionary) -> void:
         var place_cell := hit.get("empty_cell", Vector3i(-1, -1, -1)) as Vector3i
         if place_cell.x >= 0:
             preview.append(place_cell)
+            if _active_slot_material() == torch_inventory_slot_material_id:
+                preview.append(place_cell + TORCH_FLAME_OFFSET)
     if _renderer.has_method("set_cursor_cell"):
         _renderer.set_cursor_cell(cursor)
     if _renderer.has_method("set_preview_cells"):
@@ -685,6 +824,14 @@ func _setup_inventory() -> void:
         write_idx += 1
         if starter_stack_count > 0:
             _inventory_counts[mid] = starter_stack_count
+
+    var torch_mid: int = torch_inventory_slot_material_id
+    if torch_mid > 0 and _hotbar_materials.size() > 1:
+        var torch_slot_idx: int = _hotbar_materials.size() - 2
+        _hotbar_materials[torch_slot_idx] = torch_mid
+        var torch_count: int = maxi(0, torch_inventory_count)
+        if torch_count > 0:
+            _inventory_counts[torch_mid] = maxi(int(_inventory_counts.get(torch_mid, 0)), torch_count)
 
     var fire_mid: int = fire_inventory_slot_material_id
     if fire_mid > 0 and _hotbar_materials.size() > 0:

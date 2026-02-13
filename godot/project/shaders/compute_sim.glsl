@@ -48,6 +48,8 @@ const uint INVISIBLE_MATERIAL = 9u;
 const uint WATER_MATERIAL = 2u;
 const uint OXYGEN_MATERIAL = 3u;
 const uint FIRE_MATERIAL = 5u;
+const uint WOOD_MATERIAL = 15u;
+const uint TORCH_MATERIAL = 16u;
 const uint MATERIAL_PROPS_STRIDE = 5u;
 // Seed packing: upper 16 bits are metadata, low 16 bits are "wealth" (kinetic energy proxy).
 // Bit 31 marks a voxel as "settled"/sleeping: it will not simulate until woken by a CPU-side edit.
@@ -137,8 +139,8 @@ void main() {
     bool is_water = material == WATER_MATERIAL;
     bool is_fire = material == FIRE_MATERIAL;
     uint seed = seed_in.data[self_idx];
-    // Treat fire as a fixed, placeable light source in the prototype (no drift/dissipation).
-    if (material == GLASS_MATERIAL || material == INVISIBLE_MATERIAL || material == FIRE_MATERIAL) {
+    // Treat non-sim materials as fixed blocks (copied through without motion).
+    if (material == GLASS_MATERIAL || material == INVISIBLE_MATERIAL || material == WOOD_MATERIAL || material == TORCH_MATERIAL) {
         if (atomicCompSwap(atlas_out.data[self_idx], 0u, material) == 0u) {
             seed_out.data[self_idx] = 0u;
         }
